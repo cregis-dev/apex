@@ -1,0 +1,81 @@
+{
+  "version": "1",
+  "provider_templates": [
+    {
+      "provider_type": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "OPENAI_API_KEY" },
+      "headers": {},
+      "model_map": {},
+      "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
+    },
+    {
+      "provider_type": "anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "anthropic_base_url": "https://api.anthropic.com/v1",
+      "auth": { "header": "x-api-key", "prefix": "", "key_env": "ANTHROPIC_API_KEY" },
+      "headers": { "anthropic-version": "2023-06-01" },
+      "model_map": {},
+      "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
+    },
+    {
+      "provider_type": "gemini",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta",
+      "auth": { "header": "x-goog-api-key", "prefix": "", "key_env": "GEMINI_API_KEY" },
+      "headers": {},
+      "model_map": {},
+      "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
+    },
+    {
+      "provider_type": "deepseek",
+      "base_url": "https://api.deepseek.com",
+      "anthropic_base_url": "https://api.deepseek.com/anthropic",
+      "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "DEEPSEEK_API_KEY" },
+      "headers": {},
+      "model_map": {},
+      "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
+    },
+    {
+      "provider_type": "moonshot",
+      "base_url": "https://api.moonshot.cn/v1",
+      "anthropic_base_url": "https://api.moonshot.cn/anthropic",
+      "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "MOONSHOT_API_KEY" },
+      "headers": {},
+      "model_map": {},
+      "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
+    },
+    {
+      "provider_type": "minimax",
+      "base_url": "https://api.minimax.io/v1",
+      "anthropic_base_url": "https://api.minimax.io/anthropic",
+      "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "MINIMAX_API_KEY" },
+      "headers": {},
+      "model_map": {},
+      "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
+    },
+    {
+      "provider_type": "ollama",
+      "base_url": "http://localhost:11434",
+      "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "OLLAMA_API_KEY" },
+      "headers": {},
+      "model_map": {},
+      "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
+    },
+    {
+      "provider_type": "jina",
+      "base_url": "https://api.jina.ai/v1",
+      "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "JINA_API_KEY" },
+      "headers": {},
+      "model_map": {},
+      "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
+    },
+    {
+      "provider_type": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "OPENROUTER_API_KEY" },
+      "headers": {},
+      "model_map": {},
+      "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
+    }
+  ]
+}

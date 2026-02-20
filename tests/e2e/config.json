@@ -1,0 +1,63 @@
+{
+  "version": "1",
+  "global": {
+    "listen": "127.0.0.1:12356",
+    "auth": {
+      "mode": "none",
+      "keys": null
+    },
+    "timeouts": {
+      "connect_ms": 5000,
+      "request_ms": 60000,
+      "response_ms": 60000
+    },
+    "retries": {
+      "max_attempts": 1,
+      "backoff_ms": 1000,
+      "retry_on_status": [
+        429,
+        500,
+        502,
+        503,
+        504
+      ]
+    }
+  },
+  "channels": [
+    {
+      "name": "minimax",
+      "provider_type": "minimax",
+      "base_url": "https://api.minimax.io/v1",
+      "api_key": "sk-api-To8VlaBszacZAl_7aZ5iVtpHKIwbteNdxRyfFq9H5VEFct7p6EElSQAJOGMJBgTZg4S7dPH2nGjJ-Jpbgf6ZHstWk4Lpv6JvGichhbfXmT5GpwcsLm8suvU",
+      "model_map": {
+        "gpt-3.5-turbo": "MiniMax-M2.1",
+        "claude-3-5-sonnet-20240620": "MiniMax-M2.1"
+      }
+    }
+  ],
+  "routers": [
+    {
+      "name": "openai_route",
+      "type": "openai",
+      "vkey": "test_key",
+      "channel": "minimax",
+      "fallback_channels": []
+    },
+    {
+      "name": "anthropic_route",
+      "type": "anthropic",
+      "vkey": "test_key",
+      "channel": "minimax",
+      "fallback_channels": []
+    }
+  ],
+  "metrics": {
+    "enabled": false,
+    "listen": "127.0.0.1:9091",
+    "path": "/metrics"
+  },
+  "hot_reload": {
+    "config_path": "tests/e2e/config.json",
+    "watch": false
+  }
+}

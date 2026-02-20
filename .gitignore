@@ -1,0 +1,18 @@
+# Ignore test artifacts
+test-data/
+*.tmp
+*.log
+apex.json
+
+# Rust artifacts
+target/
+**/*.rs.bk
+
+# System files
+.DS_Store
+
+# IDE files
+.vscode/
+.idea/
+.trae/
+_bmad/
