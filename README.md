@@ -1,11 +1,11 @@
 # Apex AI Gateway
 
 Simple, High Performance, High Availability AI Gateway.
-面向企业内部的轻量 AI Gateway，基于 Rust 实现，使用 JSON 配置驱动，支持 OpenAI/Anthropic 兼容入口与 Proxy 转发，提供热加载、超时/重试、fallback 与 Prometheus 指标导出。
+面向企业内部的轻量 AI Gateway，基于 Rust 实现，使用 JSON 配置驱动，支持 OpenAI/Anthropic 兼容入口，提供热加载、超时/重试、fallback 与 Prometheus 指标导出。
 
 ## 功能概览
 
-- OpenAI/Anthropic 兼容入口与 Proxy 路由
+- OpenAI/Anthropic 兼容入口
 - 多 provider channel，按 router 绑定与 fallback 切换
 - 全局鉴权与 router vkey 鉴权
 - connect/request/response 三级超时与重试
@@ -41,7 +41,6 @@ apex channel add --name openai-main
 ```bash
 apex router add \
   --name default-openai \
-  --type openai \
   --channel openai-main
 ```
 
@@ -49,16 +48,23 @@ apex router add \
 
 ```bash
 # 前台运行
-apex serve
+apex gateway start
 
 # 后台运行 (Daemon)
-apex serve -d
+apex gateway start -d
 ```
 
 ### 5) 停止服务
 
 ```bash
-apex stop
+apex gateway stop
+```
+
+### 6) 查看日志
+
+```bash
+# 查看日志目录并实时追踪最新日志
+apex logs
 ```
 
 默认监听：`0.0.0.0:12356`
@@ -93,11 +99,6 @@ curl http://localhost:12356/v1/messages \
   -d '{"model":"claude-3-5-sonnet-20240620","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-### Proxy 转发
-
-```bash
-curl http://localhost:12356/proxy/proxy-router/v1/models
-```
 
 ## 鉴权
 
@@ -132,7 +133,6 @@ curl http://localhost:12356/proxy/proxy-router/v1/models
   "routers": [
     {
       "name": "default-openai",
-      "type": "openai",
       "vkey": "vk_xxxxx",
       "channel": "openai-main",
       "fallback_channels": []
@@ -155,7 +155,7 @@ curl http://localhost:12356/proxy/proxy-router/v1/models
 ## CLI 参考
 
 ```bash
-cargo run -- channel add|update|delete|list
+cargo run -- channel add|update|delete|show|list
 cargo run -- router add|update|delete|list
 ```
 

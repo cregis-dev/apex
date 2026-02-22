@@ -128,14 +128,6 @@ impl ProviderRegistry {
     }
 
     pub fn adapter(&self, channel: &Channel) -> &dyn ProviderAdapter {
-        if let Some(protocol) = &channel.protocol {
-            if protocol == "anthropic" {
-                return self.adapters
-                    .get(&ProviderType::Anthropic)
-                    .map(|item| item.as_ref())
-                    .unwrap_or(self.fallback.as_ref());
-            }
-        }
         self.adapters
             .get(&channel.provider_type)
             .map(|item| item.as_ref())
@@ -628,7 +620,6 @@ mod tests {
             provider_type: ProviderType::Openai,
             base_url: "https://example.com".to_string(),
             api_key: "key".to_string(),
-            protocol: None,
             anthropic_base_url: None,
             headers: None,
             model_map: None,
@@ -675,7 +666,6 @@ mod tests {
             provider_type: ProviderType::Openai,
             base_url: "https://example.com".to_string(),
             api_key: "key".to_string(),
-            protocol: None,
             anthropic_base_url: None,
             headers: None,
             model_map: None,
@@ -704,7 +694,6 @@ mod tests {
             provider_type: ProviderType::Anthropic,
             base_url: "https://example.com".to_string(),
             api_key: "key".to_string(),
-            protocol: None,
             anthropic_base_url: None,
             headers: None,
             model_map: None,
@@ -780,7 +769,6 @@ mod tests {
             provider_type: ProviderType::Anthropic,
             base_url: "https://example.com".to_string(),
             api_key: "key".to_string(),
-            protocol: None,
             anthropic_base_url: None,
             headers: None,
             model_map: None,
@@ -817,7 +805,6 @@ mod tests {
             provider_type: ProviderType::Gemini,
             base_url: "https://example.com".to_string(),
             api_key: "key".to_string(),
-            protocol: None,
             anthropic_base_url: None,
             headers: None,
             model_map: None,
@@ -856,7 +843,6 @@ mod tests {
             provider_type: ProviderType::Openai,
             base_url: "https://example.com".to_string(),
             api_key: "".to_string(),
-            protocol: None,
             anthropic_base_url: None,
             headers: None,
             model_map: None,
@@ -878,7 +864,6 @@ mod tests {
             provider_type: ProviderType::Openai,
             base_url: "https://example.com".to_string(),
             api_key: "".to_string(),
-            protocol: None,
             anthropic_base_url: None,
             headers: Some(extra),
             model_map: None,
@@ -914,7 +899,6 @@ mod tests {
             provider_type: ProviderType::Minimax, // Usually uses DefaultAdapter
             base_url: "https://api.minimax.io/anthropic".to_string(),
             api_key: "key".to_string(),
-            protocol: Some("anthropic".to_string()),
             anthropic_base_url: None,
             headers: None,
             model_map: None,

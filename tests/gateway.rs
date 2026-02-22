@@ -3,7 +3,7 @@ use common::*;
 
 use axum::body::Body;
 use axum::http::StatusCode;
-use apex::config::{Auth, AuthMode, Channel, ProviderType, Router as GatewayRouter};
+use apex::config::{Auth, AuthMode, Channel, ProviderType, Router as GatewayRouter, TargetChannel};
 use apex::server::{build_app, build_state};
 use serde_json::json;
 use tower::ServiceExt;
@@ -17,7 +17,7 @@ async fn e2e_openai_route_success() {
         name: "primary".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream),
-        api_key: "".to_string(), protocol: None,
+        api_key: "".to_string(),
         anthropic_base_url: None,
         headers: None,
         model_map: None,
@@ -26,7 +26,10 @@ async fn e2e_openai_route_success() {
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
         vkey: Some("vk_test".to_string()),
-        channel: "primary".to_string(),
+        channel: None,
+        channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
+        strategy: "round_robin".to_string(),
+        metadata: None,
         fallback_channels: vec![],
     });
 
@@ -56,7 +59,7 @@ async fn e2e_global_auth_required() {
         name: "primary".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream),
-        api_key: "".to_string(), protocol: None,
+        api_key: "".to_string(),
         anthropic_base_url: None,
         headers: None,
         model_map: None,
@@ -65,7 +68,10 @@ async fn e2e_global_auth_required() {
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
         vkey: Some("vk_test".to_string()),
-        channel: "primary".to_string(),
+        channel: None,
+        channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
+        strategy: "round_robin".to_string(),
+        metadata: None,
         fallback_channels: vec![],
     });
 
@@ -92,7 +98,7 @@ async fn e2e_fallback_on_failure() {
         name: "primary".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(primary),
-        api_key: "".to_string(), protocol: None,
+        api_key: "".to_string(),
         anthropic_base_url: None,
         headers: None,
         model_map: None,
@@ -102,7 +108,7 @@ async fn e2e_fallback_on_failure() {
         name: "fallback".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(fallback),
-        api_key: "".to_string(), protocol: None,
+        api_key: "".to_string(),
         anthropic_base_url: None,
         headers: None,
         model_map: None,
@@ -111,7 +117,10 @@ async fn e2e_fallback_on_failure() {
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
         vkey: Some("vk_test".to_string()),
-        channel: "primary".to_string(),
+        channel: None,
+        channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
+        strategy: "round_robin".to_string(),
+        metadata: None,
         fallback_channels: vec!["fallback".to_string()],
     });
 

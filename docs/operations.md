@@ -64,7 +64,6 @@ apex channel add \
 ```bash
 apex router add \
   --name default-openai \
-  --type openai \
   --channel openai-main
 ```
 
@@ -73,7 +72,6 @@ apex router add \
 ```bash
 apex router add \
   --name default-openai \
-  --type openai \
   --channel openai-main \
   --vkey vk_xxxxx
 ```
@@ -82,19 +80,32 @@ apex router add \
 
 ```bash
 # 开发调试
-cargo run -- serve
+cargo run -- gateway start
 
 # 生产环境（后台运行）
-apex serve -d
+apex gateway start -d
 ```
 
 ### 5. 停止服务
 
 ```bash
-apex stop
+apex gateway stop
 ```
 
-默认监听：`0.0.0.0:12356`
+### 6. 查看 channel 详情
+
+```bash
+apex channel show --name openai-main
+```
+
+### 7. 查看列表
+
+```bash
+apex channel list
+apex router list
+```
+
+默认 channel list 不显示 Base URL，如需查看完整信息请使用 `show` 命令。
 
 ## 调用示例
 
@@ -115,12 +126,6 @@ curl http://localhost:12356/v1/messages \
   -H "x-api-key: <router-vkey>" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"claude-3-5-sonnet-20240620","messages":[{"role":"user","content":"hello"}]}'
-```
-
-### Proxy 转发
-
-```bash
-curl http://localhost:12356/proxy/proxy-router/v1/models
 ```
 
 ## 鉴权
@@ -180,7 +185,6 @@ Apex 支持通过标准请求头传递凭证：
   "routers": [
     {
       "name": "default-openai",
-      "type": "openai",
       "vkey": "vk_xxxxx",
       "channel": "openai-main",
       "fallback_channels": []

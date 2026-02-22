@@ -8,7 +8,7 @@
 ## 范围
 - 仅支持 JSON 配置文件
 - 无 Web UI，仅 CLI 管理
-- 支持 OpenAI/Anthropic 兼容入口与 Proxy 转发
+- 支持 OpenAI/Anthropic 兼容入口
 
 ## Provider 支持范围
 - OpenAI
@@ -25,7 +25,6 @@
 ## 用户与场景
 - 平台管理员：通过 CLI 管理 channel/router 和配置
 - 业务调用方：通过 vkey 请求 OpenAI/Anthropic 兼容接口
-- 代理转发：使用 proxy 路由做原样转发
 
 ## 路由类型与对外路径
 - OpenAI 兼容
@@ -34,9 +33,6 @@
 - Anthropic 兼容
   - Base URL：`https://<gateway-host>:12356`
   - 入口：`/v1/messages`
-- Proxy
-  - Base URL：`https://<gateway-host>:12356`
-  - 入口：`/proxy/{router_name}/*`
 
 ## 鉴权与密钥
 - Router vkey 用于终端用户访问（OpenAI/Anthropic 入口）
@@ -65,12 +61,13 @@
   - 默认配置路径：`~/.apex/config.json`
   - 默认监听：`0.0.0.0:12356`
   - 默认鉴权：none
-- channel 与 router 支持 add/update/delete/list
+- channel 支持 add/update/delete/show/list
+- router 支持 add/update/delete/list
 - channel add 时 provider 采用选择式
 - list 支持 `--json` 输出
 
 ## 请求处理与策略
-- 路由匹配：按路由类型与 vkey / router_name 定位 router
+- 路由匹配：按路由类型与 vkey 定位 router
 - 转发顺序：主 channel → fallback_channels
 - 单 channel 重试：同一 channel 内按 max_attempts 重试
 - fallback 触发：当状态码命中 retry_on_status 且重试耗尽后进入下一个 channel
@@ -83,10 +80,6 @@
 - Anthropic：x-api-key: {api_key}，默认追加 anthropic-version: 2023-06-01
 - Gemini：x-goog-api-key: {api_key}
 - model_map：对请求体 model 字段做映射
-
-## Proxy 规则
-- proxy 路由通过 `/proxy/{router_name}/*` 绑定
-- header 透传使用黑名单策略
 
 ## 指标
 - apex_requests_total{route,router}
@@ -106,7 +99,7 @@
 - 配置热加载失败时保持旧配置并记录错误
 
 ## 验收标准
-- 支持 OpenAI/Anthropic 兼容路径与 Proxy 路由
+- 支持 OpenAI/Anthropic 兼容路径
 - 支持 channel/router 的增删改查与 JSON 输出
 - 支持多 channel fallback 与 retry_on_status
 - 支持热加载失败保持旧配置并输出错误

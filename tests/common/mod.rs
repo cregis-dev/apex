@@ -98,8 +98,12 @@ pub fn base_config() -> Config {
             retries: Retries {
                 max_attempts: 2,
                 backoff_ms: 20,
-                retry_on_status: vec![429, 500, 502, 503, 504],
+                retry_on_status: vec![500, 502],
             },
+        },
+        logging: apex::config::Logging {
+            level: "info".to_string(),
+            dir: None,
         },
         channels: vec![],
         routers: vec![],
@@ -109,7 +113,7 @@ pub fn base_config() -> Config {
             path: "/metrics".to_string(),
         },
         hot_reload: HotReload {
-            config_path: "test".to_string(),
+            config_path: "".to_string(),
             watch: false,
         },
     }

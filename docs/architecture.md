@@ -8,7 +8,7 @@ status: draft
 ## 架构目标
 - 面向企业内部使用的轻量 Gateway
 - Rust 单体服务 + JSON 配置
-- 提供 OpenAI/Anthropic 兼容接口与 Proxy 转发
+- 提供 OpenAI/Anthropic 兼容接口
 - 支持热加载、超时/重试、fallback 与 Prometheus 指标
 
 ## 当前实现状态
@@ -28,7 +28,7 @@ status: draft
 ### 网关入口层
 - HTTP 服务监听 global.listen
 - 统一鉴权入口：global.auth
-- 路由到 OpenAI/Anthropic 兼容接口或 Proxy
+- 路由到 OpenAI/Anthropic 兼容接口
 
 ### 路由与策略
 - Router 绑定主 channel，可选 fallback_channels
@@ -61,7 +61,7 @@ status: draft
 - headers / model_map / timeouts
 
 ### Router
-- name / type / channel / fallback_channels / vkey
+- name / channel / fallback_channels / vkey
 
 ### Metrics
 - enabled / listen / path
@@ -71,7 +71,7 @@ status: draft
 
 ## 请求流程
 1. 接收请求并做入口鉴权
-2. 根据路径识别 OpenAI/Anthropic/Proxy 路由
+2. 根据路径识别 OpenAI/Anthropic 路由
 3. 解析 router，选择主 channel
 4. 发送上游请求，应用超时与重试
 5. 触发 fallback 时切换备用 channel
@@ -80,12 +80,10 @@ status: draft
 ## 接口与路由约定
 - OpenAI 兼容路由：/v1/chat/completions、/v1/completions、/v1/embeddings、/v1/models
 - Anthropic 兼容路由：/v1/messages
-- Proxy 路由：/proxy/{router_name}/{path...}
 
 ## 鉴权约定
 - 入口鉴权：global.auth.mode=api_key 时读取 Authorization (Bearer) 或 x-api-key
 - Router vkey：通过 Authorization (Bearer) 或 x-api-key 携带
-- Proxy 路由不要求 vkey，仅通过 router_name 选择 router
 
 ## 转发与模型映射
 - 上游请求基于 channel.base_url 与原路径拼接

@@ -1,5 +1,6 @@
 use crate::config::{AuthMode, Config};
 use crate::metrics::MetricsState;
+use crate::router_selector::RouterSelector;
 use crate::providers::{
     prepare_request,
     ProviderRegistry, RouteKind,
@@ -27,6 +28,7 @@ pub struct AppState {
     pub providers: Arc<ProviderRegistry>,
     pub access_audit: Arc<dyn AccessAudit>,
     pub rate_limiter: Arc<dyn RateLimiter>,
+    pub selector: Arc<RouterSelector>,
     pub client: reqwest::Client,
 }
 
@@ -67,6 +69,7 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
         providers: Arc::new(ProviderRegistry::new()),
         access_audit: Arc::new(NoOpAccessAudit),
         rate_limiter: Arc::new(NoOpRateLimiter),
+        selector: Arc::new(RouterSelector::new()),
         client,
     }))
 }
@@ -252,19 +255,44 @@ async fn process_request(
          return error_response(StatusCode::NOT_FOUND, "router not found");
     };
 
+    tracing::info!("Router resolved: {:?} (vkey=***)", router.name);
+
     // 3. Resolve Channels
     let mut channels = Vec::new();
-    if let Some(ch) = config.channels.iter().find(|c| c.name == router.channel) {
-        channels.push(ch);
+    
+    // Parse model from body to use in routing
+    let model_name = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        json.get("model").and_then(|v| v.as_str()).map(|s| s.to_string())
+    } else {
+        None
+    };
+    let model_name_str = model_name.as_deref().unwrap_or("default");
+
+    if let Some(ch_name) = state.selector.select_channel(router, model_name_str) {
+        if let Some(ch) = config.channels.iter().find(|c| c.name == ch_name) {
+            channels.push(ch);
+            tracing::info!(
+                "Channel selected: {:?} (strategy={}, model={})", 
+                ch.name, 
+                router.strategy,
+                model_name_str
+            );
+        }
     }
+    
+    // Add fallbacks
     for fb_name in &router.fallback_channels {
          if let Some(ch) = config.channels.iter().find(|c| c.name == *fb_name) {
-            channels.push(ch);
+             // Avoid duplicates
+             if !channels.iter().any(|c| c.name == ch.name) {
+                channels.push(ch);
+             }
         }
     }
     
     if channels.is_empty() {
-        return error_response(StatusCode::BAD_GATEWAY, "no channels configured");
+        tracing::warn!("No channels configured or matched for router: {}", router_name);
+        return error_response(StatusCode::BAD_GATEWAY, "no channels configured or matched");
     }
 
     let route_label = match route {
@@ -283,11 +311,12 @@ async fn process_request(
 
     for (index, channel) in channels.iter().enumerate() {
          if index > 0 {
+             tracing::warn!("Switching to fallback channel: {}", channel.name);
              state.metrics.fallback_total.with_label_values(&[&router_name, &channel.name]).inc();
          }
 
          if !state.rate_limiter.check(&channel.provider_type) {
-             println!("Rate limit exceeded for provider: {:?}", channel.provider_type);
+             tracing::warn!("Rate limit exceeded for provider: {:?}", channel.provider_type);
              continue;
          }
 
@@ -320,6 +349,7 @@ async fn process_request(
                  Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
              };
 
+             tracing::debug!("Upstream request to {:?}", req_built.url());
              let resp_result = state.client.execute(req_built).await;
              
              match resp_result {
@@ -332,10 +362,12 @@ async fn process_request(
 
                      let status = resp.status();
                      if status.is_success() {
+                         tracing::info!("Upstream success: {} ({}ms)", status, elapsed);
                          state.access_audit.audit(&channel.provider_type, route, true);
                          return adapter.handle_response(route, resp, Duration::from_millis(config.global.timeouts.response_ms));
                      }
                      
+                     tracing::warn!("Upstream failed: {} ({}ms)", status, elapsed);
                      state.access_audit.audit(&channel.provider_type, route, false);
                      
                      // Check if retryable
@@ -344,6 +376,7 @@ async fn process_request(
                          let status_code = status.as_u16();
                          // Assuming retry_on is Vec<u16>
                          if retry_on.contains(&status_code) {
+                             tracing::warn!("Retrying (attempt {}/{}) due to status {}", attempt + 1, max_attempts, status_code);
                              tokio::time::sleep(Duration::from_millis(config.global.retries.backoff_ms)).await;
                              continue;
                          }
@@ -365,9 +398,10 @@ async fn process_request(
                      }
                  },
                  Err(e) => {
-                     println!("Upstream request error: {}", e);
+                     tracing::error!("Upstream request error: {}", e);
                      state.access_audit.audit(&channel.provider_type, route, false);
                      if attempt + 1 < max_attempts {
+                         tracing::warn!("Retrying (attempt {}/{}) due to error", attempt + 1, max_attempts);
                          tokio::time::sleep(Duration::from_millis(config.global.retries.backoff_ms)).await;
                          continue;
                      }
@@ -383,7 +417,7 @@ async fn process_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ProviderType, Retries, Timeouts, Global, Auth, Channel, Router as ConfigRouter};
+    use crate::config::{ProviderType, Retries, Timeouts, Global, Auth, Channel};
     use crate::providers::{AccessAudit, RateLimiter, RouteKind};
     use std::sync::Mutex;
 
@@ -436,13 +470,16 @@ mod tests {
                 watch: false,
                 config_path: "/tmp/config.json".to_string(),
             },
+            logging: crate::config::Logging {
+                level: "info".to_string(),
+                dir: None,
+            },
             channels: vec![
                 Channel {
                     name: "test-channel".to_string(),
                     provider_type: ProviderType::Openai,
                     base_url: "http://example.com".to_string(),
-                    api_key: "key".to_string(),
-                    protocol: None,
+                    api_key: "test-key".to_string(),
                     anthropic_base_url: None,
                     headers: None,
                     model_map: None,
@@ -453,7 +490,15 @@ mod tests {
                 crate::config::Router {
                     name: "test-router".to_string(),
                     vkey: Some("test-vkey".to_string()),
-                    channel: "test-channel".to_string(),
+                    channel: None,
+                    channels: vec![
+                        crate::config::TargetChannel {
+                            name: "test-channel".to_string(),
+                            weight: 1,
+                        }
+                    ],
+                    strategy: "round_robin".to_string(),
+                    metadata: None,
                     fallback_channels: vec![],
                 }
             ],
@@ -471,6 +516,7 @@ mod tests {
             providers: Arc::new(ProviderRegistry::new()),
             access_audit: Arc::new(MockAccessAudit { calls: audit_calls.clone() }),
             rate_limiter: Arc::new(MockRateLimiter { allow: false }), // Block everything
+            selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
         });
 
@@ -497,6 +543,7 @@ mod tests {
             providers: Arc::new(ProviderRegistry::new()),
             access_audit: Arc::new(MockAccessAudit { calls: audit_calls.clone() }),
             rate_limiter: Arc::new(MockRateLimiter { allow: true }),
+            selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
         });
 
@@ -507,7 +554,7 @@ mod tests {
             .body(Body::from("{}"))
             .unwrap();
 
-        let resp = handle_openai(State(state), req).await;
+        let _ = handle_openai(State(state), req).await;
         
         let calls = audit_calls.lock().unwrap();
         assert!(!calls.is_empty());
@@ -524,5 +571,58 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer token".parse().unwrap());
         assert_eq!(read_auth_token(&headers, "authorization"), Some("token".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_routing_logic() {
+        let mut config = create_test_config();
+        
+        // Add another channel
+        config.channels.push(Channel {
+            name: "ch2".to_string(),
+            provider_type: ProviderType::Anthropic, // Distinct provider
+            base_url: "http://example.com".to_string(),
+            api_key: "k2".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        });
+        
+        // Update router to match "gpt-4" to "ch2"
+        let router = &mut config.routers[0];
+        router.channels.push(crate::config::TargetChannel { name: "ch2".to_string(), weight: 1 });
+        router.metadata = Some(crate::config::RouterMetadata {
+            model_matcher: std::collections::HashMap::from([
+                ("gpt-4".to_string(), "ch2".to_string())
+            ])
+        });
+
+        let audit_calls = Arc::new(Mutex::new(Vec::new()));
+        
+        let state = Arc::new(AppState {
+            config: Arc::new(RwLock::new(config)),
+            metrics: Arc::new(MetricsState::new().unwrap()),
+            providers: Arc::new(ProviderRegistry::new()),
+            access_audit: Arc::new(MockAccessAudit { calls: audit_calls.clone() }),
+            rate_limiter: Arc::new(MockRateLimiter { allow: true }),
+            selector: Arc::new(RouterSelector::new()),
+            client: reqwest::Client::new(),
+        });
+
+        // Request with model "gpt-4" -> should go to ch2 (Anthropic)
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer test-vkey")
+            .body(Body::from(r#"{"model": "gpt-4"}"#))
+            .unwrap();
+
+        let _ = handle_openai(State(state.clone()), req).await;
+        
+        let calls = audit_calls.lock().unwrap();
+        assert!(!calls.is_empty(), "should have made a call");
+        // The last call should be Anthropic because that's ch2's provider type
+        assert_eq!(calls.last().unwrap().0, ProviderType::Anthropic);
     }
 }

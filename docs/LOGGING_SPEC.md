@@ -44,20 +44,25 @@ Details about the upstream call.
 - `upstream_status`: 200
 - `upstream_latency`: 120ms
 
-## 5. Implementation Plan
-1.  **Add Dependencies**:
-    - `tracing`
-    - `tracing-subscriber` (features: `env-filter`, `json`)
-    - `tower-http` (features: `trace`, `request-id`, `util`)
+## 6. Configuration & Operations
 
-2.  **Initialize Subscriber**:
-    - Configure `RUST_LOG` env var support (default: `info`).
-    - Use `fmt::layer()` with JSON formatting in production, compact in dev.
+### 6.1 Configuration
+Configure logging via `config.json`:
+```json
+{
+  "logging": {
+    "level": "info",    // trace, debug, info, warn, error
+    "dir": "/var/log/apex" // Optional: override default log directory
+  }
+}
+```
 
-3.  **Add Middleware**:
-    - `TraceLayer` for automatic access logging.
-    - `RequestIdLayer` to generate and inject `x-request-id`.
+### 6.2 Log Rotation
+- **Daemon Mode**: Logs are written to `apex.log.YYYY-MM-DD` with daily rotation.
+- **Foreground Mode**: Logs are output to stdout.
 
-4.  **Instrument Code**:
-    - Add `#[tracing::instrument]` to critical functions (`process_request`, `handle_response`).
-    - Replace `println!` with `tracing::info!` / `tracing::error!`.
+### 6.3 Viewing Logs
+Use the CLI command to locate and tail the latest log file:
+```bash
+apex logs
+```
