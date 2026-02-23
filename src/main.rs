@@ -47,7 +47,11 @@ enum GatewayCommand {
     Stop,
 }
 
-fn get_daemon_dir() -> PathBuf {
+fn get_log_dir(configured_dir: Option<String>) -> PathBuf {
+    if let Some(dir) = configured_dir {
+        return PathBuf::from(dir);
+    }
+
     if cfg!(target_os = "macos") {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         home.join("Library").join("Logs").join("apex")
@@ -169,10 +173,21 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     
     // Check for daemon mode in Gateway Start command
-    let is_daemon = matches!(cli.command, Commands::Gateway { command: GatewayCommand::Start { daemon: true, .. } });
+    let (is_daemon, start_config) = if let Commands::Gateway { command: GatewayCommand::Start { daemon, config } } = &cli.command {
+        (*daemon, config.clone())
+    } else {
+        (false, None)
+    };
+
+    // Load config to get log level and dir
+    let config_path = resolve_config_path(cli.config.clone().or(start_config));
+    let config = config::load_config(&config_path).ok();
+    
+    let log_level = config.as_ref().map(|c| c.logging.level.clone()).unwrap_or_else(|| "info".to_string());
+    let log_dir_override = config.as_ref().and_then(|c| c.logging.dir.clone());
+    let log_dir = get_log_dir(log_dir_override);
 
     if is_daemon {
-        let log_dir = get_daemon_dir();
         std::fs::create_dir_all(&log_dir).context("failed to create log dir")?;
         
         let stdout = std::fs::File::create(log_dir.join("stdout.log")).unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
@@ -186,20 +201,11 @@ fn main() -> anyhow::Result<()> {
             .start()
             .context("failed to start daemon")?;
     }
-
-    // Load config to get log level (if available)
-    let log_level = if let Ok(config) = config::load_config(&resolve_config_path(cli.config.clone())) {
-        config.logging.level
-    } else {
-        "info".to_string()
-    };
     
     let env_filter = format!("apex={},tower_http={}", log_level, log_level);
 
     let _guard = if is_daemon {
         // Setup daemon logging
-        let log_dir = get_daemon_dir();
-        
         let file_appender = tracing_appender::rolling::daily(&log_dir, "apex.log");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
         
@@ -239,16 +245,19 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
                 let path = resolve_config_path(cli.config.clone().or_else(|| config.clone()));
                 server::run_server(path).await?;
             }
-            GatewayCommand::Stop => handle_stop_command()?,
+            GatewayCommand::Stop => handle_stop_command(&cli)?,
         },
         Commands::Status => handle_status_command(&cli)?,
-        Commands::Logs => handle_logs_command()?,
+        Commands::Logs => handle_logs_command(&cli)?,
     }
     Ok(())
 }
 
-fn handle_logs_command() -> anyhow::Result<()> {
-    let log_dir = get_daemon_dir();
+fn handle_logs_command(cli: &Cli) -> anyhow::Result<()> {
+    let path = resolve_config_path(cli.config.clone());
+    let config = config::load_config(&path).ok();
+    let log_dir_override = config.as_ref().and_then(|c| c.logging.dir.clone());
+    let log_dir = get_log_dir(log_dir_override);
     
     // Find the latest log file.
     // tracing_appender::rolling::daily creates files like "apex.log.YYYY-MM-DD"
@@ -294,8 +303,13 @@ fn handle_logs_command() -> anyhow::Result<()> {
 }
 
 fn handle_status_command(cli: &Cli) -> anyhow::Result<()> {
+    // Load config to find log dir
+    let path = resolve_config_path(cli.config.clone());
+    let config = config::load_config(&path).ok();
+    let log_dir_override = config.as_ref().and_then(|c| c.logging.dir.clone());
+    let log_dir = get_log_dir(log_dir_override);
+
     // Check daemon status
-    let log_dir = get_daemon_dir();
     let pid_path = log_dir.join("apex.pid");
     let mut status = "Stopped";
     let mut pid_info = String::new();
@@ -336,8 +350,12 @@ fn handle_status_command(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_stop_command() -> anyhow::Result<()> {
-    let log_dir = get_daemon_dir();
+fn handle_stop_command(cli: &Cli) -> anyhow::Result<()> {
+    let path = resolve_config_path(cli.config.clone());
+    let config = config::load_config(&path).ok();
+    let log_dir_override = config.as_ref().and_then(|c| c.logging.dir.clone());
+    let log_dir = get_log_dir(log_dir_override);
+    
     let pid_path = log_dir.join("apex.pid");
     
     if !pid_path.exists() {
