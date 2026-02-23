@@ -31,7 +31,7 @@ async fn e2e_openai_route_success() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
-            match_spec: MatchSpec { model: "*".to_string() },
+            match_spec: MatchSpec { models: vec!["*".to_string()] },
             channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
             strategy: "priority".to_string(),
         }],
@@ -126,7 +126,7 @@ async fn e2e_fallback_on_failure() {
         metadata: None,
         fallback_channels: vec!["fallback".to_string()],
         rules: vec![RouterRule {
-            match_spec: MatchSpec { model: "*".to_string() },
+            match_spec: MatchSpec { models: vec!["*".to_string()] },
             channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
             strategy: "priority".to_string(),
         }],

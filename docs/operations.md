@@ -227,7 +227,7 @@ Apex 使用**规则链 (Rules Chain)** 来决定如何处理请求。Router 会�
         {
           "//": "规则1：Minimax 模型 -> 双路负载均衡",
           "match": {
-            "model": "abab*"
+            "models": ["abab*", "def*"]
           },
           "strategy": "round_robin",
           "channels": [
@@ -236,13 +236,12 @@ Apex 使用**规则链 (Rules Chain)** 来决定如何处理请求。Router 会�
           ]
         },
         {
-          "//": "规则2：Gemini 模型 -> 走 Google 官方",
+          "//": "规则2：Gemini 模型 -> 走 Google 官方 (单 Channel 可省略 strategy)",
           "match": {
             "model": "gemini*"
           },
-          "strategy": "priority",
           "channels": [
-            { "name": "google-official", "weight": 1 }
+            { "name": "google-official" }
           ]
         },
         {
@@ -262,7 +261,10 @@ Apex 使用**规则链 (Rules Chain)** 来决定如何处理请求。Router 会�
 }
 ```
 
-> **注意**: 旧版本的 `model_matcher` 和顶层 `channels` 配置仍然支持，但在加载时会自动转换为上述规则格式。建议新配置直接使用 `rules`。
+> **配置说明**: 
+> 1. `match` 字段支持 `model` (单字符串) 或 `models` (字符串数组) 两种格式，方便配置多组匹配规则。
+> 2. `strategy` 字段默认为 `round_robin`。如果 `channels` 只有一个，可以省略 `strategy` 和 `weight`。
+> 3. 旧版本的 `model_matcher` 和顶层 `channels` 配置仍然支持，但在加载时会自动转换为上述规则格式。建议新配置直接使用 `rules`。
 
 ## 调用示例
 

@@ -48,14 +48,16 @@ impl RouterSelector {
         
         // Let's just find the rule first.
         let matched_rule = router.rules.iter().find(|rule| {
-            // 1. Exact match
-            if rule.match_spec.model == model {
-                return true;
-            }
-            // 2. Glob match
-            if let Ok(pattern) = Pattern::new(&rule.match_spec.model) {
-                if pattern.matches(model) {
+            for pattern_str in &rule.match_spec.models {
+                // 1. Exact match
+                if pattern_str == model {
                     return true;
+                }
+                // 2. Glob match
+                if let Ok(pattern) = Pattern::new(pattern_str) {
+                    if pattern.matches(model) {
+                        return true;
+                    }
                 }
             }
             false
@@ -134,7 +136,7 @@ mod tests {
         let selector = RouterSelector::new();
         let rules = vec![
             RouterRule {
-                match_spec: MatchSpec { model: "gpt-4".to_string() },
+                match_spec: MatchSpec { models: vec!["gpt-4".to_string()] },
                 channels: vec![create_channel("ch1", 1), create_channel("ch2", 1)],
                 strategy: "priority".to_string(),
             }
@@ -157,7 +159,7 @@ mod tests {
         let selector = RouterSelector::new();
         let rules = vec![
             RouterRule {
-                match_spec: MatchSpec { model: "gpt-*".to_string() },
+                match_spec: MatchSpec { models: vec!["gpt-*".to_string()] },
                 channels: vec![create_channel("ch1", 1)],
                 strategy: "priority".to_string(),
             }
@@ -174,7 +176,7 @@ mod tests {
         let selector = RouterSelector::new();
         let rules = vec![
             RouterRule {
-                match_spec: MatchSpec { model: "*".to_string() },
+                match_spec: MatchSpec { models: vec!["*".to_string()] },
                 channels: vec![create_channel("A", 1), create_channel("B", 1)],
                 strategy: "round_robin".to_string(),
             }
@@ -198,7 +200,7 @@ mod tests {
         let selector = RouterSelector::new();
         let rules = vec![
             RouterRule {
-                match_spec: MatchSpec { model: "*".to_string() },
+                match_spec: MatchSpec { models: vec!["*".to_string()] },
                 channels: vec![create_channel("A", 10), create_channel("B", 0)], // B has 0 weight
                 strategy: "round_robin".to_string(),
             }

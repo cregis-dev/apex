@@ -501,7 +501,7 @@ mod tests {
                     fallback_channels: vec![],
                     rules: vec![
                         crate::config::RouterRule {
-                            match_spec: crate::config::MatchSpec { model: "*".to_string() },
+                            match_spec: crate::config::MatchSpec { models: vec!["*".to_string()] },
                             channels: vec![
                                 crate::config::TargetChannel {
                                     name: "test-channel".to_string(),
@@ -603,7 +603,7 @@ mod tests {
         // Update router to match "gpt-4" to "ch2"
         let router = &mut config.routers[0];
         router.rules.insert(0, crate::config::RouterRule {
-             match_spec: crate::config::MatchSpec { model: "gpt-4".to_string() },
+             match_spec: crate::config::MatchSpec { models: vec!["gpt-4".to_string()] },
              channels: vec![crate::config::TargetChannel { name: "ch2".to_string(), weight: 1 }],
              strategy: "priority".to_string(),
         });

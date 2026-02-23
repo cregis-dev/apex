@@ -131,7 +131,25 @@ pub struct RouterRule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchSpec {
-    pub model: String,
+    #[serde(default, deserialize_with = "string_or_vec", alias = "model")]
+    pub models: Vec<String>,
+}
+
+fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        String(String),
+        Vec(Vec<String>),
+    }
+
+    match StringOrVec::deserialize(deserializer)? {
+        StringOrVec::String(s) => Ok(vec![s]),
+        StringOrVec::Vec(v) => Ok(v),
+    }
 }
 
 fn default_strategy() -> String {
@@ -179,7 +197,7 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
                 for (pattern, target_channel_name) in &metadata.model_matcher {
                     router.rules.push(RouterRule {
                         match_spec: MatchSpec {
-                            model: pattern.clone(),
+                            models: vec![pattern.clone()],
                         },
                         channels: vec![TargetChannel {
                             name: target_channel_name.clone(),
@@ -194,7 +212,7 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
             if !router.channels.is_empty() {
                 router.rules.push(RouterRule {
                     match_spec: MatchSpec {
-                        model: "*".to_string(),
+                        models: vec!["*".to_string()],
                     },
                     channels: router.channels.clone(),
                     strategy: router.strategy.clone(),
