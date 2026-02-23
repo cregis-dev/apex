@@ -3,7 +3,7 @@ use common::*;
 
 use axum::body::Body;
 use axum::http::StatusCode;
-use apex::config::{Auth, AuthMode, Channel, ProviderType, Router as GatewayRouter, TargetChannel};
+use apex::config::{Auth, AuthMode, Channel, MatchSpec, ProviderType, Router as GatewayRouter, RouterRule, TargetChannel};
 use apex::server::{build_app, build_state};
 use serde_json::json;
 use tower::ServiceExt;
@@ -26,11 +26,15 @@ async fn e2e_openai_route_success() {
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
         vkey: Some("vk_test".to_string()),
-        channel: None,
         channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
         strategy: "round_robin".to_string(),
         metadata: None,
         fallback_channels: vec![],
+        rules: vec![RouterRule {
+            match_spec: MatchSpec { model: "*".to_string() },
+            channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
+            strategy: "priority".to_string(),
+        }],
     });
 
     let state = build_state(config).unwrap();
@@ -68,11 +72,11 @@ async fn e2e_global_auth_required() {
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
         vkey: Some("vk_test".to_string()),
-        channel: None,
         channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
         strategy: "round_robin".to_string(),
         metadata: None,
         fallback_channels: vec![],
+        rules: vec![],
     });
 
     let state = build_state(config).unwrap();
@@ -117,11 +121,15 @@ async fn e2e_fallback_on_failure() {
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
         vkey: Some("vk_test".to_string()),
-        channel: None,
         channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
         strategy: "round_robin".to_string(),
         metadata: None,
         fallback_channels: vec!["fallback".to_string()],
+        rules: vec![RouterRule {
+            match_spec: MatchSpec { model: "*".to_string() },
+            channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
+            strategy: "priority".to_string(),
+        }],
     });
 
     let state = build_state(config).unwrap();

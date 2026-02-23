@@ -133,8 +133,6 @@ struct ChannelUpdateArgs {
 struct RouterAddArgs {
     #[arg(long)]
     name: String,
-    #[arg(long)]
-    channel: Option<String>,
     #[arg(long = "channels", value_delimiter = ',', num_args = 0..)]
     channels: Vec<String>,
     #[arg(long, default_value = "round_robin")]
@@ -151,8 +149,6 @@ struct RouterAddArgs {
 struct RouterUpdateArgs {
     #[arg(long)]
     name: String,
-    #[arg(long)]
-    channel: Option<String>,
     #[arg(long = "channels", value_delimiter = ',', num_args = 0..)]
     channels: Vec<String>,
     #[arg(long)]
@@ -486,14 +482,14 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
             let anthropic_base_url = match &args.anthropic_base_url {
                 Some(url) => Some(url.clone()),
                 None => {
-                    if let Some(t) = template {
-                        if let Some(default_anthropic) = &t.anthropic_base_url {
-                            Some(inquire::Text::new("Anthropic Base URL")
-                                .with_default(default_anthropic)
-                                .prompt()?)
-                        } else {
-                            None
-                        }
+                    let default_anthropic = template
+                        .and_then(|t| t.anthropic_base_url.clone())
+                        .or_else(|| get_default_anthropic_base_url(&provider).map(|s| s.to_string()));
+
+                    if let Some(default) = default_anthropic {
+                         Some(inquire::Text::new("Anthropic Base URL")
+                            .with_default(&default)
+                            .prompt()?)
                     } else {
                         None
                     }
@@ -566,13 +562,15 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
 
                  // Anthropic Base URL
                  if args.anthropic_base_url.is_none() && !args.clear_anthropic_base_url {
-                     if let Some(t) = template {
-                         if let Some(default_anthropic) = &t.anthropic_base_url {
-                             let new_url = inquire::Text::new("Anthropic Base URL")
-                                .with_default(default_anthropic)
-                                .prompt()?;
-                             config.channels[channel_idx].anthropic_base_url = Some(new_url);
-                         }
+                     let default_anthropic = template
+                        .and_then(|t| t.anthropic_base_url.clone())
+                        .or_else(|| get_default_anthropic_base_url(&config.channels[channel_idx].provider_type).map(|s| s.to_string()));
+
+                     if let Some(default) = default_anthropic {
+                         let new_url = inquire::Text::new("Anthropic Base URL")
+                            .with_default(&default)
+                            .prompt()?;
+                         config.channels[channel_idx].anthropic_base_url = Some(new_url);
                      }
                  }
             }
@@ -631,12 +629,6 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
             // Remove channel from all routers' channel lists
             for router in &mut config.routers {
                 router.channels.retain(|c| c.name != *name);
-                // Also remove from legacy field if it matches
-                if let Some(ch) = &router.channel {
-                    if ch == name {
-                        router.channel = None;
-                    }
-                }
                 router.fallback_channels.retain(|c| c != name);
             }
             // Remove routers that have no channels left
@@ -706,12 +698,9 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             
             let mut target_channels = parse_target_channels(&args.channels)?;
             
-            // If no explicit channels list, try legacy channel arg or prompt
+            // If no explicit channels list, prompt
             if target_channels.is_empty() {
-                let channel_name = match &args.channel {
-                    Some(c) => c.clone(),
-                    None => prompt_channel_select(&config.channels, None)?,
-                };
+                let channel_name = prompt_channel_select(&config.channels, None)?;
                 target_channels.push(TargetChannel { name: channel_name, weight: 1 });
             }
 
@@ -727,11 +716,11 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             let router = Router {
                 name: args.name.clone(),
                 vkey,
-                channel: None,
                 channels: target_channels,
                 strategy: args.strategy.clone(),
                 metadata,
                 fallback_channels: args.fallback_channels.clone(),
+                rules: vec![],
             };
             config.routers.push(router);
             config::save_config(&path, &config)?;
@@ -744,8 +733,7 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                 .ok_or_else(|| anyhow::anyhow!("router not found: {}", args.name))?;
 
             // Check if we are in "interactive mode" (no explicit updates)
-            let is_interactive = args.channel.is_none() 
-                && args.channels.is_empty()
+            let is_interactive = args.channels.is_empty()
                 && args.fallback_channels.is_empty() 
                 && !args.clear_fallbacks 
                 && args.vkey.is_none() 
@@ -754,7 +742,6 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                 && args.model_matchers.is_empty();
 
             let mut new_channels = parse_target_channels(&args.channels)?;
-            let mut new_channel_name: Option<String> = args.channel.clone();
 
             if is_interactive {
                 println!("进入交互式更新模式 (按 Ctrl+C 取消)...");
@@ -763,25 +750,21 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                 // Channel
                 let current_channel = current_router.channels.first()
                     .map(|c| c.name.as_str())
-                    .or(current_router.channel.as_deref())
                     .unwrap_or("");
                 let current_channel_string = current_channel.to_string();
 
                 let selection = prompt_channel_select(&config.channels, Some(&current_channel_string))?;
                 if selection != current_channel_string {
-                    new_channel_name = Some(selection);
+                    new_channels.push(TargetChannel { name: selection, weight: 1 });
                 }
             }
 
             // Merge logic: if explicit channels given, use them.
-            // If single channel given (or interactive), override with single channel.
+            // If interactive selection made, use it.
             if !new_channels.is_empty() {
                 // verify
                 let names: Vec<String> = new_channels.iter().map(|c| c.name.clone()).collect();
                 ensure_channels_exist(&config, &names)?;
-            } else if let Some(ch) = new_channel_name {
-                 ensure_channels_exist(&config, &[ch.clone()])?;
-                 new_channels.push(TargetChannel { name: ch, weight: 1 });
             }
 
             if !args.fallback_channels.is_empty() {
@@ -797,7 +780,6 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             let router = &mut config.routers[router_idx];
             
             if !new_channels.is_empty() {
-                router.channel = None;
                 router.channels = new_channels;
             }
             
@@ -926,12 +908,22 @@ fn get_default_base_url(provider: &ProviderType) -> &'static str {
         ProviderType::Openai => "https://api.openai.com/v1",
         ProviderType::Anthropic => "https://api.anthropic.com/v1",
         ProviderType::Gemini => "https://generativelanguage.googleapis.com/v1beta/openai/",
-        ProviderType::Deepseek => "https://api.deepseek.com/anthropic",
-        ProviderType::Moonshot => "https://api.moonshot.cn/anthropic",
-        ProviderType::Minimax => "https://api.minimax.io/anthropic",
+        ProviderType::Deepseek => "https://api.deepseek.com",
+        ProviderType::Moonshot => "https://api.moonshot.cn/v1",
+        ProviderType::Minimax => "https://api.minimax.io/v1",
         ProviderType::Ollama => "http://localhost:11434",
         ProviderType::Jina => "https://api.jina.ai/v1",
         ProviderType::Openrouter => "https://openrouter.ai/api/v1",
+    }
+}
+
+fn get_default_anthropic_base_url(provider: &ProviderType) -> Option<&'static str> {
+    match provider {
+        ProviderType::Deepseek => Some("https://api.deepseek.com/anthropic"),
+        ProviderType::Moonshot => Some("https://api.moonshot.cn/anthropic"),
+        ProviderType::Minimax => Some("https://api.minimax.io/anthropic"),
+        ProviderType::Anthropic => Some("https://api.anthropic.com/v1"),
+        _ => None,
     }
 }
 
@@ -1029,7 +1021,7 @@ fn print_router_table(routers: &[Router]) {
         let channels_display = if !router.channels.is_empty() {
             router.channels.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(",")
         } else {
-            router.channel.clone().unwrap_or_default()
+            String::new()
         };
         
         println!(

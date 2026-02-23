@@ -172,8 +172,7 @@ fn test_router_lifecycle() {
         .arg("router")
         .arg("add")
         .arg("--name").arg("r1")
-
-        .arg("--channel").arg("c1")
+        .arg("--channels").arg("c1")
         .assert()
         .success()
         .stdout(predicate::str::contains("已添加 router: r1"));

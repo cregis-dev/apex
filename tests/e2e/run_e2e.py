@@ -10,7 +10,7 @@ from rich.prompt import Prompt, Confirm
 
 console = Console()
 
-CONFIG_PATH = "tests/e2e/config.json"
+CONFIG_PATH = "tests/e2e/manual_config.json"
 SERVER_LOG = "tests/e2e/server.log"
 
 def setup_config():
@@ -54,7 +54,6 @@ def setup_config():
         "routers": [
             {
                 "name": "openai_route",
-                "type": "openai",
                 "vkey": "test_key", # We disabled auth in global, but router lookup uses vkey if present?
                 # Actually server.rs enforce_global_auth checks global.auth.mode.
                 # If mode is None, it skips auth check.
@@ -66,14 +65,13 @@ def setup_config():
                 # So vkey is REQUIRED even if global auth is None?
                 # Yes, to find the router.
                 # So we must provide a vkey in the request.
-                "channel": "minimax",
+                "channels": [{"name": "minimax", "weight": 1}],
                 "fallback_channels": []
             },
             {
                 "name": "anthropic_route",
-                "type": "anthropic",
                 "vkey": "test_key",
-                "channel": "minimax",
+                "channels": [{"name": "minimax", "weight": 1}],
                 "fallback_channels": []
             }
         ],
@@ -95,7 +93,7 @@ def run_server():
     
     # Start server
     proc = subprocess.Popen(
-        ["cargo", "run", "--", "serve", "--config", CONFIG_PATH],
+        ["cargo", "run", "--", "gateway", "start", CONFIG_PATH],
         stdout=open(SERVER_LOG, "w"),
         stderr=subprocess.STDOUT
     )

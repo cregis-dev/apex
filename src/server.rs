@@ -490,7 +490,6 @@ mod tests {
                 crate::config::Router {
                     name: "test-router".to_string(),
                     vkey: Some("test-vkey".to_string()),
-                    channel: None,
                     channels: vec![
                         crate::config::TargetChannel {
                             name: "test-channel".to_string(),
@@ -500,6 +499,18 @@ mod tests {
                     strategy: "round_robin".to_string(),
                     metadata: None,
                     fallback_channels: vec![],
+                    rules: vec![
+                        crate::config::RouterRule {
+                            match_spec: crate::config::MatchSpec { model: "*".to_string() },
+                            channels: vec![
+                                crate::config::TargetChannel {
+                                    name: "test-channel".to_string(),
+                                    weight: 1,
+                                }
+                            ],
+                            strategy: "round_robin".to_string(),
+                        }
+                    ],
                 }
             ],
         }
@@ -591,11 +602,10 @@ mod tests {
         
         // Update router to match "gpt-4" to "ch2"
         let router = &mut config.routers[0];
-        router.channels.push(crate::config::TargetChannel { name: "ch2".to_string(), weight: 1 });
-        router.metadata = Some(crate::config::RouterMetadata {
-            model_matcher: std::collections::HashMap::from([
-                ("gpt-4".to_string(), "ch2".to_string())
-            ])
+        router.rules.insert(0, crate::config::RouterRule {
+             match_spec: crate::config::MatchSpec { model: "gpt-4".to_string() },
+             channels: vec![crate::config::TargetChannel { name: "ch2".to_string(), weight: 1 }],
+             strategy: "priority".to_string(),
         });
 
         let audit_calls = Arc::new(Mutex::new(Vec::new()));

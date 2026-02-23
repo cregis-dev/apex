@@ -3,14 +3,16 @@
 Simple, High Performance, High Availability AI Gateway.
 面向企业内部的轻量 AI Gateway，基于 Rust 实现，使用 JSON 配置驱动，支持 OpenAI/Anthropic 兼容入口，提供热加载、超时/重试、fallback 与 Prometheus 指标导出。
 
+详细操作指南请参考 [docs/operations.md](docs/operations.md)。
+
 ## 功能概览
 
-- OpenAI/Anthropic 兼容入口
-- 多 provider channel，按 router 绑定与 fallback 切换
-- 全局鉴权与 router vkey 鉴权
-- connect/request/response 三级超时与重试
-- Prometheus 指标导出
-- CLI 管理配置与 router/channel
+- **双协议支持**: 同时兼容 OpenAI 与 Anthropic 协议，支持 MiniMax/DeepSeek 等双协议 Provider。
+- **多通道路由**: 支持权重负载均衡 (Round Robin/Priority/Random) 与模型名称路由。
+- **高可用**: 支持 Connect/Request/Response 三级超时与自动故障转移 (Fallback)。
+- **安全**: 全局鉴权与 Router VKey 鉴权。
+- **可观测**: 内置 Prometheus 指标导出。
+- **易用**: CLI 交互式管理配置。
 
 ## 安装
 
@@ -26,22 +28,18 @@ cargo install --path .
 apex init
 ```
 
-默认路径：`~/.apex/config.json`
-
 ### 2) 添加 channel
 
 ```bash
+# 交互式引导添加
 apex channel add --name openai-main
 ```
-
-> 系统将交互式引导您选择 Provider、确认 Base URL 并输入 API Key。
 
 ### 3) 添加 router
 
 ```bash
-apex router add \
-  --name default-openai \
-  --channel openai-main
+# 交互式引导添加
+apex router add --name default-openai
 ```
 
 ### 4) 启动服务
@@ -54,113 +52,36 @@ apex gateway start
 apex gateway start -d
 ```
 
-### 5) 停止服务
+### 5) 验证调用
 
-```bash
-apex gateway stop
-```
-
-### 6) 查看日志
-
-```bash
-# 查看日志目录并实时追踪最新日志
-apex logs
-```
-
-默认监听：`0.0.0.0:12356`
-
-## 客户端兼容性
-
-为了更好地支持各类 AI 客户端（如 Chatbox、NextChat、Vercel AI SDK 等），Apex 提供了以下兼容性支持：
-
-1.  **标准鉴权头**：支持使用 `Authorization: Bearer <key>`（OpenAI）或 `x-api-key: <key>`（Anthropic）。
-2.  **路径兼容**：同时支持 `/v1/chat/completions` 和 `/chat/completions`（无 `/v1` 前缀）等路径，以适应不同客户端对 Base URL 的处理方式。
-    - 如果客户端提示 "API endpoint not found"，请尝试将 Base URL 设置为 `http://localhost:12356` 或 `http://localhost:12356/v1`。
-3.  **模型列表**：支持 `GET /v1/models`（或 `/models`）接口，返回可用模型列表（需鉴权）。
-
-## 请求方式
-
-### OpenAI 兼容
-
+**OpenAI 兼容客户端**:
 ```bash
 curl http://localhost:12356/v1/chat/completions \
-  -H "content-type: application/json" \
   -H "Authorization: Bearer <router-vkey>" \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-### Anthropic 兼容
-
+**Anthropic 兼容客户端**:
 ```bash
 curl http://localhost:12356/v1/messages \
-  -H "content-type: application/json" \
   -H "x-api-key: <router-vkey>" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"claude-3-5-sonnet-20240620","messages":[{"role":"user","content":"hello"}]}'
 ```
 
+## 更多文档
 
-## 鉴权
+- [操作手册 (Operations Guide)](docs/operations.md): 详细的 CLI 使用说明、配置参数详解、高级路由策略配置及双协议支持说明。
+- [架构文档 (Architecture)](docs/architecture.md): 架构设计说明。
 
-- 全局鉴权：请求头 `x-apex-api-key` 或 `Authorization: Bearer <key>`
-- 路由鉴权：请求头 `x-apex-vkey` 或 `Authorization: Bearer <vkey>`
-- provider key 仅用于上游访问，保存在 channel 中
+## 客户端兼容性
 
-> 注意：如果同时启用全局鉴权和路由鉴权，且都使用 `Authorization` 头，可能会导致冲突。建议优先使用 `x-apex-*` 专用头，或仅使用路由鉴权（绝大多数场景）。
+为了更好地支持各类 AI 客户端（如 Chatbox, NextChat, Vercel AI SDK 等），Apex 提供了以下兼容性支持：
 
-## 配置示例
+1.  **标准鉴权头**：支持使用 `Authorization: Bearer <key>`（OpenAI）或 `x-api-key: <key>`（Anthropic）。
+2.  **路径兼容**：同时支持 `/v1/chat/completions` 和 `/chat/completions`（无 `/v1` 前缀）等路径。
+3.  **模型列表**：支持 `GET /v1/models` 接口。
 
-```json
-{
-  "version": "1",
-  "global": {
-    "listen": "0.0.0.0:12356",
-    "auth": { "mode": "none", "keys": null },
-    "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 },
-    "retries": { "max_attempts": 2, "backoff_ms": 200, "retry_on_status": [429, 500, 502, 503, 504] }
-  },
-  "channels": [
-    {
-      "name": "openai-main",
-      "provider_type": "openai",
-      "base_url": "https://api.openai.com",
-      "api_key": "sk-xxx",
-      "headers": null,
-      "model_map": { "gpt-4": "gpt-4o" },
-      "timeouts": null
-    }
-  ],
-  "routers": [
-    {
-      "name": "default-openai",
-      "vkey": "vk_xxxxx",
-      "channel": "openai-main",
-      "fallback_channels": []
-    }
-  ],
-  "metrics": { "enabled": true, "listen": "0.0.0.0:9090", "path": "/metrics" },
-  "hot_reload": { "config_path": "~/.apex/config.json", "watch": true }
-}
-```
+## 运维
 
-## 指标
-
-默认地址：`http://localhost:9090/metrics`
-
-- apex_requests_total{route,router}
-- apex_errors_total{route,router}
-- apex_upstream_latency_ms{route,router,channel}
-- apex_fallback_total{router,channel}
-
-## CLI 参考
-
-```bash
-cargo run -- channel add|update|delete|show|list
-cargo run -- router add|update|delete|list
-```
-
-## 测试
-
-```bash
-cargo test
-```
+默认指标地址：`http://localhost:9090/metrics`

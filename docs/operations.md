@@ -53,18 +53,46 @@ apex channel add \
   --api-key sk-xxx
 ```
 
-可选参数：
+#### 关键参数详解
 
-- `--header key=value`：追加上游请求头（可多次传入）
-- `--model-map old=new`：模型映射（可多次传入）
-- `--connect-ms` / `--request-ms` / `--response-ms`：通道级超时
+- **`--name`**: Channel 的唯一标识符，用于在 Router 中引用。
+- **`--provider`**: 上游服务商类型（如 `openai`, `anthropic`, `deepseek` 等）。这决定了请求的协议转换逻辑。
+- **`--base-url`**: 上游 API 的基础地址。
+- **`--api-key`**: 用于访问上游服务的凭证（系统会自动添加到请求头中，如 `Authorization: Bearer` 或 `x-api-key`）。
+
+#### 可选高级配置
+
+- **`--header key=value`**: 追加自定义请求头。可多次使用。
+  - 示例: `--header "X-Organization-Id=org-123" --header "User-Agent=MyBot/1.0"`
+
+- **`--model-map old=new`**: 模型名称重映射。可多次使用。
+  - **功能**: 当客户端请求的模型名称与上游 Provider 支持的模型名称不一致时，网关会自动替换请求体中的 `model` 字段。
+  - **场景**:
+    1.  **别名简化**: 客户端请求 `gpt-4`，实际转发给 `gpt-4-0613`。
+    2.  **跨厂商适配**: 客户端请求 `claude-3-5-sonnet`，实际转发给 Azure OpenAI 的部署名 `dep-claude-sonnet`。
+    3.  **兼容性修复**: 某些旧客户端硬编码了模型名，通过映射转发到新模型。
+  - **CLI 示例**:
+    ```bash
+    apex channel add \
+      --name azure-gpt \
+      --provider openai \
+      --base-url https://my-azure.openai.azure.com \
+      --api-key xxx \
+      --model-map "gpt-4=gpt-4-32k-0613" \
+      --model-map "gpt-3.5-turbo=gpt-35-turbo-16k"
+    ```
+
+- **超时设置**:
+  - `--connect-ms`: 连接超时（毫秒）。
+  - `--request-ms`: 整个请求超时（毫秒）。
+  - `--response-ms`: 响应读取超时（毫秒）。
 
 ### 3. 添加 router
 
 ```bash
 apex router add \
   --name default-openai \
-  --channel openai-main
+  --channels openai-main
 ```
 
 如需指定 vkey：
@@ -72,7 +100,7 @@ apex router add \
 ```bash
 apex router add \
   --name default-openai \
-  --channel openai-main \
+  --channels openai-main \
   --vkey vk_xxxxx
 ```
 
@@ -106,6 +134,135 @@ apex router list
 ```
 
 默认 channel list 不显示 Base URL，如需查看完整信息请使用 `show` 命令。
+
+## 双协议支持 (Dual Protocol)
+
+对于同时支持 OpenAI 和 Anthropic 协议的 Provider（如 MiniMax, DeepSeek, Moonshot），Apex 提供了特殊的双协议支持。
+
+### 配置方式
+
+在添加 Channel 时，除了常规的 `Base URL` (用于 OpenAI 协议) 外，还可以配置 `Anthropic Base URL`。
+
+```bash
+apex channel add \
+  --name minimax \
+  --provider minimax \
+  --base-url https://api.minimax.io/v1 \
+  --anthropic-base-url https://api.minimax.io/v1 \
+  --api-key <your-key>
+```
+
+### 自动路由
+
+- 当客户端使用 **OpenAI 协议** (e.g. `/v1/chat/completions`) 请求时，流量转发至 `Base URL`。
+- 当客户端使用 **Anthropic 协议** (e.g. `/v1/messages`) 请求时，流量转发至 `Anthropic Base URL`。
+
+这使得您可以使用同一个 Router 同时服务于 OpenAI 客户端（如 Chatbox）和 Anthropic 客户端（如 Claude Dev）。
+
+## Router 高级指南
+
+本节详细介绍 Router 的高级配置功能，包括多通道负载均衡、路由策略、模型路由和故障转移。
+
+### 1. 多通道负载均衡 (Multi-Channel)
+
+Router 支持绑定多个 Channel，并为每个 Channel 分配权重（Weight）。流量将根据权重比例分配到不同的 Channel。
+
+**CLI 示例**:
+```bash
+# 创建一个混合路由，30% 流量给 deepseek，70% 给 openai
+apex router add \
+  --name mixed-route \
+  --channels deepseek:3,openai:7 \
+  --strategy round_robin
+```
+
+**配置说明**:
+- `--channels name:weight`：指定 Channel 名称和权重（默认权重为 1）。
+- `--strategy`：指定负载均衡策略。
+
+### 2. 路由策略 (Strategy)
+
+支持以下三种路由策略：
+
+- **round_robin** (默认): 加权轮询（Weighted Round Robin）。系统根据 Channel 的权重比例随机分发请求。
+- **priority**: 优先级模式。始终尝试使用列表中的第一个可用 Channel。只有当第一个 Channel 被移除或不可用时（需配合健康检查，目前主要按列表顺序），才会考虑后续。
+- **random**: 纯随机模式。忽略权重，完全随机选择 Channel。
+
+**CLI 示例**:
+```bash
+# 优先级模式：总是优先使用 primary，仅在特殊配置下使用 secondary
+apex router add \
+  --name ha-route \
+  --channels primary,secondary \
+  --strategy priority
+```
+
+### 3. 基于规则的路由 (Rule-Based Routing)
+
+Apex 使用**规则链 (Rules Chain)** 来决定如何处理请求。Router 会从上到下依次匹配规则，一旦命中即停止匹配。
+
+每条规则包含：
+1.  **匹配条件 (Match)**: 如模型名称（支持 Glob 通配符）。
+2.  **执行策略 (Strategy)**: 如 `round_robin` (轮询), `priority` (优先级)。
+3.  **渠道列表 (Channels)**: 流量分发的目标渠道，支持权重配置。
+
+**CLI 示例**:
+目前建议直接编辑 `config.json` 来配置高级规则。
+
+### 4. 故障转移 (Failover)
+
+故障转移现在内置于每条规则的 `channels` 列表中。如果选中的 Channel 请求失败（如超时、50x 错误），Router 会自动尝试列表中的下一个可用 Channel（根据策略决定）。
+
+### 5. 完整配置示例 (JSON)
+
+手动编辑 `config.json` 可以进行精细的路由配置：
+
+```json
+{
+  "routers": [
+    {
+      "name": "unified-api",
+      "vkey": "sk-proj-123456",
+      "rules": [
+        {
+          "//": "规则1：Minimax 模型 -> 双路负载均衡",
+          "match": {
+            "model": "abab*"
+          },
+          "strategy": "round_robin",
+          "channels": [
+            { "name": "minimax-key-1", "weight": 1 },
+            { "name": "minimax-key-2", "weight": 1 }
+          ]
+        },
+        {
+          "//": "规则2：Gemini 模型 -> 走 Google 官方",
+          "match": {
+            "model": "gemini*"
+          },
+          "strategy": "priority",
+          "channels": [
+            { "name": "google-official", "weight": 1 }
+          ]
+        },
+        {
+          "//": "规则3：默认兜底 -> OpenRouter 主用，OpenAI 备用",
+          "match": {
+            "model": "*"
+          },
+          "strategy": "priority",
+          "channels": [
+            { "name": "openrouter-agg", "weight": 10 },
+            { "name": "openai-backup", "weight": 1 }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+> **注意**: 旧版本的 `model_matcher` 和顶层 `channels` 配置仍然支持，但在加载时会自动转换为上述规则格式。建议新配置直接使用 `rules`。
 
 ## 调用示例
 
@@ -186,7 +343,9 @@ Apex 支持通过标准请求头传递凭证：
     {
       "name": "default-openai",
       "vkey": "vk_xxxxx",
-      "channel": "openai-main",
+      "channels": [
+          {"name": "openai-main", "weight": 1}
+      ],
       "fallback_channels": []
     }
   ],

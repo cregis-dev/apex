@@ -26,7 +26,7 @@ def load_vkey(router_type: str) -> Optional[str]:
     vkey = os.environ.get("APEX_VKEY")
     if vkey:
         return vkey
-    config_path = os.environ.get("APEX_CONFIG", "tests/e2e/config.json")
+    config_path = os.environ.get("APEX_CONFIG", "tests/e2e/manual_config.json")
     try:
         with open(config_path, "r") as f:
             config = json.load(f)

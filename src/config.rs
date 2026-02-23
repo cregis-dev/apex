@@ -105,7 +105,12 @@ pub enum ProviderType {
 pub struct Router {
     pub name: String,
     pub vkey: Option<String>,
-    pub channel: Option<String>,
+    
+    // New unified rules configuration
+    #[serde(default)]
+    pub rules: Vec<RouterRule>,
+    
+    // Legacy fields (kept for backward compatibility, will be migrated to rules)
     #[serde(default)]
     pub channels: Vec<TargetChannel>,
     #[serde(default = "default_strategy")]
@@ -113,6 +118,20 @@ pub struct Router {
     pub metadata: Option<RouterMetadata>,
     #[serde(default)]
     pub fallback_channels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouterRule {
+    #[serde(rename = "match")]
+    pub match_spec: MatchSpec,
+    pub channels: Vec<TargetChannel>,
+    #[serde(default = "default_strategy")]
+    pub strategy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchSpec {
+    pub model: String,
 }
 
 fn default_strategy() -> String {
@@ -151,19 +170,39 @@ pub struct HotReload {
 pub fn load_config(path: &Path) -> anyhow::Result<Config> {
     let content = fs::read_to_string(path)?;
     let mut config = serde_json::from_str::<Config>(&content)?;
-
-    // Normalize routers: migrate legacy 'channel' field to 'channels' list
+    
+    // Migrate legacy configuration to rules
     for router in &mut config.routers {
-        if router.channels.is_empty() {
-            if let Some(channel_name) = &router.channel {
-                router.channels.push(TargetChannel {
-                    name: channel_name.clone(),
-                    weight: 1,
+        if router.rules.is_empty() {
+            // 1. Convert metadata.model_matcher to rules
+            if let Some(metadata) = &router.metadata {
+                for (pattern, target_channel_name) in &metadata.model_matcher {
+                    router.rules.push(RouterRule {
+                        match_spec: MatchSpec {
+                            model: pattern.clone(),
+                        },
+                        channels: vec![TargetChannel {
+                            name: target_channel_name.clone(),
+                            weight: 1,
+                        }],
+                        strategy: "priority".to_string(), // Single channel implies priority/direct
+                    });
+                }
+            }
+            
+            // 2. Convert top-level channels to a default wildcard rule
+            if !router.channels.is_empty() {
+                router.rules.push(RouterRule {
+                    match_spec: MatchSpec {
+                        model: "*".to_string(),
+                    },
+                    channels: router.channels.clone(),
+                    strategy: router.strategy.clone(),
                 });
             }
         }
     }
-
+    
     Ok(config)
 }
 

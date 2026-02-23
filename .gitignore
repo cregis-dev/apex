@@ -8,6 +8,14 @@ apex.json
 target/
 **/*.rs.bk
 
+# E2E Test artifacts
+tests/e2e/manual_config.json
+tests/e2e/server.log
+
+# Python artifacts
+__pycache__/
+*.pyc
+
 # System files
 .DS_Store
 
