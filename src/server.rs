@@ -187,11 +187,13 @@ fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Respo
             let Some(keys) = &config.global.auth.keys else {
                 return Ok(());
             };
-            let token = read_auth_token(headers, "authorization");
-            if let Some(token) = token
-                && keys.contains(&token)
-            {
-                return Ok(());
+            let token = read_auth_token(headers, "authorization")
+                .or_else(|| read_auth_token(headers, "x-api-key"));
+
+            if let Some(token) = token {
+                if keys.contains(&token) {
+                    return Ok(());
+                }
             }
             Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized"))
         }
