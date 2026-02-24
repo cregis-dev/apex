@@ -1,18 +1,18 @@
-use axum::body::{to_bytes, Body, Bytes};
-use axum::http::StatusCode;
-use axum::routing::{get, post};
-use axum::Router as AxumRouter;
-use axum::Json;
 use apex::config::{
     Auth, AuthMode, Channel, Config, Global, HotReload, Metrics, ProviderType, Retries,
     Router as GatewayRouter, Timeouts,
 };
 use apex::server::{build_app, build_state};
+use axum::Json;
+use axum::Router as AxumRouter;
+use axum::body::{Body, Bytes, to_bytes};
+use axum::http::StatusCode;
+use axum::routing::{get, post};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tower::ServiceExt;
 use tokio::net::TcpListener;
+use tower::ServiceExt;
 
 // --- Helper Functions for Integration Tests ---
 
@@ -59,7 +59,9 @@ pub async fn spawn_upstream_models() -> SocketAddr {
 
 pub async fn response_text(resp: axum::response::Response<Body>) -> (StatusCode, String) {
     let status = resp.status();
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap_or_default();
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap_or_default();
     let text = String::from_utf8_lossy(&body).to_string();
     (status, text)
 }

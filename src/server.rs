@@ -1,25 +1,24 @@
 use crate::config::{AuthMode, Config};
+use crate::converters::convert_openai_response_to_anthropic;
 use crate::metrics::MetricsState;
+use crate::providers::{
+    AccessAudit, NoOpAccessAudit, NoOpRateLimiter, ProviderRegistry, RateLimiter, RouteKind,
+    prepare_request,
+};
 use crate::router_selector::RouterSelector;
 use crate::usage::UsageLogger;
-use crate::providers::{
-    prepare_request,
-    ProviderRegistry, RouteKind,
-    AccessAudit, RateLimiter, NoOpAccessAudit, NoOpRateLimiter,
-};
-use crate::converters::convert_openai_response_to_anthropic;
+use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
-use axum::Router;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use std::path::PathBuf;
-use std::net::SocketAddr;
-use tower_http::trace::{self, TraceLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::trace::{self, TraceLayer};
 use tracing::Level;
 
 #[derive(Clone)]
@@ -101,18 +100,22 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                 .layer(
                     TraceLayer::new_for_http()
                         .make_span_with(|request: &Request<Body>| {
-                            let request_id = request.extensions().get::<tower_http::request_id::RequestId>()
+                            let request_id = request
+                                .extensions()
+                                .get::<tower_http::request_id::RequestId>()
                                 .map(|id| id.header_value().to_str().unwrap_or("unknown"))
                                 .unwrap_or("unknown");
-                            let client_ip = request.headers().get("x-forwarded-for")
+                            let client_ip = request
+                                .headers()
+                                .get("x-forwarded-for")
                                 .and_then(|h| h.to_str().ok())
                                 .unwrap_or("unknown");
-                            
-                            tracing::info_span!("request", 
+
+                            tracing::info_span!("request",
                                 request_id = %request_id,
                                 client_ip = %client_ip,
-                                method = %request.method(), 
-                                uri = %request.uri(), 
+                                method = %request.method(),
+                                uri = %request.uri(),
                                 version = ?request.version()
                             )
                         })
@@ -136,10 +139,7 @@ async fn metrics_handler(state: State<Arc<AppState>>) -> Response<Body> {
     }
 }
 
-async fn handle_openai(
-    State(state): State<Arc<AppState>>,
-    req: Request<Body>,
-) -> Response<Body> {
+async fn handle_openai(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response<Body> {
     process_request(state, req, RouteKind::Openai, None, None).await
 }
 
@@ -150,10 +150,7 @@ async fn handle_anthropic(
     process_request(state, req, RouteKind::Anthropic, None, None).await
 }
 
-async fn handle_models(
-    State(state): State<Arc<AppState>>,
-    req: Request<Body>,
-) -> Response<Body> {
+async fn handle_models(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response<Body> {
     let (parts, _body) = req.into_parts();
     let headers = &parts.headers;
 
@@ -162,14 +159,14 @@ async fn handle_models(
         return resp;
     }
     // Try Authorization header first, then x-api-key (for Anthropic)
-    let vkey = read_auth_token(headers, "authorization")
-        .or_else(|| read_auth_token(headers, "x-api-key"));
+    let vkey =
+        read_auth_token(headers, "authorization").or_else(|| read_auth_token(headers, "x-api-key"));
 
     let Some(vkey) = vkey else {
         return error_response(StatusCode::UNAUTHORIZED, "missing vkey");
     };
     let Some(_router) = find_router_by_vkey(&config, &vkey) else {
-         return error_response(StatusCode::UNAUTHORIZED, "invalid vkey");
+        return error_response(StatusCode::UNAUTHORIZED, "invalid vkey");
     };
 
     // Placeholder response for models
@@ -182,6 +179,7 @@ async fn handle_models(
 
 // Helpers
 
+#[allow(clippy::result_large_err)]
 fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Response<Body>> {
     match config.global.auth.mode {
         AuthMode::None => Ok(()),
@@ -190,35 +188,32 @@ fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Respo
                 return Ok(());
             };
             let token = read_auth_token(headers, "authorization");
-            if let Some(token) = token {
-                if keys.contains(&token) {
+            if let Some(token) = token
+                && keys.contains(&token) {
                     return Ok(());
                 }
-            }
             Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized"))
         }
     }
 }
 
 fn read_auth_token(headers: &HeaderMap, key: &str) -> Option<String> {
-    if let Some(val) = headers.get(key) {
-        if let Ok(s) = val.to_str() {
+    if let Some(val) = headers.get(key)
+        && let Ok(s) = val.to_str() {
             if key == "authorization" && s.starts_with("Bearer ") {
                 return Some(s[7..].to_string());
             }
             return Some(s.to_string());
         }
-    }
     None
 }
 
 fn find_router_by_vkey(config: &Config, vkey: &str) -> Option<String> {
     for router in &config.routers {
-        if let Some(ref k) = router.vkey {
-             if k == vkey {
-                 return Some(router.name.clone());
+        if let Some(ref k) = router.vkey
+            && k == vkey {
+                return Some(router.name.clone());
             }
-        }
     }
     None
 }
@@ -272,46 +267,50 @@ async fn process_request(
     };
 
     let Some(router) = config.routers.iter().find(|r| r.name == router_name) else {
-         return error_response(StatusCode::NOT_FOUND, "router not found");
+        return error_response(StatusCode::NOT_FOUND, "router not found");
     };
 
     tracing::info!("Router resolved: {}", router.name);
 
     // 3. Resolve Channels
     let mut channels = Vec::new();
-    
+
     // Parse model from body to use in routing
     let model_name = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-        json.get("model").and_then(|v| v.as_str()).map(|s| s.to_string())
+        json.get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     } else {
         None
     };
     let model_name_str = model_name.as_deref().unwrap_or("default");
 
-    if let Some(ch_name) = state.selector.select_channel(router, model_name_str) {
-        if let Some(ch) = config.channels.iter().find(|c| c.name == ch_name) {
+    if let Some(ch_name) = state.selector.select_channel(router, model_name_str)
+        && let Some(ch) = config.channels.iter().find(|c| c.name == ch_name) {
             channels.push(ch);
             tracing::info!(
-                "Channel selected: {} (strategy={}, model={})", 
-                ch.name, 
+                "Channel selected: {} (strategy={}, model={})",
+                ch.name,
                 router.strategy,
                 model_name_str
             );
         }
-    }
-    
+
     // Add fallbacks
     for fb_name in &router.fallback_channels {
-         if let Some(ch) = config.channels.iter().find(|c| c.name == *fb_name) {
-             // Avoid duplicates
-             if !channels.iter().any(|c| c.name == ch.name) {
+        if let Some(ch) = config.channels.iter().find(|c| c.name == *fb_name) {
+            // Avoid duplicates
+            if !channels.iter().any(|c| c.name == ch.name) {
                 channels.push(ch);
-             }
+            }
         }
     }
-    
+
     if channels.is_empty() {
-        tracing::warn!("No channels configured or matched for router: {}", router_name);
+        tracing::warn!(
+            "No channels configured or matched for router: {}",
+            router_name
+        );
         return error_response(StatusCode::BAD_GATEWAY, "no channels configured or matched");
     }
 
@@ -319,79 +318,100 @@ async fn process_request(
         RouteKind::Openai => "openai",
         RouteKind::Anthropic => "anthropic",
     };
-    state.metrics.request_total.with_label_values(&[route_label, &router_name]).inc();
+    state
+        .metrics
+        .request_total
+        .with_label_values(&[route_label, &router_name])
+        .inc();
 
     // 4. Loop channels
     let retry_on = &config.global.retries.retry_on_status;
     let max_attempts = config.global.retries.max_attempts.max(1);
-    
+
     // Extract path and query for preparation
     let path = path_override.unwrap_or_else(|| parts.uri.path().to_string());
     let query = parts.uri.query().map(|s| s.to_string());
 
     for (index, channel) in channels.iter().enumerate() {
-         if index > 0 {
-             tracing::warn!("Switching to fallback channel: {}", channel.name);
-             state.metrics.fallback_total.with_label_values(&[&router_name, &channel.name]).inc();
-         }
+        if index > 0 {
+            tracing::warn!("Switching to fallback channel: {}", channel.name);
+            state
+                .metrics
+                .fallback_total
+                .with_label_values(&[&router_name, &channel.name])
+                .inc();
+        }
 
-         if !state.rate_limiter.check(&channel.provider_type) {
-             tracing::warn!("Rate limit exceeded for provider: {:?}", channel.provider_type);
-             continue;
-         }
+        if !state.rate_limiter.check(&channel.provider_type) {
+            tracing::warn!(
+                "Rate limit exceeded for provider: {:?}",
+                channel.provider_type
+            );
+            continue;
+        }
 
         for attempt in 0..max_attempts {
-             let prepared = match prepare_request(
-                 &state.providers,
-                 channel,
-                 route,
-                 &channel.base_url,
-                 &path,
-                 query.as_deref(),
-                 &headers,
-                 &bytes,
+            let prepared = match prepare_request(
+                &state.providers,
+                channel,
+                route,
+                &channel.base_url,
+                &path,
+                query.as_deref(),
+                &headers,
+                &bytes,
             ) {
-                 Ok(p) => p,
-                 Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
-             };
-             
-             let adapter = state.providers.adapter(channel);
-             
-             let start = std::time::Instant::now();
-             
-             let req_future = state.client.request(parts.method.clone(), prepared.url)
-                 .headers(prepared.headers)
-                 .body(prepared.body)
-                 .build();
-            
-             let req_built = match req_future {
-                 Ok(r) => r,
-                 Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-             };
+                Ok(p) => p,
+                Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+            };
 
-             tracing::info!(
-                 "Upstream request: method={} url={} attempt={}/{}",
-                 req_built.method(),
-                 req_built.url(),
-                 attempt + 1,
-                 max_attempts
-             );
-             
-             let resp_result = state.client.execute(req_built).await;
-             
-             match resp_result {
-                 Ok(resp) => {
-                     let elapsed = start.elapsed().as_millis() as f64;
-                     
-                     state.metrics.upstream_latency_ms
+            let adapter = state.providers.adapter(channel);
+
+            let start = std::time::Instant::now();
+
+            let req_future = state
+                .client
+                .request(parts.method.clone(), prepared.url)
+                .headers(prepared.headers)
+                .body(prepared.body)
+                .build();
+
+            let req_built = match req_future {
+                Ok(r) => r,
+                Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            };
+
+            tracing::info!(
+                "Upstream request: method={} url={} attempt={}/{}",
+                req_built.method(),
+                req_built.url(),
+                attempt + 1,
+                max_attempts
+            );
+
+            let resp_result = state.client.execute(req_built).await;
+
+            match resp_result {
+                Ok(resp) => {
+                    let elapsed = start.elapsed().as_millis() as f64;
+
+                    state
+                        .metrics
+                        .upstream_latency_ms
                         .with_label_values(&[route_label, &router_name, &channel.name])
                         .observe(elapsed);
 
-                     let status = resp.status();
-                     if status.is_success() {
+                    let status = resp.status();
+                    if status.is_success() {
                         tracing::info!("Upstream success: {} ({}ms)", status, elapsed);
-                        state.access_audit.audit(&channel.provider_type, route, true);
-                        let response = adapter.handle_response(route, resp, Duration::from_millis(config.global.timeouts.response_ms));
+                        state
+                            .access_audit
+                            .audit(&channel.provider_type, route, true);
+                        let response = adapter.handle_response(
+                            route,
+                            resp,
+                            Duration::from_millis(config.global.timeouts.response_ms),
+                        );
                         return crate::usage::wrap_response(
                             response,
                             router_name.clone(),
@@ -399,60 +419,90 @@ async fn process_request(
                             model_name_str.to_string(),
                             state.usage_logger.clone(),
                             state.metrics.clone(),
-                        ).await;
+                        )
+                        .await;
                     }
-                    
+
                     tracing::warn!("Upstream failed: {} ({}ms)", status, elapsed);
-                     state.access_audit.audit(&channel.provider_type, route, false);
-                     
-                     // Check if retryable
-                     if attempt + 1 < max_attempts {
-                         // Check retry on status
-                         let status_code = status.as_u16();
-                         // Assuming retry_on is Vec<u16>
-                         if retry_on.contains(&status_code) {
-                             tracing::warn!("Retrying (attempt {}/{}) due to status {}", attempt + 1, max_attempts, status_code);
-                             tokio::time::sleep(Duration::from_millis(config.global.retries.backoff_ms)).await;
-                             continue;
-                         }
-                     }
-                     
-                     // If last channel and last attempt, return error
-                     if index == channels.len() - 1 && attempt == max_attempts - 1 {
-                         state.metrics.error_total.with_label_values(&[route_label, &router_name]).inc();
-                         // Convert error if needed (e.g. for Anthropic)
-                         if matches!(route, RouteKind::Anthropic) {
-                             let bytes = resp.bytes().await.unwrap_or_default();
-                             let body = convert_openai_response_to_anthropic(bytes);
-                             return Response::builder()
-                                 .status(status)
-                                 .body(Body::from(body))
-                                 .unwrap();
-                         }
-                         return adapter.handle_response(route, resp, Duration::from_millis(config.global.timeouts.response_ms));
-                     }
-                 },
-                 Err(e) => {
-                     tracing::error!("Upstream request error: {}", e);
-                     state.access_audit.audit(&channel.provider_type, route, false);
-                     if attempt + 1 < max_attempts {
-                         tracing::warn!("Retrying (attempt {}/{}) due to error", attempt + 1, max_attempts);
-                         tokio::time::sleep(Duration::from_millis(config.global.retries.backoff_ms)).await;
-                         continue;
-                     }
-                 }
-             }
+                    state
+                        .access_audit
+                        .audit(&channel.provider_type, route, false);
+
+                    // Check if retryable
+                    if attempt + 1 < max_attempts {
+                        // Check retry on status
+                        let status_code = status.as_u16();
+                        // Assuming retry_on is Vec<u16>
+                        if retry_on.contains(&status_code) {
+                            tracing::warn!(
+                                "Retrying (attempt {}/{}) due to status {}",
+                                attempt + 1,
+                                max_attempts,
+                                status_code
+                            );
+                            tokio::time::sleep(Duration::from_millis(
+                                config.global.retries.backoff_ms,
+                            ))
+                            .await;
+                            continue;
+                        }
+                    }
+
+                    // If last channel and last attempt, return error
+                    if index == channels.len() - 1 && attempt == max_attempts - 1 {
+                        state
+                            .metrics
+                            .error_total
+                            .with_label_values(&[route_label, &router_name])
+                            .inc();
+                        // Convert error if needed (e.g. for Anthropic)
+                        if matches!(route, RouteKind::Anthropic) {
+                            let bytes = resp.bytes().await.unwrap_or_default();
+                            let body = convert_openai_response_to_anthropic(bytes);
+                            return Response::builder()
+                                .status(status)
+                                .body(Body::from(body))
+                                .unwrap();
+                        }
+                        return adapter.handle_response(
+                            route,
+                            resp,
+                            Duration::from_millis(config.global.timeouts.response_ms),
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Upstream request error: {}", e);
+                    state
+                        .access_audit
+                        .audit(&channel.provider_type, route, false);
+                    if attempt + 1 < max_attempts {
+                        tracing::warn!(
+                            "Retrying (attempt {}/{}) due to error",
+                            attempt + 1,
+                            max_attempts
+                        );
+                        tokio::time::sleep(Duration::from_millis(config.global.retries.backoff_ms))
+                            .await;
+                        continue;
+                    }
+                }
+            }
         }
     }
-    
-    state.metrics.error_total.with_label_values(&[route_label, &router_name]).inc();
+
+    state
+        .metrics
+        .error_total
+        .with_label_values(&[route_label, &router_name])
+        .inc();
     error_response(StatusCode::BAD_GATEWAY, "all channels failed")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ProviderType, Retries, Timeouts, Global, Auth, Channel};
+    use crate::config::{Auth, Channel, Global, ProviderType, Retries, Timeouts};
     use crate::providers::{AccessAudit, RateLimiter, RouteKind};
     use std::sync::Mutex;
 
@@ -509,45 +559,37 @@ mod tests {
                 level: "info".to_string(),
                 dir: None,
             },
-            channels: vec![
-                Channel {
+            channels: vec![Channel {
+                name: "test-channel".to_string(),
+                provider_type: ProviderType::Openai,
+                base_url: "http://example.com".to_string(),
+                api_key: "test-key".to_string(),
+                anthropic_base_url: None,
+                headers: None,
+                model_map: None,
+                timeouts: None,
+            }],
+            routers: vec![crate::config::Router {
+                name: "test-router".to_string(),
+                vkey: Some("test-vkey".to_string()),
+                channels: vec![crate::config::TargetChannel {
                     name: "test-channel".to_string(),
-                    provider_type: ProviderType::Openai,
-                    base_url: "http://example.com".to_string(),
-                    api_key: "test-key".to_string(),
-                    anthropic_base_url: None,
-                    headers: None,
-                    model_map: None,
-                    timeouts: None,
-                }
-            ],
-            routers: vec![
-                crate::config::Router {
-                    name: "test-router".to_string(),
-                    vkey: Some("test-vkey".to_string()),
-                    channels: vec![
-                        crate::config::TargetChannel {
-                            name: "test-channel".to_string(),
-                            weight: 1,
-                        }
-                    ],
+                    weight: 1,
+                }],
+                strategy: "round_robin".to_string(),
+                metadata: None,
+                fallback_channels: vec![],
+                rules: vec![crate::config::RouterRule {
+                    match_spec: crate::config::MatchSpec {
+                        models: vec!["*".to_string()],
+                    },
+                    channels: vec![crate::config::TargetChannel {
+                        name: "test-channel".to_string(),
+                        weight: 1,
+                    }],
                     strategy: "round_robin".to_string(),
-                    metadata: None,
-                    fallback_channels: vec![],
-                    rules: vec![
-                        crate::config::RouterRule {
-                            match_spec: crate::config::MatchSpec { models: vec!["*".to_string()] },
-                            channels: vec![
-                                crate::config::TargetChannel {
-                                    name: "test-channel".to_string(),
-                                    weight: 1,
-                                }
-                            ],
-                            strategy: "round_robin".to_string(),
-                        }
-                    ],
-                }
-            ],
+                }],
+            }],
         }
     }
 
@@ -555,12 +597,14 @@ mod tests {
     async fn test_rate_limiter_blocks() {
         let config = create_test_config();
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
-        
+
         let state = Arc::new(AppState {
             config: Arc::new(RwLock::new(config)),
             metrics: Arc::new(MetricsState::new().unwrap()),
             providers: Arc::new(ProviderRegistry::new()),
-            access_audit: Arc::new(MockAccessAudit { calls: audit_calls.clone() }),
+            access_audit: Arc::new(MockAccessAudit {
+                calls: audit_calls.clone(),
+            }),
             rate_limiter: Arc::new(MockRateLimiter { allow: false }), // Block everything
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
@@ -575,7 +619,7 @@ mod tests {
             .unwrap();
 
         let resp = handle_openai(State(state), req).await;
-        
+
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }
 
@@ -583,12 +627,14 @@ mod tests {
     async fn test_access_audit_logged() {
         let config = create_test_config();
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
-        
+
         let state = Arc::new(AppState {
             config: Arc::new(RwLock::new(config)),
             metrics: Arc::new(MetricsState::new().unwrap()),
             providers: Arc::new(ProviderRegistry::new()),
-            access_audit: Arc::new(MockAccessAudit { calls: audit_calls.clone() }),
+            access_audit: Arc::new(MockAccessAudit {
+                calls: audit_calls.clone(),
+            }),
             rate_limiter: Arc::new(MockRateLimiter { allow: true }),
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
@@ -603,28 +649,34 @@ mod tests {
             .unwrap();
 
         let _ = handle_openai(State(state), req).await;
-        
+
         let calls = audit_calls.lock().unwrap();
         assert!(!calls.is_empty());
         assert_eq!(calls[0].0, ProviderType::Openai);
         assert_eq!(calls[0].1, false); // Failed
     }
-    
+
     #[test]
     fn test_read_auth_token() {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", "secret".parse().unwrap());
-        assert_eq!(read_auth_token(&headers, "x-api-key"), Some("secret".to_string()));
-        
+        assert_eq!(
+            read_auth_token(&headers, "x-api-key"),
+            Some("secret".to_string())
+        );
+
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer token".parse().unwrap());
-        assert_eq!(read_auth_token(&headers, "authorization"), Some("token".to_string()));
+        assert_eq!(
+            read_auth_token(&headers, "authorization"),
+            Some("token".to_string())
+        );
     }
 
     #[tokio::test]
     async fn test_routing_logic() {
         let mut config = create_test_config();
-        
+
         // Add another channel
         config.channels.push(Channel {
             name: "ch2".to_string(),
@@ -636,22 +688,32 @@ mod tests {
             model_map: None,
             timeouts: None,
         });
-        
+
         // Update router to match "gpt-4" to "ch2"
         let router = &mut config.routers[0];
-        router.rules.insert(0, crate::config::RouterRule {
-             match_spec: crate::config::MatchSpec { models: vec!["gpt-4".to_string()] },
-             channels: vec![crate::config::TargetChannel { name: "ch2".to_string(), weight: 1 }],
-             strategy: "priority".to_string(),
-        });
+        router.rules.insert(
+            0,
+            crate::config::RouterRule {
+                match_spec: crate::config::MatchSpec {
+                    models: vec!["gpt-4".to_string()],
+                },
+                channels: vec![crate::config::TargetChannel {
+                    name: "ch2".to_string(),
+                    weight: 1,
+                }],
+                strategy: "priority".to_string(),
+            },
+        );
 
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
-        
+
         let state = Arc::new(AppState {
             config: Arc::new(RwLock::new(config)),
             metrics: Arc::new(MetricsState::new().unwrap()),
             providers: Arc::new(ProviderRegistry::new()),
-            access_audit: Arc::new(MockAccessAudit { calls: audit_calls.clone() }),
+            access_audit: Arc::new(MockAccessAudit {
+                calls: audit_calls.clone(),
+            }),
             rate_limiter: Arc::new(MockRateLimiter { allow: true }),
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
@@ -667,7 +729,7 @@ mod tests {
             .unwrap();
 
         let _ = handle_openai(State(state.clone()), req).await;
-        
+
         let calls = audit_calls.lock().unwrap();
         assert!(!calls.is_empty(), "should have made a call");
         // The last call should be Anthropic because that's ch2's provider type

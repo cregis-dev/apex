@@ -1,7 +1,5 @@
 use anyhow::Context;
-use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder,
-};
+use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder};
 
 #[derive(Clone)]
 pub struct MetricsState {

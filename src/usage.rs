@@ -1,16 +1,29 @@
-use std::path::PathBuf;
-use std::fs::OpenOptions;
-use std::sync::{Arc, Mutex};
-use chrono::Local;
+use crate::metrics::MetricsState;
 use anyhow::Result;
 use axum::body::{Body, Bytes};
 use axum::response::Response;
+use chrono::Local;
 use futures::Stream;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use serde_json::Value;
+use std::fs::OpenOptions;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use tracing::{info, warn};
-use crate::metrics::MetricsState;
+
+fn expand_path(path_str: &str) -> PathBuf {
+    if path_str.starts_with("~")
+        && let Some(home) = dirs::home_dir() {
+            if path_str == "~" {
+                return home;
+            }
+            if let Some(stripped) = path_str.strip_prefix("~/") {
+                return home.join(stripped);
+            }
+        }
+    PathBuf::from(path_str)
+}
 
 pub struct UsageLogger {
     writer: Mutex<csv::Writer<std::fs::File>>,
@@ -19,7 +32,7 @@ pub struct UsageLogger {
 impl UsageLogger {
     pub fn new(log_dir: Option<String>) -> Result<Self> {
         let dir = if let Some(d) = log_dir {
-            PathBuf::from(d)
+            expand_path(&d)
         } else {
             PathBuf::from("logs")
         };
@@ -27,13 +40,13 @@ impl UsageLogger {
         if !dir.exists() {
             std::fs::create_dir_all(&dir)?;
         }
-        
+
         let file_path = dir.join("usage.csv");
         let abs_path = std::fs::canonicalize(&dir)?.join("usage.csv");
         info!("Usage logger initialized. Writing to: {:?}", abs_path);
 
         let file_exists = file_path.exists();
-        
+
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -44,7 +57,7 @@ impl UsageLogger {
             .from_writer(file);
 
         if !file_exists {
-            writer.write_record(&[
+            writer.write_record([
                 "timestamp",
                 "router",
                 "channel",
@@ -60,10 +73,17 @@ impl UsageLogger {
         })
     }
 
-    pub fn log(&self, router: &str, channel: &str, model: &str, input_tokens: u64, output_tokens: u64) {
+    pub fn log(
+        &self,
+        router: &str,
+        channel: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) {
         let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         if let Ok(mut w) = self.writer.lock() {
-            let _ = w.write_record(&[
+            let _ = w.write_record([
                 &timestamp,
                 router,
                 channel,
@@ -90,7 +110,13 @@ struct UsageTrackerState {
 }
 
 impl UsageTrackerState {
-    fn new(router: String, channel: String, model: String, logger: Arc<UsageLogger>, metrics: Arc<MetricsState>) -> Self {
+    fn new(
+        router: String,
+        channel: String,
+        model: String,
+        logger: Arc<UsageLogger>,
+        metrics: Arc<MetricsState>,
+    ) -> Self {
         Self {
             router,
             channel,
@@ -109,7 +135,7 @@ impl UsageTrackerState {
                 self.accumulated_data.push_str(s);
                 let mut start = 0;
                 while let Some(end) = self.accumulated_data[start..].find('\n') {
-                    let line = self.accumulated_data[start..start+end].to_string();
+                    let line = self.accumulated_data[start..start + end].to_string();
                     self.process_sse_line(&line);
                     start += end + 1;
                 }
@@ -118,7 +144,7 @@ impl UsageTrackerState {
                 }
             } else {
                 // For non-SSE, we expect the whole body or chunks of JSON.
-                // We'll accumulate everything and parse at the end, 
+                // We'll accumulate everything and parse at the end,
                 // but since we are in a stream wrapper, we can't easily know the end without state.
                 // However, `wrap_response` handles non-SSE by reading the full body first.
                 // So this method might only be called for SSE or if we implemented a buffering stream for non-SSE.
@@ -129,7 +155,9 @@ impl UsageTrackerState {
 
     fn process_sse_line(&mut self, line: &str) {
         if let Some(data) = line.strip_prefix("data: ") {
-            if data.trim() == "[DONE]" { return; }
+            if data.trim() == "[DONE]" {
+                return;
+            }
             if let Ok(json) = serde_json::from_str::<Value>(data) {
                 self.extract_usage(&json);
             }
@@ -147,36 +175,43 @@ impl UsageTrackerState {
             }
             // Anthropic in message_start (sometimes nested differently) or message_delta
             if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                 self.input_tokens += input;
+                self.input_tokens += input;
             }
             if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                 self.output_tokens += output;
+                self.output_tokens += output;
             }
         }
-        
+
         // Anthropic message_start (usage is inside message object)
-        if let Some(message) = json.get("message") {
-            if let Some(usage) = message.get("usage") {
+        if let Some(message) = json.get("message")
+            && let Some(usage) = message.get("usage") {
                 if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                     self.input_tokens += input;
+                    self.input_tokens += input;
                 }
                 if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                     self.output_tokens += output;
+                    self.output_tokens += output;
                 }
             }
-        }
     }
 
     fn flush(&self) {
         if self.input_tokens > 0 || self.output_tokens > 0 {
-             self.metrics.token_total
+            self.metrics
+                .token_total
                 .with_label_values(&[&self.router, &self.channel, &self.model, "input"])
                 .inc_by(self.input_tokens);
-             self.metrics.token_total
+            self.metrics
+                .token_total
                 .with_label_values(&[&self.router, &self.channel, &self.model, "output"])
                 .inc_by(self.output_tokens);
-             
-             self.logger.log(&self.router, &self.channel, &self.model, self.input_tokens, self.output_tokens);
+
+            self.logger.log(
+                &self.router,
+                &self.channel,
+                &self.model,
+                self.input_tokens,
+                self.output_tokens,
+            );
         }
     }
 }
@@ -221,7 +256,9 @@ pub async fn wrap_response(
     logger: Arc<UsageLogger>,
     metrics: Arc<MetricsState>,
 ) -> Response<Body> {
-    let is_sse = response.headers().get("content-type")
+    let is_sse = response
+        .headers()
+        .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.contains("text/event-stream"))
         .unwrap_or(false);
@@ -230,7 +267,7 @@ pub async fn wrap_response(
 
     if is_sse {
         let state = Arc::new(Mutex::new(UsageTrackerState::new(
-            router, channel, model, logger, metrics
+            router, channel, model, logger, metrics,
         )));
         let stream = body.into_data_stream();
         let usage_stream = UsageStream {
@@ -244,15 +281,13 @@ pub async fn wrap_response(
             Ok(b) => b,
             Err(_) => return Response::from_parts(parts, Body::empty()), // Should not happen often
         };
-        
+
         // Process usage
-        let mut state = UsageTrackerState::new(
-            router, channel, model, logger, metrics
-        );
-        
+        let mut state = UsageTrackerState::new(router, channel, model, logger, metrics);
+
         if let Ok(json) = serde_json::from_slice::<Value>(&bytes) {
-             state.extract_usage(&json);
-             state.flush();
+            state.extract_usage(&json);
+            state.flush();
         }
 
         Response::from_parts(parts, Body::from(bytes))
@@ -262,38 +297,55 @@ pub async fn wrap_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use std::fs;
+    use tempfile::tempdir;
 
     fn create_test_metrics() -> Arc<MetricsState> {
         Arc::new(MetricsState::new().unwrap())
     }
 
     #[test]
+    fn test_expand_path() {
+        // This test relies on HOME being set, which is standard.
+        let home = dirs::home_dir().expect("Home dir not found");
+        let path_str = "~/test_logs";
+        let expanded = expand_path(path_str);
+
+        assert_eq!(expanded, home.join("test_logs"));
+
+        let path_str_no_tilde = "/tmp/logs";
+        let expanded_no_tilde = expand_path(path_str_no_tilde);
+        assert_eq!(expanded_no_tilde, PathBuf::from("/tmp/logs"));
+    }
+
+    #[test]
     fn test_logger_initialization() {
         let dir = tempdir().unwrap();
         let dir_path = dir.path().to_str().unwrap().to_string();
-        
-        let logger = UsageLogger::new(Some(dir_path.clone())).unwrap();
+
+        let _logger = UsageLogger::new(Some(dir_path.clone())).unwrap();
         let file_path = dir.path().join("usage.csv");
-        
+
         assert!(file_path.exists());
         let content = fs::read_to_string(file_path).unwrap();
-        assert_eq!(content.trim(), "timestamp,router,channel,model,input_tokens,output_tokens");
+        assert_eq!(
+            content.trim(),
+            "timestamp,router,channel,model,input_tokens,output_tokens"
+        );
     }
 
     #[test]
     fn test_logger_writing() {
         let dir = tempdir().unwrap();
         let dir_path = dir.path().to_str().unwrap().to_string();
-        
+
         let logger = UsageLogger::new(Some(dir_path.clone())).unwrap();
         logger.log("r1", "c1", "m1", 10, 20);
-        
+
         let file_path = dir.path().join("usage.csv");
         let content = fs::read_to_string(file_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
-        
+
         assert_eq!(lines.len(), 2);
         assert!(lines[1].contains("r1,c1,m1,10,20"));
     }
@@ -301,11 +353,16 @@ mod tests {
     #[test]
     fn test_extract_usage_openai() {
         let dir = tempdir().unwrap();
-        let logger = Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
+        let logger =
+            Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
         let metrics = create_test_metrics();
-        
+
         let mut tracker = UsageTrackerState::new(
-            "r1".to_string(), "c1".to_string(), "m1".to_string(), logger, metrics
+            "r1".to_string(),
+            "c1".to_string(),
+            "m1".to_string(),
+            logger,
+            metrics,
         );
 
         let json = serde_json::json!({
@@ -323,11 +380,16 @@ mod tests {
     #[test]
     fn test_extract_usage_anthropic_message_start() {
         let dir = tempdir().unwrap();
-        let logger = Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
+        let logger =
+            Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
         let metrics = create_test_metrics();
-        
+
         let mut tracker = UsageTrackerState::new(
-            "r1".to_string(), "c1".to_string(), "m1".to_string(), logger, metrics
+            "r1".to_string(),
+            "c1".to_string(),
+            "m1".to_string(),
+            logger,
+            metrics,
         );
 
         let json = serde_json::json!({
@@ -344,15 +406,20 @@ mod tests {
         assert_eq!(tracker.input_tokens, 15);
         assert_eq!(tracker.output_tokens, 1);
     }
-    
+
     #[test]
     fn test_extract_usage_anthropic_message_delta() {
         let dir = tempdir().unwrap();
-        let logger = Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
+        let logger =
+            Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
         let metrics = create_test_metrics();
-        
+
         let mut tracker = UsageTrackerState::new(
-            "r1".to_string(), "c1".to_string(), "m1".to_string(), logger, metrics
+            "r1".to_string(),
+            "c1".to_string(),
+            "m1".to_string(),
+            logger,
+            metrics,
         );
 
         let json = serde_json::json!({
@@ -370,33 +437,43 @@ mod tests {
     #[test]
     fn test_process_sse_line() {
         let dir = tempdir().unwrap();
-        let logger = Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
+        let logger =
+            Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
         let metrics = create_test_metrics();
-        
+
         let mut tracker = UsageTrackerState::new(
-            "r1".to_string(), "c1".to_string(), "m1".to_string(), logger, metrics
+            "r1".to_string(),
+            "c1".to_string(),
+            "m1".to_string(),
+            logger,
+            metrics,
         );
 
         let line = r#"data: {"usage": {"prompt_tokens": 3, "completion_tokens": 4}}"#;
         tracker.process_sse_line(line);
-        
+
         assert_eq!(tracker.input_tokens, 3);
         assert_eq!(tracker.output_tokens, 4);
     }
-    
+
     #[test]
     fn test_process_chunk_sse_partial() {
         let dir = tempdir().unwrap();
-        let logger = Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
+        let logger =
+            Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
         let metrics = create_test_metrics();
-        
+
         let mut tracker = UsageTrackerState::new(
-            "r1".to_string(), "c1".to_string(), "m1".to_string(), logger, metrics
+            "r1".to_string(),
+            "c1".to_string(),
+            "m1".to_string(),
+            logger,
+            metrics,
         );
 
         tracker.process_chunk(b"data: {\"usage\": {\"pro", true);
         tracker.process_chunk(b"mpt_tokens\": 2}}\n\n", true);
-        
+
         assert_eq!(tracker.input_tokens, 2);
     }
 }

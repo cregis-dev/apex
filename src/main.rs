@@ -1,7 +1,7 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
+use rand::{Rng, distributions::Alphanumeric};
 use serde::Deserialize;
-use rand::{distributions::Alphanumeric, Rng};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -30,10 +30,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Init { config: Option<String> },
-    Channel { #[command(subcommand)] command: ChannelCommand },
-    Router { #[command(subcommand)] command: RouterCommand },
-    Gateway { #[command(subcommand)] command: GatewayCommand },
+    Init {
+        config: Option<String>,
+    },
+    Channel {
+        #[command(subcommand)]
+        command: ChannelCommand,
+    },
+    Router {
+        #[command(subcommand)]
+        command: RouterCommand,
+    },
+    Gateway {
+        #[command(subcommand)]
+        command: GatewayCommand,
+    },
     Status,
     Logs,
 }
@@ -49,16 +60,15 @@ enum GatewayCommand {
 }
 
 fn expand_path(path_str: &str) -> PathBuf {
-    if path_str.starts_with("~") {
-        if let Some(home) = dirs::home_dir() {
+    if path_str.starts_with("~")
+        && let Some(home) = dirs::home_dir() {
             if path_str == "~" {
                 return home;
             }
-            if path_str.starts_with("~/") {
-                return home.join(&path_str[2..]);
+            if let Some(stripped) = path_str.strip_prefix("~/") {
+                return home.join(stripped);
             }
         }
-    }
     PathBuf::from(path_str)
 }
 
@@ -79,17 +89,29 @@ fn get_log_dir(configured_dir: Option<String>) -> PathBuf {
 enum ChannelCommand {
     Add(ChannelAddArgs),
     Update(ChannelUpdateArgs),
-    Delete { name: String },
-    Show { name: String },
-    List { #[arg(long)] json: bool },
+    Delete {
+        name: String,
+    },
+    Show {
+        name: String,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum RouterCommand {
     Add(RouterAddArgs),
     Update(RouterUpdateArgs),
-    Delete { name: String },
-    List { #[arg(long)] json: bool },
+    Delete {
+        name: String,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -186,9 +208,12 @@ struct RouterUpdateArgs {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    
+
     // Check for daemon mode in Gateway Start command
-    let (is_daemon, start_config) = if let Commands::Gateway { command: GatewayCommand::Start { daemon, config } } = &cli.command {
+    let (is_daemon, start_config) = if let Commands::Gateway {
+        command: GatewayCommand::Start { daemon, config },
+    } = &cli.command
+    {
         (*daemon, config.clone())
     } else {
         (false, None)
@@ -197,17 +222,22 @@ fn main() -> anyhow::Result<()> {
     // Load config to get log level and dir
     let config_path = resolve_config_path(cli.config.clone().or(start_config));
     let config = config::load_config(&config_path).ok();
-    
-    let log_level = config.as_ref().map(|c| c.logging.level.clone()).unwrap_or_else(|| "info".to_string());
+
+    let log_level = config
+        .as_ref()
+        .map(|c| c.logging.level.clone())
+        .unwrap_or_else(|| "info".to_string());
     let log_dir_override = config.as_ref().and_then(|c| c.logging.dir.clone());
     let log_dir = get_log_dir(log_dir_override);
 
     if is_daemon {
         std::fs::create_dir_all(&log_dir).context("failed to create log dir")?;
-        
-        let stdout = std::fs::File::create(log_dir.join("stdout.log")).unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-        let stderr = std::fs::File::create(log_dir.join("stderr.log")).unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-        
+
+        let stdout = std::fs::File::create(log_dir.join("stdout.log"))
+            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+        let stderr = std::fs::File::create(log_dir.join("stderr.log"))
+            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+
         daemonize::Daemonize::new()
             .pid_file(log_dir.join("apex.pid"))
             .working_directory(".")
@@ -216,26 +246,34 @@ fn main() -> anyhow::Result<()> {
             .start()
             .context("failed to start daemon")?;
     }
-    
+
     let env_filter = format!("apex={},tower_http={}", log_level, log_level);
 
     let _guard = if is_daemon {
         // Setup daemon logging
         let file_appender = tracing_appender::rolling::daily(&log_dir, "apex.log");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-        
+
         tracing_subscriber::registry()
-            .with(tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| env_filter.into()))
-            .with(tracing_subscriber::fmt::layer().with_writer(non_blocking).with_ansi(false))
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| env_filter.into()),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(non_blocking)
+                    .with_ansi(false),
+            )
             .init();
-            
+
         Some(guard)
     } else {
         // Setup standard logging
         tracing_subscriber::registry()
-            .with(tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| env_filter.into()))
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| env_filter.into()),
+            )
             .with(tracing_subscriber::fmt::layer())
             .init();
         None
@@ -273,20 +311,20 @@ fn handle_logs_command(cli: &Cli) -> anyhow::Result<()> {
     let config = config::load_config(&path).ok();
     let log_dir_override = config.as_ref().and_then(|c| c.logging.dir.clone());
     let log_dir = get_log_dir(log_dir_override);
-    
+
     // Find the latest log file.
     // tracing_appender::rolling::daily creates files like "apex.log.YYYY-MM-DD"
-    // But the symlink/current might be different. 
+    // But the symlink/current might be different.
     // Wait, rolling appender usually creates files with dates suffix.
     // Let's list files in log_dir and find the most recent one matching "apex.log.*"
-    
+
     println!("Log directory: {}", log_dir.display());
-    
-    // For simplicity, we assume standard rolling naming. 
+
+    // For simplicity, we assume standard rolling naming.
     // However, tracing_appender doesn't create a "current" symlink by default unless configured?
     // Actually rolling appender creates `apex.log.YYYY-MM-DD`.
     // Let's try to find the newest file.
-    
+
     let entries = std::fs::read_dir(&log_dir).context("failed to read log dir")?;
     let mut logs: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
@@ -299,9 +337,9 @@ fn handle_logs_command(cli: &Cli) -> anyhow::Result<()> {
             }
         })
         .collect();
-        
+
     logs.sort();
-    
+
     if let Some(latest) = logs.last() {
         println!("Tailing log file: {}", latest.display());
         // Use tail -f
@@ -313,7 +351,7 @@ fn handle_logs_command(cli: &Cli) -> anyhow::Result<()> {
     } else {
         println!("No log files found in {}", log_dir.display());
     }
-    
+
     Ok(())
 }
 
@@ -329,16 +367,21 @@ fn handle_status_command(cli: &Cli) -> anyhow::Result<()> {
     let mut status = "Stopped";
     let mut pid_info = String::new();
 
-    if pid_path.exists() {
-        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+    if pid_path.exists()
+        && let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
             let pid_str = pid_str.trim();
             // Check if process exists (signal 0)
-            if std::process::Command::new("kill").arg("-0").arg(pid_str).output().map(|o| o.status.success()).unwrap_or(false) {
+            if std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid_str)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
                 status = "Running";
                 pid_info = format!(" (PID: {})", pid_str);
             }
         }
-    }
 
     println!("Gateway Status: {}{}", status, pid_info);
 
@@ -370,9 +413,9 @@ fn handle_stop_command(cli: &Cli) -> anyhow::Result<()> {
     let config = config::load_config(&path).ok();
     let log_dir_override = config.as_ref().and_then(|c| c.logging.dir.clone());
     let log_dir = get_log_dir(log_dir_override);
-    
+
     let pid_path = log_dir.join("apex.pid");
-    
+
     if !pid_path.exists() {
         println!("⚠️  PID file not found at {}", pid_path.display());
         println!("Is the daemon running?");
@@ -381,7 +424,7 @@ fn handle_stop_command(cli: &Cli) -> anyhow::Result<()> {
 
     let pid_str = std::fs::read_to_string(&pid_path).context("failed to read pid file")?;
     let pid_str = pid_str.trim();
-    
+
     // Validate PID format
     let pid: i32 = pid_str.parse().context("invalid pid in file")?;
 
@@ -429,7 +472,7 @@ fn resolve_config_path(path: Option<String>) -> PathBuf {
     home
 }
 
-fn init_config(path: &PathBuf) -> anyhow::Result<()> {
+fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
     if path.exists() {
         anyhow::bail!("config already exists: {}", path.display());
     }
@@ -474,9 +517,13 @@ fn init_config(path: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn load_config_or_exit(path: &PathBuf) -> anyhow::Result<Config> {
-    config::load_config(path)
-        .with_context(|| format!("failed to load config: {}", path.display()))
+fn load_config_or_exit(path: &std::path::Path) -> anyhow::Result<Config> {
+    if !path.exists() {
+        eprintln!("Config file not found at {:?}", path);
+        eprintln!("Run 'apex init' to create a default configuration.");
+        std::process::exit(1);
+    }
+    config::load_config(path).with_context(|| format!("failed to load config: {}", path.display()))
 }
 
 fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result<()> {
@@ -487,7 +534,7 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
             if config.channels.iter().any(|c| c.name == args.name) {
                 bail!("channel already exists: {}", args.name);
             }
-            
+
             let templates = load_provider_templates().unwrap_or_default();
 
             // 1. Select Provider
@@ -496,14 +543,14 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                 None => prompt_provider_select()?,
             };
             let provider = parse_provider_type(&provider_value)?;
-            
+
             let template = templates.iter().find(|t| t.provider_type == provider_value);
 
             // 2. Base URL
             let default_base_url = template
                 .map(|t| t.base_url.clone())
                 .unwrap_or_else(|| get_default_base_url(&provider).to_string());
-            
+
             let base_url = match &args.base_url {
                 Some(url) => url.clone(),
                 None => inquire::Text::new("OpenAI Base URL")
@@ -517,12 +564,16 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                 None => {
                     let default_anthropic = template
                         .and_then(|t| t.anthropic_base_url.clone())
-                        .or_else(|| get_default_anthropic_base_url(&provider).map(|s| s.to_string()));
+                        .or_else(|| {
+                            get_default_anthropic_base_url(&provider).map(|s| s.to_string())
+                        });
 
                     if let Some(default) = default_anthropic {
-                         Some(inquire::Text::new("Anthropic Base URL")
-                            .with_default(&default)
-                            .prompt()?)
+                        Some(
+                            inquire::Text::new("Anthropic Base URL")
+                                .with_default(&default)
+                                .prompt()?,
+                        )
                     } else {
                         None
                     }
@@ -579,33 +630,40 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
 
             // If provider changed, we might want to prompt for URLs if not provided
             if let Some(provider_val) = new_provider_value {
-                 let template = templates.iter().find(|t| t.provider_type == provider_val);
-                 
-                 // Base URL
-                  if args.base_url.is_none() {
-                      let default_base_url = template
-                         .map(|t| t.base_url.clone())
-                         .unwrap_or_else(|| get_default_base_url(&config.channels[channel_idx].provider_type).to_string());
-                      
-                      let new_url = inquire::Text::new("OpenAI Base URL")
+                let template = templates.iter().find(|t| t.provider_type == provider_val);
+
+                // Base URL
+                if args.base_url.is_none() {
+                    let default_base_url =
+                        template.map(|t| t.base_url.clone()).unwrap_or_else(|| {
+                            get_default_base_url(&config.channels[channel_idx].provider_type)
+                                .to_string()
+                        });
+
+                    let new_url = inquire::Text::new("OpenAI Base URL")
                         .with_default(&default_base_url)
                         .prompt()?;
-                     config.channels[channel_idx].base_url = new_url;
-                 }
+                    config.channels[channel_idx].base_url = new_url;
+                }
 
-                 // Anthropic Base URL
-                 if args.anthropic_base_url.is_none() && !args.clear_anthropic_base_url {
-                     let default_anthropic = template
+                // Anthropic Base URL
+                if args.anthropic_base_url.is_none() && !args.clear_anthropic_base_url {
+                    let default_anthropic = template
                         .and_then(|t| t.anthropic_base_url.clone())
-                        .or_else(|| get_default_anthropic_base_url(&config.channels[channel_idx].provider_type).map(|s| s.to_string()));
+                        .or_else(|| {
+                            get_default_anthropic_base_url(
+                                &config.channels[channel_idx].provider_type,
+                            )
+                            .map(|s| s.to_string())
+                        });
 
-                     if let Some(default) = default_anthropic {
-                         let new_url = inquire::Text::new("Anthropic Base URL")
+                    if let Some(default) = default_anthropic {
+                        let new_url = inquire::Text::new("Anthropic Base URL")
                             .with_default(&default)
                             .prompt()?;
-                         config.channels[channel_idx].anthropic_base_url = Some(new_url);
-                     }
-                 }
+                        config.channels[channel_idx].anthropic_base_url = Some(new_url);
+                    }
+                }
             }
 
             let channel = &mut config.channels[channel_idx];
@@ -637,10 +695,7 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                 || args.request_ms.is_some()
                 || args.response_ms.is_some()
             {
-                let base = channel
-                    .timeouts
-                    .as_ref()
-                    .unwrap_or(&config.global.timeouts);
+                let base = channel.timeouts.as_ref().unwrap_or(&config.global.timeouts);
                 channel.timeouts = Some(merge_timeouts(
                     base,
                     args.connect_ms,
@@ -658,7 +713,7 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
             if config.channels.len() == original_len {
                 bail!("channel not found: {}", name);
             }
-            
+
             // Remove channel from all routers' channel lists
             for router in &mut config.routers {
                 router.channels.retain(|c| c.name != *name);
@@ -672,16 +727,22 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
         }
         ChannelCommand::Show { name } => {
             let config = load_config_or_exit(&path)?;
-            let channel = config.channels.iter().find(|c| c.name == *name)
+            let channel = config
+                .channels
+                .iter()
+                .find(|c| c.name == *name)
                 .ok_or_else(|| anyhow::anyhow!("channel not found: {}", name))?;
-            
+
             println!("Channel Details:");
             println!("  Name:               {}", channel.name);
             println!("  Provider:           {:?}", channel.provider_type);
             println!("  Base URL:           {}", channel.base_url);
-            println!("  Anthropic Base URL: {}", channel.anthropic_base_url.as_deref().unwrap_or("N/A"));
+            println!(
+                "  Anthropic Base URL: {}",
+                channel.anthropic_base_url.as_deref().unwrap_or("N/A")
+            );
             println!("  Has API Key:        {}", !channel.api_key.is_empty());
-            
+
             if let Some(headers) = &channel.headers {
                 println!("  Headers:            {:?}", headers);
             }
@@ -728,17 +789,21 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             if config.routers.iter().any(|r| r.name == args.name) {
                 bail!("router already exists: {}", args.name);
             }
-            
+
             let mut target_channels = parse_target_channels(&args.channels)?;
-            
+
             // If no explicit channels list, prompt
             if target_channels.is_empty() {
                 let channel_name = prompt_channel_select(&config.channels, None)?;
-                target_channels.push(TargetChannel { name: channel_name, weight: 1 });
+                target_channels.push(TargetChannel {
+                    name: channel_name,
+                    weight: 1,
+                });
             }
 
             // Verify all channels exist
-            let channel_names: Vec<String> = target_channels.iter().map(|c| c.name.clone()).collect();
+            let channel_names: Vec<String> =
+                target_channels.iter().map(|c| c.name.clone()).collect();
             ensure_channels_exist(&config, &channel_names)?;
             ensure_channels_exist(&config, &args.fallback_channels)?;
 
@@ -761,15 +826,18 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
         }
         RouterCommand::Update(args) => {
             let mut config = load_config_or_exit(&path)?;
-            
-            let router_idx = config.routers.iter().position(|r| r.name == args.name)
+
+            let router_idx = config
+                .routers
+                .iter()
+                .position(|r| r.name == args.name)
                 .ok_or_else(|| anyhow::anyhow!("router not found: {}", args.name))?;
 
             // Check if we are in "interactive mode" (no explicit updates)
             let is_interactive = args.channels.is_empty()
-                && args.fallback_channels.is_empty() 
-                && !args.clear_fallbacks 
-                && args.vkey.is_none() 
+                && args.fallback_channels.is_empty()
+                && !args.clear_fallbacks
+                && args.vkey.is_none()
                 && !args.clear_vkey
                 && args.strategy.is_none()
                 && args.model_matchers.is_empty();
@@ -779,16 +847,22 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             if is_interactive {
                 println!("进入交互式更新模式 (按 Ctrl+C 取消)...");
                 let current_router = &config.routers[router_idx];
-                
+
                 // Channel
-                let current_channel = current_router.channels.first()
+                let current_channel = current_router
+                    .channels
+                    .first()
                     .map(|c| c.name.as_str())
                     .unwrap_or("");
                 let current_channel_string = current_channel.to_string();
 
-                let selection = prompt_channel_select(&config.channels, Some(&current_channel_string))?;
+                let selection =
+                    prompt_channel_select(&config.channels, Some(&current_channel_string))?;
                 if selection != current_channel_string {
-                    new_channels.push(TargetChannel { name: selection, weight: 1 });
+                    new_channels.push(TargetChannel {
+                        name: selection,
+                        weight: 1,
+                    });
                 }
             }
 
@@ -803,7 +877,7 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             if !args.fallback_channels.is_empty() {
                 ensure_channels_exist(&config, &args.fallback_channels)?;
             }
-            
+
             // Verify matcher targets
             if let Some(map) = parse_optional_map(&args.model_matchers)? {
                 let targets: Vec<String> = map.values().cloned().collect();
@@ -811,19 +885,25 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             }
 
             let router = &mut config.routers[router_idx];
-            
+
             if !new_channels.is_empty() {
                 router.channels = new_channels;
             }
-            
+
             if let Some(strategy) = &args.strategy {
                 router.strategy = strategy.clone();
             }
 
             if let Some(map) = parse_optional_map(&args.model_matchers)? {
-                let mut current_matchers = router.metadata.as_ref().map(|m| m.model_matcher.clone()).unwrap_or_default();
+                let mut current_matchers = router
+                    .metadata
+                    .as_ref()
+                    .map(|m| m.model_matcher.clone())
+                    .unwrap_or_default();
                 current_matchers.extend(map);
-                router.metadata = Some(config::RouterMetadata { model_matcher: current_matchers });
+                router.metadata = Some(config::RouterMetadata {
+                    model_matcher: current_matchers,
+                });
             }
 
             if args.clear_fallbacks {
@@ -917,21 +997,16 @@ fn prompt_provider_select() -> anyhow::Result<String> {
     Ok(selection.to_string())
 }
 
-
-
-
-
 fn prompt_channel_select(channels: &[Channel], default: Option<&str>) -> anyhow::Result<String> {
     let choices: Vec<String> = channels.iter().map(|c| c.name.clone()).collect();
     if choices.is_empty() {
         bail!("没有可用的 channel，请先创建 channel。");
     }
     let mut select = inquire::Select::new("请选择 channel:", choices.clone());
-    if let Some(d) = default {
-        if let Some(idx) = choices.iter().position(|x| x == d) {
+    if let Some(d) = default
+        && let Some(idx) = choices.iter().position(|x| x == d) {
             select = select.with_starting_cursor(idx);
         }
-    }
     let selection = select.prompt()?;
     Ok(selection)
 }
@@ -959,8 +1034,6 @@ fn get_default_anthropic_base_url(provider: &ProviderType) -> Option<&'static st
         _ => None,
     }
 }
-
-
 
 fn parse_optional_map(values: &[String]) -> anyhow::Result<Option<HashMap<String, String>>> {
     if values.is_empty() {
@@ -1052,11 +1125,16 @@ fn print_router_table(routers: &[Router]) {
     for router in routers {
         let vkey = router.vkey.clone().unwrap_or_default();
         let channels_display = if !router.channels.is_empty() {
-            router.channels.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(",")
+            router
+                .channels
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
         } else {
             String::new()
         };
-        
+
         println!(
             "{:<20} {:<20} {:<20} {:<15}",
             router.name,
@@ -1093,8 +1171,6 @@ mod tests {
     fn parse_provider_type_err() {
         assert!(parse_provider_type("unknown").is_err());
     }
-
-
 
     #[test]
     fn parse_optional_map_ok() {

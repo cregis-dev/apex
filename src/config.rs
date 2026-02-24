@@ -105,11 +105,11 @@ pub enum ProviderType {
 pub struct Router {
     pub name: String,
     pub vkey: Option<String>,
-    
+
     // New unified rules configuration
     #[serde(default)]
     pub rules: Vec<RouterRule>,
-    
+
     // Legacy fields (kept for backward compatibility, will be migrated to rules)
     #[serde(default)]
     pub channels: Vec<TargetChannel>,
@@ -188,7 +188,7 @@ pub struct HotReload {
 pub fn load_config(path: &Path) -> anyhow::Result<Config> {
     let content = fs::read_to_string(path)?;
     let mut config = serde_json::from_str::<Config>(&content)?;
-    
+
     // Migrate legacy configuration to rules
     for router in &mut config.routers {
         if router.rules.is_empty() {
@@ -207,7 +207,7 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
                     });
                 }
             }
-            
+
             // 2. Convert top-level channels to a default wildcard rule
             if !router.channels.is_empty() {
                 router.rules.push(RouterRule {
@@ -220,7 +220,7 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
             }
         }
     }
-    
+
     Ok(config)
 }
 

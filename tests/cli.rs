@@ -21,28 +21,43 @@ fn test_router_multichannel() {
 
     // 2. Add Channels (Need to add channels first)
     apex_cmd(config_str)
-        .arg("channel").arg("add")
-        .arg("--name").arg("c1")
-        .arg("--provider").arg("openai")
-        .arg("--base-url").arg("u1")
-        .arg("--api-key").arg("k1")
-        .assert().success();
+        .arg("channel")
+        .arg("add")
+        .arg("--name")
+        .arg("c1")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--base-url")
+        .arg("u1")
+        .arg("--api-key")
+        .arg("k1")
+        .assert()
+        .success();
 
     apex_cmd(config_str)
-        .arg("channel").arg("add")
-        .arg("--name").arg("c2")
-        .arg("--provider").arg("openai")
-        .arg("--base-url").arg("u2")
-        .arg("--api-key").arg("k2")
-        .assert().success();
+        .arg("channel")
+        .arg("add")
+        .arg("--name")
+        .arg("c2")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--base-url")
+        .arg("u2")
+        .arg("--api-key")
+        .arg("k2")
+        .assert()
+        .success();
 
     // 3. Add Router with multiple channels
     apex_cmd(config_str)
         .arg("router")
         .arg("add")
-        .arg("--name").arg("r_multi")
-        .arg("--channels").arg("c1:10,c2:5")
-        .arg("--strategy").arg("random")
+        .arg("--name")
+        .arg("r_multi")
+        .arg("--channels")
+        .arg("c1:10,c2:5")
+        .arg("--strategy")
+        .arg("random")
         .assert()
         .success()
         .stdout(predicate::str::contains("已添加 router: r_multi"));
@@ -52,17 +67,17 @@ fn test_router_multichannel() {
     let json: serde_json::Value = serde_json::from_str(&content).unwrap();
     let routers = json["routers"].as_array().unwrap();
     assert_eq!(routers.len(), 1);
-    
+
     let r = &routers[0];
     assert_eq!(r["name"], "r_multi");
     assert_eq!(r["strategy"], "random");
-    
+
     let channels = r["channels"].as_array().unwrap();
     assert_eq!(channels.len(), 2);
-    
+
     assert_eq!(channels[0]["name"], "c1");
     assert_eq!(channels[0]["weight"], 10);
-    
+
     assert_eq!(channels[1]["name"], "c2");
     assert_eq!(channels[1]["weight"], 5);
 }
@@ -82,7 +97,7 @@ fn test_init_creates_config() {
 
     // Verify file exists
     assert!(config_path.exists());
-    
+
     // Verify content is valid JSON
     let content = fs::read_to_string(&config_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -103,10 +118,14 @@ fn test_channel_lifecycle() {
     apex_cmd(config_str)
         .arg("channel")
         .arg("add")
-        .arg("--name").arg("test-openai")
-        .arg("--provider").arg("openai")
-        .arg("--base-url").arg("https://api.openai.com/v1")
-        .arg("--api-key").arg("sk-test")
+        .arg("--name")
+        .arg("test-openai")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--base-url")
+        .arg("https://api.openai.com/v1")
+        .arg("--api-key")
+        .arg("sk-test")
         .assert()
         .success()
         .stdout(predicate::str::contains("已添加 channel: test-openai"));
@@ -123,8 +142,10 @@ fn test_channel_lifecycle() {
     apex_cmd(config_str)
         .arg("channel")
         .arg("update")
-        .arg("--name").arg("test-openai")
-        .arg("--api-key").arg("sk-updated")
+        .arg("--name")
+        .arg("test-openai")
+        .arg("--api-key")
+        .arg("sk-updated")
         .assert()
         .success()
         .stdout(predicate::str::contains("已更新 channel: test-openai"));
@@ -160,10 +181,14 @@ fn test_router_lifecycle() {
     apex_cmd(config_str)
         .arg("channel")
         .arg("add")
-        .arg("--name").arg("c1")
-        .arg("--provider").arg("openai")
-        .arg("--base-url").arg("https://api.openai.com/v1")
-        .arg("--api-key").arg("sk-test")
+        .arg("--name")
+        .arg("c1")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--base-url")
+        .arg("https://api.openai.com/v1")
+        .arg("--api-key")
+        .arg("sk-test")
         .assert()
         .success();
 
@@ -171,8 +196,10 @@ fn test_router_lifecycle() {
     apex_cmd(config_str)
         .arg("router")
         .arg("add")
-        .arg("--name").arg("r1")
-        .arg("--channels").arg("c1")
+        .arg("--name")
+        .arg("r1")
+        .arg("--channels")
+        .arg("c1")
         .assert()
         .success()
         .stdout(predicate::str::contains("已添加 router: r1"));
@@ -214,11 +241,16 @@ fn test_minimax_anthropic_default() {
     apex_cmd(config_str)
         .arg("channel")
         .arg("add")
-        .arg("--name").arg("mm")
-        .arg("--provider").arg("minimax")
-        .arg("--base-url").arg("https://api.minimax.io/anthropic")
-        .arg("--anthropic-base-url").arg("https://api.minimax.io/anthropic")
-        .arg("--api-key").arg("sk-mm")
+        .arg("--name")
+        .arg("mm")
+        .arg("--provider")
+        .arg("minimax")
+        .arg("--base-url")
+        .arg("https://api.minimax.io/anthropic")
+        .arg("--anthropic-base-url")
+        .arg("https://api.minimax.io/anthropic")
+        .arg("--api-key")
+        .arg("sk-mm")
         .assert()
         .success();
 

@@ -8,7 +8,10 @@ const GATEWAY_URL: &str = "http://127.0.0.1:12356";
 const VKEY: &str = "test-key";
 
 // Helper to send a request
-async fn send_chat_request(client: &Client, messages: Vec<serde_json::Value>) -> Result<(u16, u128), Box<dyn Error + Send + Sync>> {
+async fn send_chat_request(
+    client: &Client,
+    messages: Vec<serde_json::Value>,
+) -> Result<(u16, u128), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
     let res = client
         .post(format!("{}/v1/chat/completions", GATEWAY_URL))
@@ -21,11 +24,14 @@ async fn send_chat_request(client: &Client, messages: Vec<serde_json::Value>) ->
         .send()
         .await
         .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
-    
+
     let status = res.status().as_u16();
-    let _text = res.text().await.map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?; // Ensure body is read
+    let _text = res
+        .text()
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?; // Ensure body is read
     let duration = start.elapsed().as_millis();
-    
+
     Ok((status, duration))
 }
 
@@ -36,7 +42,7 @@ async fn test_continuous_conversation() -> Result<(), Box<dyn Error>> {
     println!("Starting Continuous Conversation Test...");
 
     let mut messages = vec![
-        json!({"role": "user", "content": "Hello, I am testing the gateway. Remember that my favorite number is 42."})
+        json!({"role": "user", "content": "Hello, I am testing the gateway. Remember that my favorite number is 42."}),
     ];
 
     // Turn 1
@@ -46,10 +52,10 @@ async fn test_continuous_conversation() -> Result<(), Box<dyn Error>> {
         .map_err(|e| e as Box<dyn Error>)?;
     assert_eq!(status, 200);
     println!("Turn 1 completed in {}ms", duration);
-    
+
     // Simulate assistant response
     messages.push(json!({"role": "assistant", "content": "Hello! I've noted that your favorite number is 42."}));
-    
+
     // Turn 2
     println!("Turn 2: Follow-up question...");
     messages.push(json!({"role": "user", "content": "What is my favorite number?"}));
@@ -111,7 +117,11 @@ async fn test_concurrency_stability() -> Result<(), Box<dyn Error>> {
     }
 
     let total_duration = start_total.elapsed().as_millis();
-    let avg_latency = if success_count > 0 { total_latency / success_count as u128 } else { 0 };
+    let avg_latency = if success_count > 0 {
+        total_latency / success_count as u128
+    } else {
+        0
+    };
 
     println!("Concurrency Test Results:");
     println!("Total Requests: {}", concurrency);
@@ -119,6 +129,9 @@ async fn test_concurrency_stability() -> Result<(), Box<dyn Error>> {
     println!("Total Wall Time: {}ms", total_duration);
     println!("Average Request Latency: {}ms", avg_latency);
 
-    assert_eq!(success_count, concurrency, "Not all concurrent requests succeeded");
+    assert_eq!(
+        success_count, concurrency,
+        "Not all concurrent requests succeeded"
+    );
     Ok(())
 }

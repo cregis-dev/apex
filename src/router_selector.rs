@@ -1,14 +1,19 @@
 use crate::config::Router;
+use glob::Pattern;
 use moka::sync::Cache;
 use rand::seq::SliceRandom;
-use rand::prelude::Distribution;
 use std::time::Duration;
-use glob::Pattern;
 
 #[derive(Clone)]
 pub struct RouterSelector {
     // Cache key: "router_name:model_name" -> value: Option<TargetChannelName>
     rule_cache: Cache<String, Option<String>>,
+}
+
+impl Default for RouterSelector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RouterSelector {
@@ -27,25 +32,25 @@ impl RouterSelector {
         // Use unified rule-based selection
         // We cache the index of the matched rule, or None if no rule matches
         let cache_key = format!("{}:{}", router.name, model);
-        
+
         let _rule_idx: Option<usize> = if let Some(_idx) = self.rule_cache.get(&cache_key) {
-             // Parse cached value: "some(1)" or "none"
-             // For simplicity, let's just cache the target channel directly if it's deterministic?
-             // But wait, strategy might be random/round_robin, so we can't cache the final channel name.
-             // We MUST cache which RULE matched, and then re-apply strategy.
-             // However, our current cache stores Option<String>.
-             // Let's refactor the cache usage.
-             // Since we are changing logic significantly, let's rebuild the flow.
-             None // Disable cache for a moment to implement logic first
+            // Parse cached value: "some(1)" or "none"
+            // For simplicity, let's just cache the target channel directly if it's deterministic?
+            // But wait, strategy might be random/round_robin, so we can't cache the final channel name.
+            // We MUST cache which RULE matched, and then re-apply strategy.
+            // However, our current cache stores Option<String>.
+            // Let's refactor the cache usage.
+            // Since we are changing logic significantly, let's rebuild the flow.
+            None // Disable cache for a moment to implement logic first
         } else {
-             None
+            None
         };
-        
+
         // Find matching rule
         // Note: In a real high-perf scenario, we should cache the matched rule index.
         // For now, let's iterate rules every time or use the cache to store "channel name" IF strategy is priority (deterministic).
         // But if strategy is round_robin, we must re-evaluate.
-        
+
         // Let's just find the rule first.
         let matched_rule = router.rules.iter().find(|rule| {
             for pattern_str in &rule.match_spec.models {
@@ -54,24 +59,27 @@ impl RouterSelector {
                     return true;
                 }
                 // 2. Glob match
-                if let Ok(pattern) = Pattern::new(pattern_str) {
-                    if pattern.matches(model) {
+                if let Ok(pattern) = Pattern::new(pattern_str)
+                    && pattern.matches(model) {
                         return true;
                     }
-                }
             }
             false
         });
-        
+
         if let Some(rule) = matched_rule {
-             return self.apply_strategy(&rule.channels, &rule.strategy);
+            return self.apply_strategy(&rule.channels, &rule.strategy);
         }
 
         // If no rules matched (shouldn't happen if we have a default * rule, but possible)
         None
     }
 
-    fn apply_strategy(&self, channels: &[crate::config::TargetChannel], strategy: &str) -> Option<String> {
+    fn apply_strategy(
+        &self,
+        channels: &[crate::config::TargetChannel],
+        strategy: &str,
+    ) -> Option<String> {
         if channels.is_empty() {
             return None;
         }
@@ -85,14 +93,31 @@ impl RouterSelector {
                 // Always pick the first one
                 channels.first().map(|c| c.name.clone())
             }
-            "round_robin" | _ => {
-                // Weighted Random as stateless approximation of Weighted Round Robin
-                let dist = rand::distributions::WeightedIndex::new(
-                    channels.iter().map(|c| c.weight)
-                );
-                
+            "round_robin" => {
+                let dist =
+                    rand::distributions::WeightedIndex::new(channels.iter().map(|c| c.weight));
+
                 match dist {
                     Ok(dist) => {
+                        use rand::distributions::Distribution;
+                        let mut rng = rand::thread_rng();
+                        let idx = dist.sample(&mut rng);
+                        channels.get(idx).map(|c| c.name.clone())
+                    }
+                    Err(_) => {
+                        // Fallback if weights are invalid
+                        channels.first().map(|c| c.name.clone())
+                    }
+                }
+            }
+            _ => {
+                // Default to round robin if unknown
+                let dist =
+                    rand::distributions::WeightedIndex::new(channels.iter().map(|c| c.weight));
+
+                match dist {
+                    Ok(dist) => {
+                        use rand::distributions::Distribution;
                         let mut rng = rand::thread_rng();
                         let idx = dist.sample(&mut rng);
                         channels.get(idx).map(|c| c.name.clone())
@@ -110,7 +135,7 @@ impl RouterSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Router, RouterRule, MatchSpec, TargetChannel};
+    use crate::config::{MatchSpec, Router, RouterRule, TargetChannel};
 
     fn create_channel(name: &str, weight: u32) -> TargetChannel {
         TargetChannel {
@@ -134,13 +159,13 @@ mod tests {
     #[test]
     fn test_exact_match_priority() {
         let selector = RouterSelector::new();
-        let rules = vec![
-            RouterRule {
-                match_spec: MatchSpec { models: vec!["gpt-4".to_string()] },
-                channels: vec![create_channel("ch1", 1), create_channel("ch2", 1)],
-                strategy: "priority".to_string(),
-            }
-        ];
+        let rules = vec![RouterRule {
+            match_spec: MatchSpec {
+                models: vec!["gpt-4".to_string()],
+            },
+            channels: vec![create_channel("ch1", 1), create_channel("ch2", 1)],
+            strategy: "priority".to_string(),
+        }];
         let router = create_router(rules);
 
         // Should always pick ch1
@@ -157,30 +182,36 @@ mod tests {
     #[test]
     fn test_glob_match() {
         let selector = RouterSelector::new();
-        let rules = vec![
-            RouterRule {
-                match_spec: MatchSpec { models: vec!["gpt-*".to_string()] },
-                channels: vec![create_channel("ch1", 1)],
-                strategy: "priority".to_string(),
-            }
-        ];
+        let rules = vec![RouterRule {
+            match_spec: MatchSpec {
+                models: vec!["gpt-*".to_string()],
+            },
+            channels: vec![create_channel("ch1", 1)],
+            strategy: "priority".to_string(),
+        }];
         let router = create_router(rules);
 
-        assert_eq!(selector.select_channel(&router, "gpt-4"), Some("ch1".to_string()));
-        assert_eq!(selector.select_channel(&router, "gpt-3.5"), Some("ch1".to_string()));
+        assert_eq!(
+            selector.select_channel(&router, "gpt-4"),
+            Some("ch1".to_string())
+        );
+        assert_eq!(
+            selector.select_channel(&router, "gpt-3.5"),
+            Some("ch1".to_string())
+        );
         assert_eq!(selector.select_channel(&router, "claude"), None);
     }
 
     #[test]
     fn test_round_robin_distribution() {
         let selector = RouterSelector::new();
-        let rules = vec![
-            RouterRule {
-                match_spec: MatchSpec { models: vec!["*".to_string()] },
-                channels: vec![create_channel("A", 1), create_channel("B", 1)],
-                strategy: "round_robin".to_string(),
-            }
-        ];
+        let rules = vec![RouterRule {
+            match_spec: MatchSpec {
+                models: vec!["*".to_string()],
+            },
+            channels: vec![create_channel("A", 1), create_channel("B", 1)],
+            strategy: "round_robin".to_string(),
+        }];
         let router = create_router(rules);
 
         let mut counts = std::collections::HashMap::new();
@@ -198,13 +229,13 @@ mod tests {
     #[test]
     fn test_weighted_round_robin() {
         let selector = RouterSelector::new();
-        let rules = vec![
-            RouterRule {
-                match_spec: MatchSpec { models: vec!["*".to_string()] },
-                channels: vec![create_channel("A", 10), create_channel("B", 0)], // B has 0 weight
-                strategy: "round_robin".to_string(),
-            }
-        ];
+        let rules = vec![RouterRule {
+            match_spec: MatchSpec {
+                models: vec!["*".to_string()],
+            },
+            channels: vec![create_channel("A", 10), create_channel("B", 0)], // B has 0 weight
+            strategy: "round_robin".to_string(),
+        }];
         let router = create_router(rules);
 
         for _ in 0..20 {

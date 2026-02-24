@@ -21,7 +21,6 @@ pub enum RouteKind {
     Openai,
     /// Client expects Anthropic format
     Anthropic,
-
 }
 
 /// Represents a request prepared for sending to the upstream provider.
@@ -70,12 +69,12 @@ impl RateLimiter for NoOpRateLimiter {
 pub trait ProviderAdapter: Send + Sync {
     /// Maps the request path based on the route kind and provider conventions.
     fn map_path(&self, route: RouteKind, base_url: &str, path: &str) -> String;
-    
+
     /// Maps query parameters. Returns None if parameters should be stripped.
     fn map_query(&self, _route: RouteKind, query: Option<&str>) -> Option<String> {
         query.map(|s| s.to_string())
     }
-    
+
     /// Transforms the request body.
     /// This is where model remapping or format conversion (Anthropic -> OpenAI) happens.
     fn transform_body(
@@ -84,10 +83,16 @@ pub trait ProviderAdapter: Send + Sync {
         body: &Bytes,
         model_map: &Option<HashMap<String, String>>,
     ) -> Bytes;
-    
+
     /// Applies authentication headers (e.g., Bearer token, x-api-key).
-    fn apply_auth_headers(&self, route: RouteKind, headers: &mut HeaderMap, api_key: &str, base_url: &str);
-    
+    fn apply_auth_headers(
+        &self,
+        route: RouteKind,
+        headers: &mut HeaderMap,
+        api_key: &str,
+        base_url: &str,
+    );
+
     /// Handles the upstream response.
     /// This allows adapters to inspect headers, status codes, and convert body formats.
     fn handle_response(
@@ -106,13 +111,19 @@ pub struct ProviderRegistry {
     fallback: Box<dyn ProviderAdapter>,
 }
 
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProviderRegistry {
     pub fn new() -> Self {
         let mut adapters: HashMap<ProviderType, Box<dyn ProviderAdapter>> = HashMap::new();
         adapters.insert(ProviderType::Openai, Box::new(OpenAiAdapter));
         adapters.insert(ProviderType::Anthropic, Box::new(AnthropicAdapter));
         adapters.insert(ProviderType::Gemini, Box::new(GeminiAdapter));
-        
+
         // Providers that support both protocols
         adapters.insert(ProviderType::Deepseek, Box::new(DualProtocolAdapter::new()));
         adapters.insert(ProviderType::Moonshot, Box::new(DualProtocolAdapter::new()));
@@ -120,7 +131,7 @@ impl ProviderRegistry {
         adapters.insert(ProviderType::Ollama, Box::new(DefaultAdapter));
         adapters.insert(ProviderType::Jina, Box::new(DefaultAdapter));
         adapters.insert(ProviderType::Openrouter, Box::new(DefaultAdapter));
-        
+
         Self {
             adapters,
             fallback: Box::new(DefaultAdapter),
@@ -188,8 +199,8 @@ pub fn convert_response(resp: reqwest::Response, timeout: Duration) -> Response<
     }
     let stream = resp.bytes_stream().timeout(timeout);
     let stream = stream.map(|item| match item {
-        Ok(Ok(bytes)) => Ok(Bytes::from(bytes)),
-        Ok(Err(err)) => Err(io::Error::new(io::ErrorKind::Other, err)),
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(err)) => Err(io::Error::other(err)),
         Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
     });
     builder
@@ -207,11 +218,10 @@ fn build_headers(headers: &HeaderMap, channel: &Channel) -> HeaderMap {
     }
     if let Some(extra_headers) = &channel.headers {
         for (key, value) in extra_headers {
-            if let Ok(header_name) = HeaderName::from_bytes(key.as_bytes()) {
-                if let Ok(header_value) = HeaderValue::from_str(value) {
+            if let Ok(header_name) = HeaderName::from_bytes(key.as_bytes())
+                && let Ok(header_value) = HeaderValue::from_str(value) {
                     result.insert(header_name, header_value);
                 }
-            }
         }
     }
     result
@@ -221,11 +231,7 @@ fn should_forward_header(name: &HeaderName) -> bool {
     let lower = name.as_str().to_ascii_lowercase();
     !matches!(
         lower.as_str(),
-        "host"
-            | "content-length"
-            | "x-api-key"
-            | "authorization"
-            | "accept-encoding"
+        "host" | "content-length" | "x-api-key" | "authorization" | "accept-encoding"
     ) && !lower.starts_with("anthropic-")
         && !lower.starts_with("x-stainless-")
 }
@@ -237,7 +243,7 @@ fn build_url(base: &str, path: &str, query: Option<&str>) -> anyhow::Result<Url>
         format!("{}/", base)
     };
     let mut url = Url::parse(&base)?;
-    
+
     // Deduplicate 'v1' if base ends with it and path starts with it
     let path = if base.trim_end_matches('/').ends_with("/v1") && path.starts_with("v1/") {
         &path[3..]
@@ -289,11 +295,10 @@ fn apply_bearer_auth(headers: &mut HeaderMap, api_key: &str, header_name: &str) 
     } else {
         api_key.to_string()
     };
-    if let Ok(name) = HeaderName::from_bytes(header_name.as_bytes()) {
-        if let Ok(value) = HeaderValue::from_str(&value) {
+    if let Ok(name) = HeaderName::from_bytes(header_name.as_bytes())
+        && let Ok(value) = HeaderValue::from_str(&value) {
             headers.insert(name, value);
         }
-    }
 }
 
 // --- Adapters ---
@@ -324,7 +329,13 @@ impl ProviderAdapter for DefaultAdapter {
         }
     }
 
-    fn apply_auth_headers(&self, _route: RouteKind, headers: &mut HeaderMap, api_key: &str, _base_url: &str) {
+    fn apply_auth_headers(
+        &self,
+        _route: RouteKind,
+        headers: &mut HeaderMap,
+        api_key: &str,
+        _base_url: &str,
+    ) {
         apply_bearer_auth(headers, api_key, "authorization");
     }
 
@@ -367,8 +378,8 @@ impl ProviderAdapter for DefaultAdapter {
 
             let stream = resp.bytes_stream().timeout(timeout);
             let stream = stream.map(|item| match item {
-                Ok(Ok(bytes)) => Ok(Bytes::from(bytes)),
-                Ok(Err(err)) => Err(io::Error::new(io::ErrorKind::Other, err)),
+                Ok(Ok(bytes)) => Ok(bytes),
+                Ok(Err(err)) => Err(io::Error::other(err)),
                 Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
             });
 
@@ -411,7 +422,13 @@ impl ProviderAdapter for OpenAiAdapter {
         apply_model_map(body, model_map)
     }
 
-    fn apply_auth_headers(&self, _route: RouteKind, headers: &mut HeaderMap, api_key: &str, _base_url: &str) {
+    fn apply_auth_headers(
+        &self,
+        _route: RouteKind,
+        headers: &mut HeaderMap,
+        api_key: &str,
+        _base_url: &str,
+    ) {
         apply_bearer_auth(headers, api_key, "authorization");
     }
 }
@@ -433,15 +450,19 @@ impl ProviderAdapter for AnthropicAdapter {
         apply_model_map(body, model_map)
     }
 
-    fn apply_auth_headers(&self, _route: RouteKind, headers: &mut HeaderMap, api_key: &str, _base_url: &str) {
+    fn apply_auth_headers(
+        &self,
+        _route: RouteKind,
+        headers: &mut HeaderMap,
+        api_key: &str,
+        _base_url: &str,
+    ) {
         apply_bearer_auth(headers, api_key, "x-api-key");
-        if !headers.contains_key("anthropic-version") {
-            if let Ok(name) = HeaderName::from_bytes(b"anthropic-version") {
-                if let Ok(value) = HeaderValue::from_str("2023-06-01") {
+        if !headers.contains_key("anthropic-version")
+            && let Ok(name) = HeaderName::from_bytes(b"anthropic-version")
+                && let Ok(value) = HeaderValue::from_str("2023-06-01") {
                     headers.insert(name, value);
                 }
-            }
-        }
     }
 }
 
@@ -453,8 +474,8 @@ impl ProviderAdapter for GeminiAdapter {
         match route {
             RouteKind::Anthropic => "chat/completions".to_string(),
             _ => {
-                if path.starts_with("v1/") {
-                    path[3..].to_string()
+                if let Some(stripped) = path.strip_prefix("v1/") {
+                    stripped.to_string()
                 } else {
                     path.to_string()
                 }
@@ -485,7 +506,13 @@ impl ProviderAdapter for GeminiAdapter {
         }
     }
 
-    fn apply_auth_headers(&self, _route: RouteKind, headers: &mut HeaderMap, api_key: &str, base_url: &str) {
+    fn apply_auth_headers(
+        &self,
+        _route: RouteKind,
+        headers: &mut HeaderMap,
+        api_key: &str,
+        base_url: &str,
+    ) {
         // Some Gemini endpoints/proxies might use OpenAI format if running via a bridge,
         // but native Gemini usually uses x-goog-api-key or query param.
         // Assuming here we are talking to a service that accepts header auth.
@@ -498,7 +525,7 @@ impl ProviderAdapter for GeminiAdapter {
 }
 
 /// Adapter that supports both OpenAI and Anthropic protocols natively.
-/// 
+///
 /// It routes requests to the appropriate endpoint based on the request protocol,
 /// rewriting the base URL if necessary (e.g. switching between /v1 and /anthropic).
 struct DualProtocolAdapter {
@@ -518,22 +545,20 @@ impl DualProtocolAdapter {
         let base = base_url.trim_end_matches('/');
         match route {
             RouteKind::Anthropic => {
-                if base.ends_with("/v1") {
-                    let prefix = &base[..base.len() - 3];
+                if let Some(prefix) = base.strip_suffix("/v1") {
                     format!("{}/anthropic", prefix)
                 } else if !base.ends_with("/anthropic") {
                     format!("{}/anthropic", base)
                 } else {
                     base.to_string()
                 }
-            },
+            }
             RouteKind::Openai => {
-                 if base.ends_with("/anthropic") {
-                    let prefix = &base[..base.len() - 10];
+                if let Some(prefix) = base.strip_suffix("/anthropic") {
                     format!("{}/v1", prefix)
-                 } else {
+                } else {
                     base.to_string()
-                 }
+                }
             }
         }
     }
@@ -542,7 +567,7 @@ impl DualProtocolAdapter {
 impl ProviderAdapter for DualProtocolAdapter {
     fn map_path(&self, route: RouteKind, base_url: &str, path: &str) -> String {
         let target_base = self.resolve_target_url(route, base_url);
-        
+
         let suffix = match route {
             RouteKind::Anthropic => self.anthropic.map_path(route, &target_base, path),
             _ => self.openai.map_path(route, &target_base, path),
@@ -550,37 +575,39 @@ impl ProviderAdapter for DualProtocolAdapter {
 
         // If we modified the base URL, we must return an absolute URL to override the original base
         if target_base != base_url.trim_end_matches('/') {
-             // Ensure target_base ends with / if needed for joining?
-             // Actually, Url::parse(target_base).join(suffix) is safer.
-             if let Ok(_base) = Url::parse(&target_base) {
-                 // We need to ensure the base has a trailing slash if it's a directory,
-                 // but resolve_target_url strips it. 
-                 // If target_base is "https://api.foo.com/anthropic", we want to join "v1/messages" -> "https://api.foo.com/anthropic/v1/messages"
-                 // So we should append / to base if not present.
-                 let base_with_slash = if target_base.ends_with('/') {
-                     target_base
-                 } else {
-                     format!("{}/", target_base)
-                 };
+            // Ensure target_base ends with / if needed for joining?
+            // Actually, Url::parse(target_base).join(suffix) is safer.
+            if let Ok(_base) = Url::parse(&target_base) {
+                // We need to ensure the base has a trailing slash if it's a directory,
+                // but resolve_target_url strips it.
+                // If target_base is "https://api.foo.com/anthropic", we want to join "v1/messages" -> "https://api.foo.com/anthropic/v1/messages"
+                // So we should append / to base if not present.
+                let base_with_slash = if target_base.ends_with('/') {
+                    target_base
+                } else {
+                    format!("{}/", target_base)
+                };
 
-                 if let Ok(base_url) = Url::parse(&base_with_slash) {
-                     // Strip leading slash from suffix to ensure it's treated as relative
-                     let relative_suffix = suffix.trim_start_matches('/');
-                     
-                     // Deduplicate 'v1' if base ends with it and suffix starts with it
-                     let suffix_clean = if base_with_slash.ends_with("/v1/") && relative_suffix.starts_with("v1/") {
-                         &relative_suffix[3..]
-                     } else {
-                         relative_suffix
-                     };
-                     
-                     if let Ok(joined) = base_url.join(suffix_clean) {
-                         return joined.to_string();
-                     }
-                 }
-             }
+                if let Ok(base_url) = Url::parse(&base_with_slash) {
+                    // Strip leading slash from suffix to ensure it's treated as relative
+                    let relative_suffix = suffix.trim_start_matches('/');
+
+                    // Deduplicate 'v1' if base ends with it and suffix starts with it
+                    let suffix_clean = if base_with_slash.ends_with("/v1/")
+                        && relative_suffix.starts_with("v1/")
+                    {
+                        &relative_suffix[3..]
+                    } else {
+                        relative_suffix
+                    };
+
+                    if let Ok(joined) = base_url.join(suffix_clean) {
+                        return joined.to_string();
+                    }
+                }
+            }
         }
-        
+
         suffix
     }
 
@@ -597,13 +624,23 @@ impl ProviderAdapter for DualProtocolAdapter {
         }
     }
 
-    fn apply_auth_headers(&self, route: RouteKind, headers: &mut HeaderMap, api_key: &str, base_url: &str) {
-         match route {
-            RouteKind::Anthropic => self.anthropic.apply_auth_headers(route, headers, api_key, base_url),
-            _ => self.openai.apply_auth_headers(route, headers, api_key, base_url),
+    fn apply_auth_headers(
+        &self,
+        route: RouteKind,
+        headers: &mut HeaderMap,
+        api_key: &str,
+        base_url: &str,
+    ) {
+        match route {
+            RouteKind::Anthropic => self
+                .anthropic
+                .apply_auth_headers(route, headers, api_key, base_url),
+            _ => self
+                .openai
+                .apply_auth_headers(route, headers, api_key, base_url),
         }
     }
-    
+
     // Use default handle_response which is pass-through for OpenAi/Anthropic adapters usually,
     // but we can delegate if needed. Both OpenAiAdapter and AnthropicAdapter use default.
 }
@@ -626,7 +663,11 @@ mod tests {
             timeouts: None,
         };
         let adapter = registry.adapter(&channel);
-        let mapped = adapter.map_path(RouteKind::Openai, "https://example.com", "/v1/chat/completions");
+        let mapped = adapter.map_path(
+            RouteKind::Openai,
+            "https://example.com",
+            "/v1/chat/completions",
+        );
         assert_eq!(mapped, "/v1/chat/completions");
     }
 
@@ -712,19 +753,26 @@ mod tests {
         )
         .unwrap();
         assert!(prepared.headers.get("x-api-key").is_some());
-        assert_eq!(prepared.headers.get("anthropic-version").unwrap(), "2023-06-01");
+        assert_eq!(
+            prepared.headers.get("anthropic-version").unwrap(),
+            "2023-06-01"
+        );
     }
 
     #[test]
     fn dual_protocol_adapter_switches_base_url() {
         let adapter = DualProtocolAdapter::new();
-        
+
         // Case 1: OpenAI route with OpenAI base_url -> keeps as is
         // base: https://api.minimax.io/v1
         // route: OpenAI
         // resolve: keeps https://api.minimax.io/v1
         // map_path: returns suffix "/v1/chat/completions" (OpenAiAdapter behavior)
-        let url = adapter.map_path(RouteKind::Openai, "https://api.minimax.io/v1", "/v1/chat/completions");
+        let url = adapter.map_path(
+            RouteKind::Openai,
+            "https://api.minimax.io/v1",
+            "/v1/chat/completions",
+        );
         assert_eq!(url, "/v1/chat/completions");
 
         // Case 2: Anthropic route with OpenAI base_url -> switches to /anthropic
@@ -732,7 +780,11 @@ mod tests {
         // route: Anthropic
         // resolve: https://api.minimax.io/anthropic
         // map_path: returns absolute URL
-        let url = adapter.map_path(RouteKind::Anthropic, "https://api.minimax.io/v1", "/v1/messages");
+        let url = adapter.map_path(
+            RouteKind::Anthropic,
+            "https://api.minimax.io/v1",
+            "/v1/messages",
+        );
         assert_eq!(url, "https://api.minimax.io/anthropic/v1/messages");
 
         // Case 3: OpenAI route with Anthropic base_url -> switches to /v1
@@ -740,7 +792,11 @@ mod tests {
         // route: OpenAI
         // resolve: https://api.minimax.io/v1
         // map_path: returns absolute URL
-        let url = adapter.map_path(RouteKind::Openai, "https://api.minimax.io/anthropic", "/v1/chat/completions");
+        let url = adapter.map_path(
+            RouteKind::Openai,
+            "https://api.minimax.io/anthropic",
+            "/v1/chat/completions",
+        );
         // Note: v1 deduplication should happen here
         assert_eq!(url, "https://api.minimax.io/v1/chat/completions");
 
@@ -749,7 +805,11 @@ mod tests {
         // route: Anthropic
         // resolve: https://api.deepseek.com/anthropic
         // map_path: returns absolute URL
-        let url = adapter.map_path(RouteKind::Anthropic, "https://api.deepseek.com", "/v1/messages");
+        let url = adapter.map_path(
+            RouteKind::Anthropic,
+            "https://api.deepseek.com",
+            "/v1/messages",
+        );
         assert_eq!(url, "https://api.deepseek.com/anthropic/v1/messages");
 
         // Case 5: Deepseek style (no v1 in base) -> OpenAI route
@@ -757,7 +817,11 @@ mod tests {
         // route: OpenAI
         // resolve: https://api.deepseek.com (no change)
         // map_path: returns suffix
-        let url = adapter.map_path(RouteKind::Openai, "https://api.deepseek.com", "/v1/chat/completions");
+        let url = adapter.map_path(
+            RouteKind::Openai,
+            "https://api.deepseek.com",
+            "/v1/chat/completions",
+        );
         assert_eq!(url, "/v1/chat/completions");
     }
 
@@ -877,7 +941,7 @@ mod tests {
     fn build_url_deduplicates_v1() {
         let url = build_url("https://api.example.com/v1", "v1/chat/completions", None).unwrap();
         assert_eq!(url.as_str(), "https://api.example.com/v1/chat/completions");
-        
+
         let url = build_url("https://api.example.com/v1/", "v1/chat/completions", None).unwrap();
         assert_eq!(url.as_str(), "https://api.example.com/v1/chat/completions");
 

@@ -1,10 +1,13 @@
 mod common;
 use common::*;
 
+use apex::config::{
+    Auth, AuthMode, Channel, MatchSpec, ProviderType, Router as GatewayRouter, RouterRule,
+    TargetChannel,
+};
+use apex::server::{build_app, build_state};
 use axum::body::Body;
 use axum::http::StatusCode;
-use apex::config::{Auth, AuthMode, Channel, MatchSpec, ProviderType, Router as GatewayRouter, RouterRule, TargetChannel};
-use apex::server::{build_app, build_state};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -26,13 +29,21 @@ async fn e2e_openai_route_success() {
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
         vkey: Some("vk_test".to_string()),
-        channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
+        channels: vec![TargetChannel {
+            name: "primary".to_string(),
+            weight: 1,
+        }],
         strategy: "round_robin".to_string(),
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
-            match_spec: MatchSpec { models: vec!["*".to_string()] },
-            channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
+            match_spec: MatchSpec {
+                models: vec!["*".to_string()],
+            },
+            channels: vec![TargetChannel {
+                name: "primary".to_string(),
+                weight: 1,
+            }],
             strategy: "priority".to_string(),
         }],
     });
@@ -72,7 +83,10 @@ async fn e2e_global_auth_required() {
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
         vkey: Some("vk_test".to_string()),
-        channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
+        channels: vec![TargetChannel {
+            name: "primary".to_string(),
+            weight: 1,
+        }],
         strategy: "round_robin".to_string(),
         metadata: None,
         fallback_channels: vec![],
@@ -121,13 +135,21 @@ async fn e2e_fallback_on_failure() {
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
         vkey: Some("vk_test".to_string()),
-        channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
+        channels: vec![TargetChannel {
+            name: "primary".to_string(),
+            weight: 1,
+        }],
         strategy: "round_robin".to_string(),
         metadata: None,
         fallback_channels: vec!["fallback".to_string()],
         rules: vec![RouterRule {
-            match_spec: MatchSpec { models: vec!["*".to_string()] },
-            channels: vec![TargetChannel { name: "primary".to_string(), weight: 1 }],
+            match_spec: MatchSpec {
+                models: vec!["*".to_string()],
+            },
+            channels: vec![TargetChannel {
+                name: "primary".to_string(),
+                weight: 1,
+            }],
             strategy: "priority".to_string(),
         }],
     });
@@ -145,5 +167,3 @@ async fn e2e_fallback_on_failure() {
     let (status, body) = response_text(resp).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
 }
-
-
