@@ -219,9 +219,10 @@ fn build_headers(headers: &HeaderMap, channel: &Channel) -> HeaderMap {
     if let Some(extra_headers) = &channel.headers {
         for (key, value) in extra_headers {
             if let Ok(header_name) = HeaderName::from_bytes(key.as_bytes())
-                && let Ok(header_value) = HeaderValue::from_str(value) {
-                    result.insert(header_name, header_value);
-                }
+                && let Ok(header_value) = HeaderValue::from_str(value)
+            {
+                result.insert(header_name, header_value);
+            }
         }
     }
     result
@@ -296,9 +297,10 @@ fn apply_bearer_auth(headers: &mut HeaderMap, api_key: &str, header_name: &str) 
         api_key.to_string()
     };
     if let Ok(name) = HeaderName::from_bytes(header_name.as_bytes())
-        && let Ok(value) = HeaderValue::from_str(&value) {
-            headers.insert(name, value);
-        }
+        && let Ok(value) = HeaderValue::from_str(&value)
+    {
+        headers.insert(name, value);
+    }
 }
 
 // --- Adapters ---
@@ -460,9 +462,10 @@ impl ProviderAdapter for AnthropicAdapter {
         apply_bearer_auth(headers, api_key, "x-api-key");
         if !headers.contains_key("anthropic-version")
             && let Ok(name) = HeaderName::from_bytes(b"anthropic-version")
-                && let Ok(value) = HeaderValue::from_str("2023-06-01") {
-                    headers.insert(name, value);
-                }
+            && let Ok(value) = HeaderValue::from_str("2023-06-01")
+        {
+            headers.insert(name, value);
+        }
     }
 }
 

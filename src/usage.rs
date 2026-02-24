@@ -14,14 +14,15 @@ use tracing::{info, warn};
 
 fn expand_path(path_str: &str) -> PathBuf {
     if path_str.starts_with("~")
-        && let Some(home) = dirs::home_dir() {
-            if path_str == "~" {
-                return home;
-            }
-            if let Some(stripped) = path_str.strip_prefix("~/") {
-                return home.join(stripped);
-            }
+        && let Some(home) = dirs::home_dir()
+    {
+        if path_str == "~" {
+            return home;
         }
+        if let Some(stripped) = path_str.strip_prefix("~/") {
+            return home.join(stripped);
+        }
+    }
     PathBuf::from(path_str)
 }
 
@@ -184,14 +185,15 @@ impl UsageTrackerState {
 
         // Anthropic message_start (usage is inside message object)
         if let Some(message) = json.get("message")
-            && let Some(usage) = message.get("usage") {
-                if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                    self.input_tokens += input;
-                }
-                if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                    self.output_tokens += output;
-                }
+            && let Some(usage) = message.get("usage")
+        {
+            if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                self.input_tokens += input;
             }
+            if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                self.output_tokens += output;
+            }
+        }
     }
 
     fn flush(&self) {

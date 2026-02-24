@@ -189,9 +189,10 @@ fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Respo
             };
             let token = read_auth_token(headers, "authorization");
             if let Some(token) = token
-                && keys.contains(&token) {
-                    return Ok(());
-                }
+                && keys.contains(&token)
+            {
+                return Ok(());
+            }
             Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized"))
         }
     }
@@ -199,21 +200,23 @@ fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Respo
 
 fn read_auth_token(headers: &HeaderMap, key: &str) -> Option<String> {
     if let Some(val) = headers.get(key)
-        && let Ok(s) = val.to_str() {
-            if key == "authorization" && s.starts_with("Bearer ") {
-                return Some(s[7..].to_string());
-            }
-            return Some(s.to_string());
+        && let Ok(s) = val.to_str()
+    {
+        if key == "authorization" && s.starts_with("Bearer ") {
+            return Some(s[7..].to_string());
         }
+        return Some(s.to_string());
+    }
     None
 }
 
 fn find_router_by_vkey(config: &Config, vkey: &str) -> Option<String> {
     for router in &config.routers {
         if let Some(ref k) = router.vkey
-            && k == vkey {
-                return Some(router.name.clone());
-            }
+            && k == vkey
+        {
+            return Some(router.name.clone());
+        }
     }
     None
 }
@@ -286,15 +289,16 @@ async fn process_request(
     let model_name_str = model_name.as_deref().unwrap_or("default");
 
     if let Some(ch_name) = state.selector.select_channel(router, model_name_str)
-        && let Some(ch) = config.channels.iter().find(|c| c.name == ch_name) {
-            channels.push(ch);
-            tracing::info!(
-                "Channel selected: {} (strategy={}, model={})",
-                ch.name,
-                router.strategy,
-                model_name_str
-            );
-        }
+        && let Some(ch) = config.channels.iter().find(|c| c.name == ch_name)
+    {
+        channels.push(ch);
+        tracing::info!(
+            "Channel selected: {} (strategy={}, model={})",
+            ch.name,
+            router.strategy,
+            model_name_str
+        );
+    }
 
     // Add fallbacks
     for fb_name in &router.fallback_channels {

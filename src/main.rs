@@ -61,14 +61,15 @@ enum GatewayCommand {
 
 fn expand_path(path_str: &str) -> PathBuf {
     if path_str.starts_with("~")
-        && let Some(home) = dirs::home_dir() {
-            if path_str == "~" {
-                return home;
-            }
-            if let Some(stripped) = path_str.strip_prefix("~/") {
-                return home.join(stripped);
-            }
+        && let Some(home) = dirs::home_dir()
+    {
+        if path_str == "~" {
+            return home;
         }
+        if let Some(stripped) = path_str.strip_prefix("~/") {
+            return home.join(stripped);
+        }
+    }
     PathBuf::from(path_str)
 }
 
@@ -368,20 +369,21 @@ fn handle_status_command(cli: &Cli) -> anyhow::Result<()> {
     let mut pid_info = String::new();
 
     if pid_path.exists()
-        && let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-            let pid_str = pid_str.trim();
-            // Check if process exists (signal 0)
-            if std::process::Command::new("kill")
-                .arg("-0")
-                .arg(pid_str)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-            {
-                status = "Running";
-                pid_info = format!(" (PID: {})", pid_str);
-            }
+        && let Ok(pid_str) = std::fs::read_to_string(&pid_path)
+    {
+        let pid_str = pid_str.trim();
+        // Check if process exists (signal 0)
+        if std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid_str)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            status = "Running";
+            pid_info = format!(" (PID: {})", pid_str);
         }
+    }
 
     println!("Gateway Status: {}{}", status, pid_info);
 
@@ -1004,9 +1006,10 @@ fn prompt_channel_select(channels: &[Channel], default: Option<&str>) -> anyhow:
     }
     let mut select = inquire::Select::new("请选择 channel:", choices.clone());
     if let Some(d) = default
-        && let Some(idx) = choices.iter().position(|x| x == d) {
-            select = select.with_starting_cursor(idx);
-        }
+        && let Some(idx) = choices.iter().position(|x| x == d)
+    {
+        select = select.with_starting_cursor(idx);
+    }
     let selection = select.prompt()?;
     Ok(selection)
 }

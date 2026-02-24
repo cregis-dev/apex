@@ -54,36 +54,38 @@ pub fn convert_openai_response_to_anthropic(body: Bytes) -> Bytes {
 
     // Content
     if let Some(choices) = val.get("choices").and_then(|c| c.as_array())
-        && let Some(first) = choices.first() {
-            if let Some(message) = first.get("message")
-                && let Some(content) = message.get("content").and_then(|c| c.as_str()) {
-                    new_body.insert(
-                        "content".to_string(),
-                        serde_json::json!([
-                            {
-                                "type": "text",
-                                "text": content
-                            }
-                        ]),
-                    );
-                }
-            if let Some(finish_reason) = first.get("finish_reason").and_then(|fr| fr.as_str()) {
-                let stop_reason = match finish_reason {
-                    "stop" => "end_turn",
-                    "length" => "max_tokens",
-                    _ => "stop_sequence",
-                };
-                new_body.insert(
-                    "stop_reason".to_string(),
-                    serde_json::Value::String(stop_reason.to_string()),
-                );
-            } else {
-                new_body.insert(
-                    "stop_reason".to_string(),
-                    serde_json::Value::String("end_turn".to_string()),
-                );
-            }
+        && let Some(first) = choices.first()
+    {
+        if let Some(message) = first.get("message")
+            && let Some(content) = message.get("content").and_then(|c| c.as_str())
+        {
+            new_body.insert(
+                "content".to_string(),
+                serde_json::json!([
+                    {
+                        "type": "text",
+                        "text": content
+                    }
+                ]),
+            );
         }
+        if let Some(finish_reason) = first.get("finish_reason").and_then(|fr| fr.as_str()) {
+            let stop_reason = match finish_reason {
+                "stop" => "end_turn",
+                "length" => "max_tokens",
+                _ => "stop_sequence",
+            };
+            new_body.insert(
+                "stop_reason".to_string(),
+                serde_json::Value::String(stop_reason.to_string()),
+            );
+        } else {
+            new_body.insert(
+                "stop_reason".to_string(),
+                serde_json::Value::String("end_turn".to_string()),
+            );
+        }
+    }
 
     // Model
     if let Some(model) = val.get("model") {
@@ -184,46 +186,48 @@ where
                             }
 
                             if let Some(choices) = val.get("choices").and_then(|c| c.as_array())
-                                && let Some(choice) = choices.first() {
-                                    if let Some(delta) = choice.get("delta")
-                                        && let Some(content) =
-                                            delta.get("content").and_then(|c| c.as_str())
-                                            && !content.is_empty() {
-                                                events.push(format!(
-                                                    "event: content_block_delta\ndata: {}\n\n",
-                                                    serde_json::json!({
-                                                        "type": "content_block_delta",
-                                                        "index": 0,
-                                                        "delta": {
-                                                            "type": "text_delta",
-                                                            "text": content
-                                                        }
-                                                    })
-                                                ));
+                                && let Some(choice) = choices.first()
+                            {
+                                if let Some(delta) = choice.get("delta")
+                                    && let Some(content) =
+                                        delta.get("content").and_then(|c| c.as_str())
+                                    && !content.is_empty()
+                                {
+                                    events.push(format!(
+                                        "event: content_block_delta\ndata: {}\n\n",
+                                        serde_json::json!({
+                                            "type": "content_block_delta",
+                                            "index": 0,
+                                            "delta": {
+                                                "type": "text_delta",
+                                                "text": content
                                             }
-
-                                    if let Some(finish_reason) =
-                                        choice.get("finish_reason").and_then(|fr| fr.as_str())
-                                    {
-                                        let stop_reason = match finish_reason {
-                                            "stop" => "end_turn",
-                                            "length" => "max_tokens",
-                                            _ => "stop_sequence",
-                                        };
-
-                                        events.push(format!(
-                                            "event: message_delta\ndata: {}\n\n",
-                                            serde_json::json!({
-                                                "type": "message_delta",
-                                                "delta": {
-                                                    "stop_reason": stop_reason,
-                                                    "stop_sequence": null
-                                                },
-                                                 "usage": {"output_tokens": 0}
-                                            })
-                                        ));
-                                    }
+                                        })
+                                    ));
                                 }
+
+                                if let Some(finish_reason) =
+                                    choice.get("finish_reason").and_then(|fr| fr.as_str())
+                                {
+                                    let stop_reason = match finish_reason {
+                                        "stop" => "end_turn",
+                                        "length" => "max_tokens",
+                                        _ => "stop_sequence",
+                                    };
+
+                                    events.push(format!(
+                                        "event: message_delta\ndata: {}\n\n",
+                                        serde_json::json!({
+                                            "type": "message_delta",
+                                            "delta": {
+                                                "stop_reason": stop_reason,
+                                                "stop_sequence": null
+                                            },
+                                             "usage": {"output_tokens": 0}
+                                        })
+                                    ));
+                                }
+                            }
 
                             if !events.is_empty() {
                                 let output = events.join("");
@@ -244,10 +248,7 @@ where
                         buffer.extend_from_slice(&bytes);
                     }
                     Some(Err(e)) => {
-                        return Some((
-                            Err(io::Error::other(e)),
-                            (stream, buffer, sent_header),
-                        ));
+                        return Some((Err(io::Error::other(e)), (stream, buffer, sent_header)));
                     }
                     None => {
                         return None;

@@ -60,9 +60,10 @@ impl RouterSelector {
                 }
                 // 2. Glob match
                 if let Ok(pattern) = Pattern::new(pattern_str)
-                    && pattern.matches(model) {
-                        return true;
-                    }
+                    && pattern.matches(model)
+                {
+                    return true;
+                }
             }
             false
         });
