@@ -1,9 +1,11 @@
-# Ignore test artifacts
+# Runtime data
 logs/
-test-data/
-*.tmp
 *.log
 apex.json
+
+# Ignore test artifacts
+test-data/
+*.tmp
 
 # Rust artifacts
 target/
