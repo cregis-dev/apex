@@ -1,6 +1,7 @@
 use crate::config::{AuthMode, Config};
 use crate::metrics::MetricsState;
 use crate::router_selector::RouterSelector;
+use crate::usage::UsageLogger;
 use crate::providers::{
     prepare_request,
     ProviderRegistry, RouteKind,
@@ -30,6 +31,7 @@ pub struct AppState {
     pub rate_limiter: Arc<dyn RateLimiter>,
     pub selector: Arc<RouterSelector>,
     pub client: reqwest::Client,
+    pub usage_logger: Arc<UsageLogger>,
 }
 
 pub async fn run_server(path: PathBuf) -> anyhow::Result<()> {
@@ -63,6 +65,8 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
 
     let client = builder.build()?;
 
+    let usage_logger = Arc::new(UsageLogger::new(config.logging.dir.clone())?);
+
     Ok(Arc::new(AppState {
         config: Arc::new(RwLock::new(config)),
         metrics: Arc::new(MetricsState::new()?),
@@ -71,6 +75,7 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
         rate_limiter: Arc::new(NoOpRateLimiter),
         selector: Arc::new(RouterSelector::new()),
         client,
+        usage_logger,
     }))
 }
 
@@ -95,7 +100,22 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                 .layer(PropagateRequestIdLayer::x_request_id())
                 .layer(
                     TraceLayer::new_for_http()
-                        .make_span_with(trace::DefaultMakeSpan::new().level(Level::INFO))
+                        .make_span_with(|request: &Request<Body>| {
+                            let request_id = request.extensions().get::<tower_http::request_id::RequestId>()
+                                .map(|id| id.header_value().to_str().unwrap_or("unknown"))
+                                .unwrap_or("unknown");
+                            let client_ip = request.headers().get("x-forwarded-for")
+                                .and_then(|h| h.to_str().ok())
+                                .unwrap_or("unknown");
+                            
+                            tracing::info_span!("request", 
+                                request_id = %request_id,
+                                client_ip = %client_ip,
+                                method = %request.method(), 
+                                uri = %request.uri(), 
+                                version = ?request.version()
+                            )
+                        })
                         .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
                 ),
         )
@@ -255,7 +275,7 @@ async fn process_request(
          return error_response(StatusCode::NOT_FOUND, "router not found");
     };
 
-    tracing::info!("Router resolved: {:?} (vkey=***)", router.name);
+    tracing::info!("Router resolved: {}", router.name);
 
     // 3. Resolve Channels
     let mut channels = Vec::new();
@@ -272,7 +292,7 @@ async fn process_request(
         if let Some(ch) = config.channels.iter().find(|c| c.name == ch_name) {
             channels.push(ch);
             tracing::info!(
-                "Channel selected: {:?} (strategy={}, model={})", 
+                "Channel selected: {} (strategy={}, model={})", 
                 ch.name, 
                 router.strategy,
                 model_name_str
@@ -349,7 +369,14 @@ async fn process_request(
                  Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
              };
 
-             tracing::debug!("Upstream request to {:?}", req_built.url());
+             tracing::info!(
+                 "Upstream request: method={} url={} attempt={}/{}",
+                 req_built.method(),
+                 req_built.url(),
+                 attempt + 1,
+                 max_attempts
+             );
+             
              let resp_result = state.client.execute(req_built).await;
              
              match resp_result {
@@ -362,12 +389,20 @@ async fn process_request(
 
                      let status = resp.status();
                      if status.is_success() {
-                         tracing::info!("Upstream success: {} ({}ms)", status, elapsed);
-                         state.access_audit.audit(&channel.provider_type, route, true);
-                         return adapter.handle_response(route, resp, Duration::from_millis(config.global.timeouts.response_ms));
-                     }
-                     
-                     tracing::warn!("Upstream failed: {} ({}ms)", status, elapsed);
+                        tracing::info!("Upstream success: {} ({}ms)", status, elapsed);
+                        state.access_audit.audit(&channel.provider_type, route, true);
+                        let response = adapter.handle_response(route, resp, Duration::from_millis(config.global.timeouts.response_ms));
+                        return crate::usage::wrap_response(
+                            response,
+                            router_name.clone(),
+                            channel.name.clone(),
+                            model_name_str.to_string(),
+                            state.usage_logger.clone(),
+                            state.metrics.clone(),
+                        ).await;
+                    }
+                    
+                    tracing::warn!("Upstream failed: {} ({}ms)", status, elapsed);
                      state.access_audit.audit(&channel.provider_type, route, false);
                      
                      // Check if retryable
@@ -529,6 +564,7 @@ mod tests {
             rate_limiter: Arc::new(MockRateLimiter { allow: false }), // Block everything
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
+            usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
         });
 
         let req = Request::builder()
@@ -556,6 +592,7 @@ mod tests {
             rate_limiter: Arc::new(MockRateLimiter { allow: true }),
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
+            usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
         });
 
         let req = Request::builder()
@@ -618,6 +655,7 @@ mod tests {
             rate_limiter: Arc::new(MockRateLimiter { allow: true }),
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
+            usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
         });
 
         // Request with model "gpt-4" -> should go to ch2 (Anthropic)

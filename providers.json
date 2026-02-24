@@ -37,8 +37,8 @@
     },
     {
       "provider_type": "moonshot",
-      "base_url": "https://api.moonshot.cn/v1",
-      "anthropic_base_url": "https://api.moonshot.cn/anthropic",
+      "base_url": "https://api.moonshot.ai/v1",
+      "anthropic_base_url": "https://api.moonshot.ai/anthropic",
       "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "MOONSHOT_API_KEY" },
       "headers": {},
       "model_map": {},

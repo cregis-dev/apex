@@ -32,7 +32,6 @@ Standard HTTP access logging for every request.
 
 ### 4.2. Routing Log
 Context about how the request was routed.
-- `vkey`: (Partially redacted if needed)
 - `router`: "openai-router"
 - `channel`: "google-gemini"
 - `model`: "gpt-4" -> "gemini-pro" (mapped)

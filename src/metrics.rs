@@ -8,6 +8,7 @@ pub struct MetricsState {
     registry: Registry,
     pub request_total: IntCounterVec,
     pub error_total: IntCounterVec,
+    pub token_total: IntCounterVec,
     pub upstream_latency_ms: HistogramVec,
     pub fallback_total: IntCounterVec,
 }
@@ -25,6 +26,11 @@ impl MetricsState {
             &["route", "router"],
         )
         .context("create error_total")?;
+        let token_total = IntCounterVec::new(
+            prometheus::Opts::new("apex_token_total", "Token usage total"),
+            &["router", "channel", "model", "type"],
+        )
+        .context("create token_total")?;
         let upstream_latency_ms = HistogramVec::new(
             HistogramOpts::new("apex_upstream_latency_ms", "Upstream latency in ms"),
             &["route", "router", "channel"],
@@ -43,6 +49,9 @@ impl MetricsState {
             .register(Box::new(error_total.clone()))
             .context("register error_total")?;
         registry
+            .register(Box::new(token_total.clone()))
+            .context("register token_total")?;
+        registry
             .register(Box::new(upstream_latency_ms.clone()))
             .context("register upstream_latency_ms")?;
         registry
@@ -53,6 +62,7 @@ impl MetricsState {
             registry,
             request_total,
             error_total,
+            token_total,
             upstream_latency_ms,
             fallback_total,
         })

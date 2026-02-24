@@ -12,6 +12,7 @@ mod metrics;
 mod providers;
 mod router_selector;
 mod server;
+mod usage;
 
 use config::{
     Auth, AuthMode, Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router,
@@ -47,9 +48,23 @@ enum GatewayCommand {
     Stop,
 }
 
+fn expand_path(path_str: &str) -> PathBuf {
+    if path_str.starts_with("~") {
+        if let Some(home) = dirs::home_dir() {
+            if path_str == "~" {
+                return home;
+            }
+            if path_str.starts_with("~/") {
+                return home.join(&path_str[2..]);
+            }
+        }
+    }
+    PathBuf::from(path_str)
+}
+
 fn get_log_dir(configured_dir: Option<String>) -> PathBuf {
     if let Some(dir) = configured_dir {
-        return PathBuf::from(dir);
+        return expand_path(&dir);
     }
 
     if cfg!(target_os = "macos") {
@@ -406,7 +421,7 @@ fn handle_stop_command(cli: &Cli) -> anyhow::Result<()> {
 
 fn resolve_config_path(path: Option<String>) -> PathBuf {
     if let Some(path) = path {
-        return PathBuf::from(path);
+        return expand_path(&path);
     }
     let mut home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.push(".apex");
