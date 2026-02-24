@@ -187,14 +187,19 @@ fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Respo
             let Some(keys) = &config.global.auth.keys else {
                 return Ok(());
             };
-            let token = read_auth_token(headers, "authorization")
-                .or_else(|| read_auth_token(headers, "x-api-key"));
+            
+            let candidates = [
+                read_auth_token(headers, "authorization"),
+                read_auth_token(headers, "x-api-key"),
+            ];
 
-            if let Some(token) = token {
+            for token in candidates.into_iter().flatten() {
                 if keys.contains(&token) {
                     return Ok(());
                 }
             }
+            
+            tracing::warn!("Global auth failed. No valid token found in Authorization or x-api-key headers.");
             Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized"))
         }
     }
@@ -256,18 +261,32 @@ async fn process_request(
     let router_name = if let Some(name) = router_name_override {
         name
     } else {
-        // Try Authorization header first, then x-api-key (standard Anthropic)
-        let vkey = read_auth_token(&headers, "authorization")
-            .or_else(|| read_auth_token(&headers, "x-api-key"));
+        // Check all potential tokens
+        let candidates = [
+            read_auth_token(&headers, "authorization"),
+            read_auth_token(&headers, "x-api-key"),
+        ];
 
-        if let Some(key) = vkey {
-            if let Some(name) = find_router_by_vkey(&config, &key) {
-                name
-            } else {
-                return error_response(StatusCode::UNAUTHORIZED, "invalid vkey");
-            }
+        let mut found_router = None;
+        for token in candidates.iter().flatten() {
+             if let Some(name) = find_router_by_vkey(&config, token) {
+                 found_router = Some(name);
+                 break;
+             }
+        }
+        
+        if let Some(name) = found_router {
+            name
         } else {
-            return error_response(StatusCode::UNAUTHORIZED, "missing vkey");
+             // Return appropriate error
+             let has_token = candidates.iter().any(|c| c.is_some());
+             if has_token {
+                 tracing::warn!("Router resolution failed. Valid token format found but no matching router vkey.");
+                 return error_response(StatusCode::UNAUTHORIZED, "invalid vkey");
+             } else {
+                 tracing::warn!("Router resolution failed. No auth token found.");
+                 return error_response(StatusCode::UNAUTHORIZED, "missing vkey");
+             }
         }
     };
 
