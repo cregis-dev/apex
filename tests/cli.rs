@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 // Helper to run apex with a custom config path
 fn apex_cmd(config_path: &str) -> Command {
-    let mut cmd = Command::cargo_bin("apex").unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apex"));
     cmd.arg("--config").arg(config_path);
     cmd
 }
