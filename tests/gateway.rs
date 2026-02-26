@@ -107,8 +107,8 @@ async fn e2e_global_auth_required() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_fallback_on_failure() {
-    let primary = spawn_upstream_status(StatusCode::INTERNAL_SERVER_ERROR, "fail").await;
-    let fallback = spawn_upstream_status(StatusCode::OK, "ok").await;
+    let primary = spawn_upstream_status(StatusCode::INTERNAL_SERVER_ERROR, r#""fail""#).await;
+    let fallback = spawn_upstream_status(StatusCode::OK, r#""ok""#).await;
     let mut config = base_config();
     config.channels.push(Channel {
         name: "primary".to_string(),

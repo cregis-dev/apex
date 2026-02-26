@@ -12,8 +12,8 @@ use tower::ServiceExt;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_rule_based_routing_priority() {
     // Setup upstreams
-    let upstream_a = spawn_upstream_status(StatusCode::OK, "upstream_a").await;
-    let upstream_b = spawn_upstream_status(StatusCode::OK, "upstream_b").await;
+    let upstream_a = spawn_upstream_status(StatusCode::OK, r#""upstream_a""#).await;
+    let upstream_b = spawn_upstream_status(StatusCode::OK, r#""upstream_b""#).await;
 
     // Config
     let mut config = base_config();
@@ -87,7 +87,7 @@ async fn test_rule_based_routing_priority() {
     let resp = app.clone().oneshot(req).await.unwrap();
     let (status, body) = response_text(resp).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "upstream_a");
+    assert_eq!(body, "\"upstream_a\"");
 
     // Test 2: gpt-3.5 -> Channel B (Glob match)
     let req = axum::http::Request::builder()
@@ -100,7 +100,7 @@ async fn test_rule_based_routing_priority() {
     let resp = app.clone().oneshot(req).await.unwrap();
     let (status, body) = response_text(resp).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "upstream_b");
+    assert_eq!(body, "\"upstream_b\"");
 
     // Test 3: claude -> No Match -> 400 Bad Request (No matching router/rule)
     let req = axum::http::Request::builder()
