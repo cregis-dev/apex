@@ -39,18 +39,17 @@ pub async fn team_policy(
             }
         };
 
-        if let Some(id) = team_id {
-            if (rpm_limit.is_some() || tpm_limit.is_some())
+        if team_id.is_some_and(|id| {
+            (rpm_limit.is_some() || tpm_limit.is_some())
                 && !state
                     .team_rate_limiter
                     .check(&id, rpm_limit, tpm_limit, 100)
-            {
-                return Err(Response::builder()
-                    .status(StatusCode::TOO_MANY_REQUESTS)
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"error": "Rate limit exceeded"}"#))
-                    .unwrap());
-            }
+        }) {
+            return Err(Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"error": "Rate limit exceeded"}"#))
+                .unwrap());
         }
     }
 

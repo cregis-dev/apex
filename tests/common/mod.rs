@@ -96,7 +96,9 @@ pub fn base_url(addr: SocketAddr) -> String {
 
 pub async fn response_text(resp: axum::response::Response) -> (StatusCode, String) {
     let status = resp.status();
-    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body_text = String::from_utf8(body_bytes.to_vec()).unwrap();
     (status, body_text)
 }

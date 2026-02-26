@@ -910,7 +910,7 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                     let pattern = parts[0].to_string();
                     let channel_name = parts[1].to_string();
 
-                    ensure_channels_exist(&config, &[channel_name.clone()])?;
+                    ensure_channels_exist(&config, std::slice::from_ref(&channel_name))?;
                     rules.push(config::RouterRule {
                         match_spec: config::MatchSpec {
                             models: vec![pattern],

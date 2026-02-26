@@ -46,8 +46,8 @@ pub async fn team_auth(
 fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     // Try Authorization: Bearer <token>
     if let Some(auth_val) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
-        if auth_val.starts_with("Bearer ") {
-            return Some(auth_val[7..].to_string());
+        if let Some(stripped) = auth_val.strip_prefix("Bearer ") {
+            return Some(stripped.to_string());
         }
         return Some(auth_val.to_string());
     }

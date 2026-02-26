@@ -40,6 +40,12 @@ pub struct TeamRateLimiter {
     buckets: Mutex<HashMap<String, HashMap<String, TokenBucket>>>,
 }
 
+impl Default for TeamRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TeamRateLimiter {
     pub fn new() -> Self {
         Self {
@@ -58,37 +64,33 @@ impl TeamRateLimiter {
         let team_buckets = buckets.entry(team_id.to_string()).or_default();
 
         // Check RPM
-        if let Some(rpm) = rpm_limit {
-            if rpm > 0 {
-                let bucket = team_buckets
-                    .entry("rpm".to_string())
-                    .or_insert_with(|| TokenBucket::new(rpm as f64, rpm as f64 / 60.0));
+        if let Some(rpm) = rpm_limit.filter(|&r| r > 0) {
+            let bucket = team_buckets
+                .entry("rpm".to_string())
+                .or_insert_with(|| TokenBucket::new(rpm as f64, rpm as f64 / 60.0));
 
-                // Update rate if config changed
-                if (bucket.capacity - rpm as f64).abs() > 0.1 {
-                    *bucket = TokenBucket::new(rpm as f64, rpm as f64 / 60.0);
-                }
+            // Update rate if config changed
+            if (bucket.capacity - rpm as f64).abs() > 0.1 {
+                *bucket = TokenBucket::new(rpm as f64, rpm as f64 / 60.0);
+            }
 
-                if !bucket.consume(1.0) {
-                    return false;
-                }
+            if !bucket.consume(1.0) {
+                return false;
             }
         }
 
         // Check TPM (estimated)
-        if let Some(tpm) = tpm_limit {
-            if tpm > 0 {
-                let bucket = team_buckets
-                    .entry("tpm".to_string())
-                    .or_insert_with(|| TokenBucket::new(tpm as f64, tpm as f64 / 60.0));
+        if let Some(tpm) = tpm_limit.filter(|&t| t > 0) {
+            let bucket = team_buckets
+                .entry("tpm".to_string())
+                .or_insert_with(|| TokenBucket::new(tpm as f64, tpm as f64 / 60.0));
 
-                if (bucket.capacity - tpm as f64).abs() > 0.1 {
-                    *bucket = TokenBucket::new(tpm as f64, tpm as f64 / 60.0);
-                }
+            if (bucket.capacity - tpm as f64).abs() > 0.1 {
+                *bucket = TokenBucket::new(tpm as f64, tpm as f64 / 60.0);
+            }
 
-                if !bucket.consume(estimated_tokens as f64) {
-                    return false;
-                }
+            if !bucket.consume(estimated_tokens as f64) {
+                return false;
             }
         }
 

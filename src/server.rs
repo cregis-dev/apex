@@ -280,10 +280,13 @@ async fn process_request(
 
         // Check Allowed Models
         let policy = &team.policy;
-        if let Some(allowed) = &policy.allowed_models {
-            if !allowed.is_empty() && !allowed.contains(&model_name_str.to_string()) {
-                return error_response(StatusCode::FORBIDDEN, "Model not allowed by team policy");
-            }
+        if policy
+            .allowed_models
+            .as_ref()
+            .filter(|a| !a.is_empty() && !a.contains(&model_name_str.to_string()))
+            .is_some()
+        {
+            return error_response(StatusCode::FORBIDDEN, "Model not allowed by team policy");
         }
 
         // Check Allowed Routers (Mandatory)
@@ -297,15 +300,20 @@ async fn process_request(
 
         let mut selected_router = None;
         for r_name in allowed_routers {
-            if let Some(router) = config.routers.iter().find(|r| r.name == *r_name) {
-                if state
-                    .selector
-                    .select_channel(router, model_name_str)
-                    .is_some()
-                {
-                    selected_router = Some(r_name.clone());
-                    break;
-                }
+            if config
+                .routers
+                .iter()
+                .find(|r| r.name == *r_name)
+                .filter(|router| {
+                    state
+                        .selector
+                        .select_channel(router, model_name_str)
+                        .is_some()
+                })
+                .is_some()
+            {
+                selected_router = Some(r_name.clone());
+                break;
             }
         }
 
@@ -740,7 +748,7 @@ mod tests {
         let calls = audit_calls.lock().unwrap();
         assert!(!calls.is_empty());
         assert_eq!(calls[0].0, ProviderType::Openai);
-        assert_eq!(calls[0].1, false); // Failed
+        assert!(!calls[0].1); // Failed
     }
 
     #[test]
