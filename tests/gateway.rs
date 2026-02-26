@@ -28,7 +28,6 @@ async fn e2e_openai_route_success() {
     });
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
-        vkey: Some("vk_test".to_string()),
         channels: vec![TargetChannel {
             name: "primary".to_string(),
             weight: 1,
@@ -82,7 +81,6 @@ async fn e2e_global_auth_required() {
     });
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
-        vkey: Some("vk_test".to_string()),
         channels: vec![TargetChannel {
             name: "primary".to_string(),
             weight: 1,
@@ -134,7 +132,6 @@ async fn e2e_fallback_on_failure() {
     });
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
-        vkey: Some("vk_test".to_string()),
         channels: vec![TargetChannel {
             name: "primary".to_string(),
             weight: 1,

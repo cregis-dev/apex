@@ -109,6 +109,7 @@ pub fn base_config() -> Config {
         },
         channels: vec![],
         routers: vec![],
+        teams: vec![],
         metrics: Metrics {
             enabled: false,
             listen: "127.0.0.1:0".to_string(),

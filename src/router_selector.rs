@@ -148,7 +148,6 @@ mod tests {
     fn create_router(rules: Vec<RouterRule>) -> Router {
         Router {
             name: "test-router".to_string(),
-            vkey: None,
             rules,
             channels: vec![],
             strategy: "round_robin".to_string(),

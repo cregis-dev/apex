@@ -1,0 +1,64 @@
+{
+  "version": "1.0",
+  "global": {
+    "listen": "0.0.0.0:12356",
+    "auth": {
+      "mode": "none"
+    },
+    "timeouts": {
+      "connect_ms": 1000,
+      "request_ms": 10000,
+      "response_ms": 30000
+    },
+    "retries": {
+      "max_attempts": 3,
+      "backoff_ms": 100,
+      "retry_on_status": [500, 502, 503, 504]
+    }
+  },
+  "channels": [
+    {
+      "name": "mock-channel",
+      "provider_type": "openai",
+      "base_url": "http://mock-openai:8000/v1",
+      "api_key": "mock-key"
+    }
+  ],
+  "routers": [
+    {
+      "name": "default-router",
+      "rules": [
+        {
+          "match": {
+            "model": "*"
+          },
+          "channels": [
+            {
+              "name": "mock-channel"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "teams": [
+    {
+      "id": "demo-team",
+      "api_key": "sk-apex-demo",
+      "policy": {
+        "allowed_routers": ["default-router"],
+        "allowed_models": null,
+        "rate_limit": null
+      }
+    }
+  ],
+  "metrics": {
+    "enabled": true,
+    "listen": "0.0.0.0:9090",
+    "path": "/metrics"
+  },
+  "hot_reload": {
+    "config_path": "/app/config.json",
+    "watch": true
+  }
+}

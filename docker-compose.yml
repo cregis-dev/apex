@@ -1,0 +1,24 @@
+services:
+  apex:
+    build: .
+    container_name: apex-gateway
+    ports:
+      - "12356:12356"
+      - "9090:9090"
+    volumes:
+      - ./config.example.json:/app/config.json
+    command: ["apex", "gateway", "start", "--config", "/app/config.json"]
+    depends_on:
+      - mock-openai
+    restart: unless-stopped
+
+  mock-openai:
+    image: python:3.9-slim
+    container_name: apex-mock-openai
+    volumes:
+      - ./tests/e2e/mock_server.py:/app/mock_server.py
+    working_dir: /app
+    command: ["python", "mock_server.py", "--port", "8000", "--id", "mock-1"]
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

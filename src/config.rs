@@ -13,6 +13,30 @@ pub struct Config {
     pub routers: Vec<Router>,
     pub metrics: Metrics,
     pub hot_reload: HotReload,
+    #[serde(default)]
+    pub teams: Vec<Team>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Team {
+    pub id: String,
+    pub api_key: String,
+    pub policy: TeamPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamPolicy {
+    pub allowed_routers: Vec<String>,
+    #[serde(default)]
+    pub allowed_models: Option<Vec<String>>,
+    #[serde(default)]
+    pub rate_limit: Option<TeamRateLimit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamRateLimit {
+    pub rpm: Option<i32>,
+    pub tpm: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,19 +128,19 @@ pub enum ProviderType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Router {
     pub name: String,
-    pub vkey: Option<String>,
 
     // New unified rules configuration
     #[serde(default)]
     pub rules: Vec<RouterRule>,
 
     // Legacy fields (kept for backward compatibility, will be migrated to rules)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channels: Vec<TargetChannel>,
-    #[serde(default = "default_strategy")]
+    #[serde(default = "default_strategy", skip_serializing_if = "is_default_strategy")]
     pub strategy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<RouterMetadata>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_channels: Vec<String>,
 }
 
@@ -154,6 +178,10 @@ where
 
 fn default_strategy() -> String {
     "round_robin".to_string()
+}
+
+fn is_default_strategy(s: &String) -> bool {
+    s == "round_robin"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

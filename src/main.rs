@@ -9,6 +9,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod config;
 mod converters;
 mod metrics;
+mod middleware;
 mod providers;
 mod router_selector;
 mod server;
@@ -45,6 +46,10 @@ enum Commands {
         #[command(subcommand)]
         command: GatewayCommand,
     },
+    Team {
+        #[command(subcommand)]
+        command: TeamCommand,
+    },
     Status,
     Logs,
 }
@@ -57,6 +62,93 @@ enum GatewayCommand {
         daemon: bool,
     },
     Stop,
+}
+
+#[derive(Subcommand)]
+enum TeamCommand {
+    Add(TeamAddArgs),
+    Remove { id: String },
+    List,
+}
+
+#[derive(Args)]
+struct TeamAddArgs {
+    #[arg(long)]
+    id: String,
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    routers: Vec<String>,
+    #[arg(long, value_delimiter = ',', num_args = 0..)]
+    models: Option<Vec<String>>,
+    #[arg(long)]
+    rpm: Option<i32>,
+    #[arg(long)]
+    tpm: Option<i32>,
+}
+
+fn handle_team_command(cli: &Cli, command: &TeamCommand) -> anyhow::Result<()> {
+    let config_path = resolve_config_path(cli.config.clone());
+    let mut config = config::load_config(&config_path)?;
+
+    match command {
+        TeamCommand::Add(args) => {
+            if config.teams.iter().any(|t| t.id == args.id) {
+                bail!("Team '{}' already exists", args.id);
+            }
+
+            // Generate API Key: sk-ant-xxxx
+            let random_part: String = rand::thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(32)
+                .map(char::from)
+                .collect();
+            let api_key = format!("sk-ant-{}", random_part);
+
+            let team = config::Team {
+                id: args.id.clone(),
+                api_key: api_key.clone(),
+                policy: config::TeamPolicy {
+                    allowed_routers: args.routers.clone(),
+                    allowed_models: args.models.clone(),
+                    rate_limit: if args.rpm.is_some() || args.tpm.is_some() {
+                        Some(config::TeamRateLimit {
+                            rpm: args.rpm,
+                            tpm: args.tpm,
+                        })
+                    } else {
+                        None
+                    },
+                },
+            };
+
+            config.teams.push(team);
+            config::save_config(&config_path, &config)?;
+            println!("Team '{}' added successfully.", args.id);
+            println!("API Key: {}", api_key);
+        }
+        TeamCommand::Remove { id } => {
+            if let Some(index) = config.teams.iter().position(|t| t.id == *id) {
+                config.teams.remove(index);
+                config::save_config(&config_path, &config)?;
+                println!("Team '{}' removed successfully.", id);
+            } else {
+                bail!("Team '{}' not found", id);
+            }
+        }
+        TeamCommand::List => {
+            if config.teams.is_empty() {
+                println!("No teams configured.");
+            } else {
+                println!("{:<20} {:<45} {:<20}", "ID", "API Key", "Allowed Routers");
+                println!("{:-<20} {:-<45} {:-<20}", "", "", "");
+                for team in &config.teams {
+                    let routers = team.policy.allowed_routers.join(", ");
+                    println!("{:<20} {:<45} {:<20}", team.id, team.api_key, routers);
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn expand_path(path_str: &str) -> PathBuf {
@@ -183,8 +275,6 @@ struct RouterAddArgs {
     model_matchers: Vec<String>,
     #[arg(long = "fallback", value_delimiter = ',', num_args = 0..)]
     fallback_channels: Vec<String>,
-    #[arg(long)]
-    vkey: Option<String>,
 }
 
 #[derive(Args)]
@@ -201,10 +291,6 @@ struct RouterUpdateArgs {
     fallback_channels: Vec<String>,
     #[arg(long)]
     clear_fallbacks: bool,
-    #[arg(long)]
-    vkey: Option<String>,
-    #[arg(long)]
-    clear_vkey: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -303,6 +389,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         },
         Commands::Status => handle_status_command(&cli)?,
         Commands::Logs => handle_logs_command(&cli)?,
+        Commands::Team { command } => handle_team_command(&cli, command)?,
     }
     Ok(())
 }
@@ -512,6 +599,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
             level: "info".to_string(),
             dir: None,
         },
+        teams: Vec::new(),
     };
     config::save_config(path, &config)
         .with_context(|| format!("failed to write config: {}", path.display()))?;
@@ -809,18 +897,52 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             ensure_channels_exist(&config, &channel_names)?;
             ensure_channels_exist(&config, &args.fallback_channels)?;
 
-            let model_matchers = parse_optional_map(&args.model_matchers)?;
-            let metadata = model_matchers.map(|m| config::RouterMetadata { model_matcher: m });
+            // Build rules from args
+            let mut rules = Vec::new();
 
-            let vkey = Some(args.vkey.clone().unwrap_or_else(generate_vkey));
+            // 1. Model matchers -> Specific rules
+            if !args.model_matchers.is_empty() {
+                for matcher in &args.model_matchers {
+                    let parts: Vec<&str> = matcher.splitn(2, '=').collect();
+                    if parts.len() != 2 {
+                         anyhow::bail!("invalid matcher format: {}", matcher);
+                    }
+                    let pattern = parts[0].to_string();
+                    let channel_name = parts[1].to_string();
+
+                    ensure_channels_exist(&config, &[channel_name.clone()])?;
+                    rules.push(config::RouterRule {
+                        match_spec: config::MatchSpec {
+                            models: vec![pattern],
+                        },
+                        channels: vec![config::TargetChannel {
+                            name: channel_name,
+                            weight: 1,
+                        }],
+                        strategy: "round_robin".to_string(),
+                    });
+                }
+            }
+
+            // 2. Default channels -> Catch-all rule
+            if !target_channels.is_empty() {
+                rules.push(config::RouterRule {
+                    match_spec: config::MatchSpec {
+                        models: vec!["*".to_string()],
+                    },
+                    channels: target_channels.clone(),
+                    strategy: args.strategy.clone(),
+                });
+            }
+
             let router = Router {
                 name: args.name.clone(),
-                vkey,
+                rules,
+                // Legacy fields empty
                 channels: target_channels,
                 strategy: args.strategy.clone(),
-                metadata,
+                metadata: None,
                 fallback_channels: args.fallback_channels.clone(),
-                rules: vec![],
             };
             config.routers.push(router);
             config::save_config(&path, &config)?;
@@ -839,8 +961,6 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             let is_interactive = args.channels.is_empty()
                 && args.fallback_channels.is_empty()
                 && !args.clear_fallbacks
-                && args.vkey.is_none()
-                && !args.clear_vkey
                 && args.strategy.is_none()
                 && args.model_matchers.is_empty();
 
@@ -912,13 +1032,6 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                 router.fallback_channels = Vec::new();
             } else if !args.fallback_channels.is_empty() {
                 router.fallback_channels = args.fallback_channels.clone();
-            }
-            if args.clear_vkey {
-                router.vkey = None;
-            } else if let Some(vkey) = &args.vkey {
-                router.vkey = Some(vkey.clone());
-            } else if router.vkey.is_none() {
-                router.vkey = Some(generate_vkey());
             }
             config::save_config(&path, &config)?;
             println!("✅ 已更新 router: {}", args.name);
@@ -1102,6 +1215,7 @@ fn load_provider_templates() -> anyhow::Result<Vec<ProviderTemplate>> {
     Ok(config.provider_templates)
 }
 
+#[cfg(test)]
 fn generate_vkey() -> String {
     let rand: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -1109,6 +1223,18 @@ fn generate_vkey() -> String {
         .map(char::from)
         .collect();
     format!("vk_{rand}")
+}
+
+#[cfg(test)]
+mod tests_vkey {
+    use super::*;
+
+    #[test]
+    fn test_generate_vkey() {
+        let vkey = generate_vkey();
+        assert!(vkey.starts_with("vk_"));
+        assert_eq!(vkey.len(), 27);
+    }
 }
 
 fn ensure_channels_exist(config: &Config, channels: &[String]) -> anyhow::Result<()> {
@@ -1122,11 +1248,10 @@ fn ensure_channels_exist(config: &Config, channels: &[String]) -> anyhow::Result
 
 fn print_router_table(routers: &[Router]) {
     println!(
-        "{:<20} {:<20} {:<20} {:<15}",
-        "NAME", "CHANNELS", "FALLBACKS", "VKEY"
+        "{:<20} {:<20} {:<20}",
+        "NAME", "CHANNELS", "FALLBACKS"
     );
     for router in routers {
-        let vkey = router.vkey.clone().unwrap_or_default();
         let channels_display = if !router.channels.is_empty() {
             router
                 .channels
@@ -1139,11 +1264,10 @@ fn print_router_table(routers: &[Router]) {
         };
 
         println!(
-            "{:<20} {:<20} {:<20} {:<15}",
+            "{:<20} {:<20} {:<20}",
             router.name,
             channels_display,
-            router.fallback_channels.join(","),
-            if vkey.is_empty() { "" } else { "vk_****" }
+            router.fallback_channels.join(",")
         );
     }
 }
@@ -1200,6 +1324,12 @@ mod tests {
         assert!(merged.is_none());
     }
 
+}
+
+#[cfg(test)]
+mod tests_timeouts {
+    use super::*;
+
     #[test]
     fn merge_timeouts_overrides() {
         let base = Timeouts {
@@ -1211,12 +1341,5 @@ mod tests {
         assert_eq!(merged.connect_ms, 10);
         assert_eq!(merged.request_ms, 2);
         assert_eq!(merged.response_ms, 30);
-    }
-
-    #[test]
-    fn generate_vkey_format() {
-        let vkey = generate_vkey();
-        assert!(vkey.starts_with("vk_"));
-        assert_eq!(vkey.len(), 27);
     }
 }

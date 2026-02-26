@@ -70,8 +70,53 @@ epics:
         name: Structured Logging
         status: Done
 
+  - id: E05
+    name: Rule-Based Routing
+    status: Done
+    stories:
+      - id: S01
+        name: Configuration Schema Update
+        status: Done
+      - id: S02
+        name: Backward Compatibility & Migration
+        status: Done
+      - id: S03
+        name: Router Selector Logic Update
+        status: Done
+      - id: S04
+        name: CLI & Documentation Update
+        status: Done
+
+  - id: E06
+    name: Team Governance
+    status: Done
+    stories:
+      - id: S01
+        name: Team Configuration Support
+        status: Done
+      - id: S02
+        name: Team CLI Management
+        status: Done
+      - id: S03
+        name: Team Authentication Middleware
+        status: Done
+      - id: S04
+        name: Team Policy Middleware
+        status: Done
+
+  - id: E07
+    name: Data Compliance
+    status: Pending
+    stories:
+      - id: S01
+        name: PII Masking Engine
+        status: Pending
+      - id: S02
+        name: Compliance Middleware
+        status: Pending
+
 summary:
-  total_stories: 16
-  completed_stories: 16
-  pending_stories: 0
-  progress: 100%
+  total_stories: 26
+  completed_stories: 24
+  pending_stories: 2
+  progress: 92%

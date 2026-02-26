@@ -55,8 +55,8 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
 def run(port, server_id):
     # Allow reuse address to avoid "Address already in use" errors during quick restarts
     socketserver.TCPServer.allow_reuse_address = True
-    # Bind to localhost specifically
-    with socketserver.TCPServer(("127.0.0.1", port), MockHandler) as httpd:
+    # Bind to all interfaces for Docker compatibility
+    with socketserver.TCPServer(("0.0.0.0", port), MockHandler) as httpd:
         httpd.server_id = server_id
         # print(f"Mock Server {server_id} running on port {port}")
         try:

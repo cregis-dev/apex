@@ -1,87 +1,118 @@
-# Apex AI Gateway
+# Apex: The Team-First AI Gateway
 
-Simple, High Performance, High Availability AI Gateway.
-面向企业内部的轻量 AI Gateway，基于 Rust 实现，使用 JSON 配置驱动，支持 OpenAI/Anthropic 兼容入口，提供热加载、超时/重试、fallback 与 Prometheus 指标导出。
+![CI](https://github.com/your-org/apex/actions/workflows/ci.yml/badge.svg)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
+![Version](https://img.shields.io/badge/version-0.1.0-green.svg)
+![Rust](https://img.shields.io/badge/built_with-Rust-dca282.svg)
 
-详细操作指南请参考 [docs/operations.md](docs/operations.md)。
+**Apex** is a high-performance, open-source AI Gateway designed for teams. It sits between your applications and LLM providers (OpenAI, Anthropic, DeepSeek, etc.), providing a unified API, intelligent routing, cost control, and observability.
 
-## 功能概览
+Built in **Rust** for low latency and high concurrency.
 
-- **双协议支持**: 同时兼容 OpenAI 与 Anthropic 协议，支持 MiniMax/DeepSeek 等双协议 Provider。
-- **多通道路由**: 支持权重负载均衡 (Round Robin/Priority/Random) 与模型名称路由。
-- **高可用**: 支持 Connect/Request/Response 三级超时与自动故障转移 (Fallback)。
-- **安全**: 全局鉴权与 Router VKey 鉴权。
-- **可观测**: 内置 Prometheus 指标导出。
-- **易用**: CLI 交互式管理配置。
+## 🚀 Why Apex?
 
-## 安装
+Unlike personal AI gateways, Apex is built for **Teams**:
+
+| Feature | Apex (Team Gateway) | Personal Gateways |
+| :--- | :--- | :--- |
+| **Unified API** | OpenAI & Anthropic Compatible | Usually OpenAI only |
+| **Multi-Model Routing** | Round-Robin, Priority, Weighted | Basic fallback |
+| **Provider Agnostic** | OpenAI, Anthropic, DeepSeek, Ollama, etc. | Limited support |
+| **Observability** | Prometheus Metrics & Grafana Ready | Basic logs |
+| **Performance** | Rust-based, sub-millisecond overhead | Often Python/Node.js |
+| **Resilience** | Automatic Retries & Fallbacks | Basic |
+
+## 🏗 Architecture
+
+```mermaid
+graph LR
+    Client[Client Apps] -->|OpenAI/Anthropic Protocol| Gateway[Apex Gateway]
+    
+    subgraph "Apex Core"
+        Gateway --> Auth[Auth & Rate Limit]
+        Auth --> Router[Smart Router]
+        Router -->|Strategy: Round Robin/Priority| Adapter[Provider Adapters]
+    end
+    
+    Adapter -->|Standardized API| OpenAI[OpenAI]
+    Adapter -->|Standardized API| Anthropic[Anthropic]
+    Adapter -->|Standardized API| Local[Ollama/Local]
+    
+    Gateway -.-> Metrics[Prometheus Metrics]
+```
+
+## ⚡️ 5-Minute Quick Start
+
+Get a fully functional AI Gateway running with a mock provider in less than 5 minutes.
+
+### 1. Prerequisites
+- Docker & Docker Compose
+- *Or* Rust toolchain (if building from source)
+
+### 2. Start with Docker Compose
+We provide a pre-configured setup with a **Mock Provider**, so you can test the gateway immediately without needing an API key.
+
+```bash
+# Clone the repository
+git clone https://github.com/your-org/apex.git
+cd apex
+
+# Start Apex Gateway and Mock Provider
+docker-compose up -d
+```
+
+### 3. Make your first request
+Apex is now running at `http://localhost:12356`. Try sending a chat completion request:
+
+```bash
+curl http://localhost:12356/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-apex-demo" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+> **Note**: `sk-apex-demo` is a pre-configured demo key in `config.example.json`.
+
+You should receive a response from the mock provider:
+```json
+{
+  "id": "chatcmpl-mock",
+  "choices": [{
+    "message": { "role": "assistant", "content": "Response from mock-1" }
+  }]
+}
+```
+
+### 4. Switch to Real Providers
+To use real providers (OpenAI, Anthropic, etc.):
+1. Copy `config.example.json` to `config.json`.
+2. Edit `config.json` and add your API keys.
+3. Update `docker-compose.yml` to mount your `config.json`.
+
+## 📦 Installation (Standalone)
+
+If you prefer to run the binary directly:
 
 ```bash
 cargo install --path .
-```
-
-## 快速开始
-
-### 1) 初始化配置
-
-```bash
-apex init
-```
-
-### 2) 添加 channel
-
-```bash
-# 交互式引导添加
-apex channel add --name openai-main
-```
-
-### 3) 添加 router
-
-```bash
-# 交互式引导添加
-apex router add --name default-openai
-```
-
-### 4) 启动服务
-
-```bash
-# 前台运行
 apex gateway start
-
-# 后台运行 (Daemon)
-apex gateway start -d
 ```
 
-### 5) 验证调用
+## 📚 Documentation
 
-**OpenAI 兼容客户端**:
-```bash
-curl http://localhost:12356/v1/chat/completions \
-  -H "Authorization: Bearer <router-vkey>" \
-  -d '{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}'
-```
+- [Operation Guide](docs/operations.md): detailed configuration and routing strategies.
+- [Architecture](docs/architecture.md): design principles.
+- [中文文档](README_zh-CN.md): Chinese documentation.
 
-**Anthropic 兼容客户端**:
-```bash
-curl http://localhost:12356/v1/messages \
-  -H "x-api-key: <router-vkey>" \
-  -H "anthropic-version: 2023-06-01" \
-  -d '{"model":"claude-3-5-sonnet-20240620","messages":[{"role":"user","content":"hello"}]}'
-```
+## 🤝 Community & Governance
 
-## 更多文档
+- [Contributing Guide](CONTRIBUTING.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security Policy](SECURITY.md)
 
-- [操作手册 (Operations Guide)](docs/operations.md): 详细的 CLI 使用说明、配置参数详解、高级路由策略配置及双协议支持说明。
-- [架构文档 (Architecture)](docs/architecture.md): 架构设计说明。
+## 📄 License
 
-## 客户端兼容性
-
-为了更好地支持各类 AI 客户端（如 Chatbox, NextChat, Vercel AI SDK 等），Apex 提供了以下兼容性支持：
-
-1.  **标准鉴权头**：支持使用 `Authorization: Bearer <key>`（OpenAI）或 `x-api-key: <key>`（Anthropic）。
-2.  **路径兼容**：同时支持 `/v1/chat/completions` 和 `/chat/completions`（无 `/v1` 前缀）等路径。
-3.  **模型列表**：支持 `GET /v1/models` 接口。
-
-## 运维
-
-默认指标地址：`http://localhost:9090/metrics`
+MIT License.

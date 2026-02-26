@@ -1,115 +1,103 @@
 ---
-title: 简易 AI Gateway 技术架构
-status: draft
+title: Apex AI Gateway Architecture
+status: active
 ---
 
-# 简易 AI Gateway 技术架构
+# Apex AI Gateway Architecture
 
-## 架构目标
-- 面向企业内部使用的轻量 Gateway
-- Rust 单体服务 + JSON 配置
-- 提供 OpenAI/Anthropic 兼容接口
-- 支持热加载、超时/重试、fallback 与 Prometheus 指标
+## Goals
+- Team-first, lightweight AI Gateway for internal enterprise use.
+- Rust-based, high performance, JSON configuration driven.
+- Unified OpenAI/Anthropic compatible interface.
+- Support for Hot Reload, Timeouts/Retries, Fallbacks, and Prometheus Observability.
+- Multi-provider support (OpenAI, Anthropic, DeepSeek, Ollama, etc.).
 
-## 当前实现状态
-- CLI 与配置结构已实现
-- 运行时网关、路由转发、鉴权与指标进行中
+## Core Components
 
-## 组件划分
-### CLI 配置管理
-- 入口命令 apex
-- 支持 init / channel / router 子命令
-- 读写 JSON 配置文件
+### 1. Configuration Management (CLI)
+- Entry point: `apex` command.
+- Subcommands: `init`, `channel`, `router`, `team`, `gateway`.
+- Manages `config.json` with hot reload support.
 
-### 配置与热加载
-- JSON 配置结构：global、channels、routers、metrics、hot_reload
-- 热加载：文件变更触发重新加载，失败保持旧配置
+### 2. Gateway Entry Layer
+- HTTP Server (Axum) listening on `global.listen`.
+- **Team Authentication**: Validates API Keys against configured Teams.
+- **Team Policy**: Enforces Rate Limits (RPM/TPM) and Access Control (Allowed Routers/Models).
 
-### 网关入口层
-- HTTP 服务监听 global.listen
-- 统一鉴权入口：global.auth
-- 路由到 OpenAI/Anthropic 兼容接口
+### 3. Router & Strategy
+- **Router**: The logical endpoint for clients.
+- **Rule-Based Routing**: Matches requests based on model names (glob patterns) or other criteria.
+- **Load Balancing**: Distributes traffic across multiple Channels using strategies (Round Robin, Priority, Random).
+- **Failover**: Automatically retries next available channel on failure.
 
-### 路由与策略
-- Router 绑定主 channel，可选 fallback_channels
-- 按错误类型与状态码触发 fallback
-- 超时/重试来自 global 或 channel 级别覆盖
+### 4. Provider Adapters
+- Abstracts differences between upstream providers.
+- **Dual Protocol Support**: Handles both OpenAI and Anthropic protocols for providers that support both (e.g., DeepSeek, MiniMax).
+- **Model Mapping**: Rewrites model names on the fly.
+- **Header Injection**: Adds custom headers for upstream requests.
 
-### Provider 适配层
-- 每个 channel 代表一个 provider 实例
-- 适配请求/响应格式与基础 header
-- 支持 model_map 进行模型映射
+### 5. Observability
+- Prometheus metrics exported at `/metrics`.
+- Tracks: Request Volume, Latency, Error Rates, Token Usage (estimated).
+- Labels: `router`, `model`, `team_id`.
 
-### Provider 扩展机制
-- ProviderRegistry 维护 provider_type 到适配器的映射
-- ProviderAdapter 定义路径映射与请求体转换扩展点
-- 新增 provider 时仅需实现适配器并注册
+## Configuration Structure
 
-### 观测与指标
-- Prometheus 指标导出，metrics.listen + metrics.path
-- 记录请求量、延迟、错误率、fallback 命中等指标
-
-## 配置结构摘要
 ### Global
-- listen: 网关监听地址
-- auth: 鉴权模式与 key 列表
-- timeouts: connect/request/response 超时
-- retries: 最大重试次数与回退策略
+- `listen`: Gateway bind address.
+- `auth`: Global authentication settings (optional).
+- `timeouts`: Default timeouts.
+- `retries`: Retry policy.
 
-### Channel
-- name / provider_type / base_url / api_key
-- headers / model_map / timeouts
+### Team (New in v0.2)
+- `id`: Team identifier.
+- `api_key`: Secret key for authentication (`sk-ant-xxx`).
+- `policy`:
+  - `allowed_routers`: List of accessible routers.
+  - `allowed_models`: List of allowed models (glob).
+  - `rate_limit`: RPM/TPM limits.
 
 ### Router
-- name / channel / fallback_channels / vkey
+- `name`: Unique identifier.
+- `rules`: List of routing rules.
+  - `match`: Criteria (e.g., `model: "gpt-*"`).
+  - `strategy`: `round_robin` | `priority`.
+  - `channels`: List of target channels with weights.
 
-### Metrics
-- enabled / listen / path
+### Channel
+- `name`: Unique identifier.
+- `provider_type`: `openai` | `anthropic` | `deepseek` | etc.
+- `base_url`: Upstream API endpoint.
+- `api_key`: Upstream credentials.
 
-### HotReload
-- config_path / watch
+## Request Flow
 
-## 请求流程
-1. 接收请求并做入口鉴权
-2. 根据路径识别 OpenAI/Anthropic 路由
-3. 解析 router，选择主 channel
-4. 发送上游请求，应用超时与重试
-5. 触发 fallback 时切换备用 channel
-6. 生成响应并记录指标
+1. **Ingress**: Client sends request with `Authorization: Bearer <Team-Key>`.
+2. **Auth & Policy**: 
+   - Gateway validates Team Key.
+   - Checks Rate Limits (Token Bucket).
+   - Verifies Router/Model access permissions.
+3. **Router Selection**:
+   - Matches request against Router Rules.
+   - Selects target Channel based on Load Balancing Strategy.
+4. **Adapter Processing**:
+   - Rewrites request (headers, model name).
+   - Handles protocol conversion if necessary.
+5. **Upstream Request**:
+   - Sends HTTP request to Provider.
+   - Handles timeouts and retries.
+6. **Response Processing**:
+   - Streams response back to client.
+   - Records metrics (Latency, Status).
 
-## 接口与路由约定
-- OpenAI 兼容路由：/v1/chat/completions、/v1/completions、/v1/embeddings、/v1/models
-- Anthropic 兼容路由：/v1/messages
+## Key Technologies
+- **Runtime**: Tokio (Async Rust).
+- **Web Framework**: Axum.
+- **Observability**: Prometheus / Metrics-rs.
+- **Configuration**: Serde / JSON.
+- **CLI**: Clap.
 
-## 鉴权约定
-- 入口鉴权：global.auth.mode=api_key 时读取 Authorization (Bearer) 或 x-api-key
-- Router vkey：通过 Authorization (Bearer) 或 x-api-key 携带
-
-## 转发与模型映射
-- 上游请求基于 channel.base_url 与原路径拼接
-- 读取 body.model 并按 channel.model_map 映射
-- 默认写入 Authorization: Bearer {channel.api_key}
-- channel.headers 作为补充 header 写入上游
-
-## 重试与 fallback
-- retry_on_status 命中或网络错误触发重试
-- 重试次数受 global.retries.max_attempts 控制
-- 重试耗尽后按 fallback_channels 顺序切换
-
-## 指标设计
-- /metrics 输出 Prometheus 文本
-- 关键指标：请求总量、错误量、上游耗时、fallback 命中
-- apex_requests_total{route,router}
-- apex_errors_total{route,router}
-- apex_upstream_latency_ms{route,router,channel}
-- apex_fallback_total{router,channel}
-
-## 关键技术选择
-- HTTP 框架：axum
-- 指标：Prometheus
-- 序列化：serde + serde_json
-- CLI：clap
-
-## 风险与未决事项
-- OpenAI/Anthropic 兼容字段映射细节未完全覆盖
-- 指标名称与标签规范待细化
+## Security
+- **Authentication**: Bearer Token (Team API Key).
+- **Access Control**: Role-based access to Routers/Models.
+- **Audit**: (Planned) Request logging for compliance.

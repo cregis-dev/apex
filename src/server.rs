@@ -1,6 +1,9 @@
 use crate::config::{AuthMode, Config};
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::metrics::MetricsState;
+use crate::middleware::auth::{team_auth, TeamContext};
+use crate::middleware::policy::team_policy;
+use crate::middleware::ratelimit::TeamRateLimiter;
 use crate::providers::{
     AccessAudit, NoOpAccessAudit, NoOpRateLimiter, ProviderRegistry, RateLimiter, RouteKind,
     prepare_request,
@@ -28,6 +31,7 @@ pub struct AppState {
     pub providers: Arc<ProviderRegistry>,
     pub access_audit: Arc<dyn AccessAudit>,
     pub rate_limiter: Arc<dyn RateLimiter>,
+    pub team_rate_limiter: Arc<TeamRateLimiter>,
     pub selector: Arc<RouterSelector>,
     pub client: reqwest::Client,
     pub usage_logger: Arc<UsageLogger>,
@@ -72,6 +76,7 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
         providers: Arc::new(ProviderRegistry::new()),
         access_audit: Arc::new(NoOpAccessAudit),
         rate_limiter: Arc::new(NoOpRateLimiter),
+        team_rate_limiter: Arc::new(TeamRateLimiter::new()),
         selector: Arc::new(RouterSelector::new()),
         client,
         usage_logger,
@@ -93,6 +98,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/models", get(handle_models))
         .route("/messages", post(handle_anthropic))
         .route("/metrics", get(metrics_handler))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), team_auth))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), team_policy))
         .layer(
             tower::ServiceBuilder::new()
                 .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -159,15 +166,8 @@ async fn handle_models(State(state): State<Arc<AppState>>, req: Request<Body>) -
         return resp;
     }
     // Try Authorization header first, then x-api-key (for Anthropic)
-    let vkey =
+    let _vkey =
         read_auth_token(headers, "authorization").or_else(|| read_auth_token(headers, "x-api-key"));
-
-    let Some(vkey) = vkey else {
-        return error_response(StatusCode::UNAUTHORIZED, "missing vkey");
-    };
-    let Some(_router) = find_router_by_vkey(&config, &vkey) else {
-        return error_response(StatusCode::UNAUTHORIZED, "invalid vkey");
-    };
 
     // Placeholder response for models
     Response::builder()
@@ -217,22 +217,19 @@ fn read_auth_token(headers: &HeaderMap, key: &str) -> Option<String> {
     None
 }
 
-fn find_router_by_vkey(config: &Config, vkey: &str) -> Option<String> {
-    for router in &config.routers {
-        if let Some(ref k) = router.vkey
-            && k == vkey
-        {
-            return Some(router.name.clone());
-        }
-    }
-    None
-}
-
 fn error_response(status: StatusCode, message: &str) -> Response<Body> {
+    let body = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": "invalid_request_error",
+            "param": null,
+            "code": null
+        }
+    });
     Response::builder()
         .status(status)
-        .header("content-type", "text/plain")
-        .body(Body::from(message.to_string()))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
         .unwrap()
 }
 
@@ -252,41 +249,73 @@ async fn process_request(
 
     let config = state.config.read().unwrap().clone();
 
-    // 1. Global Auth
-    if let Err(resp) = enforce_global_auth(&config, &headers) {
-        return resp;
-    }
+    // Parse model from body to use in routing (Moved UP)
+    let model_name = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        json.get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+    let model_name_str = model_name.as_deref().unwrap_or("default");
 
     // 2. Resolve Router
     let router_name = if let Some(name) = router_name_override {
         name
-    } else {
-        // Check all potential tokens
-        let candidates = [
-            read_auth_token(&headers, "authorization"),
-            read_auth_token(&headers, "x-api-key"),
-        ];
+    } else if let Some(ctx) = parts.extensions.get::<TeamContext>() {
+         // Team Flow
+         let team = config.teams.iter().find(|t| t.id == ctx.team_id);
+         if team.is_none() {
+             return error_response(StatusCode::UNAUTHORIZED, "Team not found");
+         }
+         let team = team.unwrap();
 
-        let mut found_router = None;
-        for token in candidates.iter().flatten() {
-             if let Some(name) = find_router_by_vkey(&config, token) {
-                 found_router = Some(name);
+         // Check Allowed Models
+         let policy = &team.policy;
+         if let Some(allowed) = &policy.allowed_models {
+             if !allowed.is_empty() && !allowed.contains(&model_name_str.to_string()) {
+                 return error_response(StatusCode::FORBIDDEN, "Model not allowed by team policy");
+             }
+         }
+
+         // Check Allowed Routers (Mandatory)
+         let allowed_routers = &policy.allowed_routers;
+         if allowed_routers.is_empty() {
+             return error_response(StatusCode::FORBIDDEN, "No allowed routers configured for team");
+         }
+         
+         let mut selected_router = None;
+         for r_name in allowed_routers {
+             if let Some(router) = config.routers.iter().find(|r| r.name == *r_name) {
+                 if state.selector.select_channel(router, model_name_str).is_some() {
+                     selected_router = Some(r_name.clone());
+                     break;
+                 }
+             }
+         }
+         
+         match selected_router {
+             Some(name) => name,
+             None => return error_response(StatusCode::BAD_REQUEST, "No matching router found for model in allowed routers"),
+         }
+    } else {
+        // Global Auth Flow (Legacy/Admin)
+        if let Err(resp) = enforce_global_auth(&config, &headers) {
+             return resp;
+        }
+
+        // Try to find ANY router that handles the model
+        let mut selected_router = None;
+        for router in &config.routers {
+             if state.selector.select_channel(router, model_name_str).is_some() {
+                 selected_router = Some(router.name.clone());
                  break;
              }
         }
         
-        if let Some(name) = found_router {
-            name
-        } else {
-             // Return appropriate error
-             let has_token = candidates.iter().any(|c| c.is_some());
-             if has_token {
-                 tracing::warn!("Router resolution failed. Valid token format found but no matching router vkey.");
-                 return error_response(StatusCode::UNAUTHORIZED, "invalid vkey");
-             } else {
-                 tracing::warn!("Router resolution failed. No auth token found.");
-                 return error_response(StatusCode::UNAUTHORIZED, "missing vkey");
-             }
+        match selected_router {
+             Some(name) => name,
+             None => return error_response(StatusCode::BAD_REQUEST, "No matching router found for model"),
         }
     };
 
@@ -298,16 +327,6 @@ async fn process_request(
 
     // 3. Resolve Channels
     let mut channels = Vec::new();
-
-    // Parse model from body to use in routing
-    let model_name = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-        json.get("model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    } else {
-        None
-    };
-    let model_name_str = model_name.as_deref().unwrap_or("default");
 
     if let Some(ch_name) = state.selector.select_channel(router, model_name_str)
         && let Some(ch) = config.channels.iter().find(|c| c.name == ch_name)
@@ -553,57 +572,62 @@ mod tests {
 
     fn create_test_config() -> Config {
         Config {
-            version: "1.0".to_string(),
+            version: "1".to_string(),
             global: Global {
-                listen: "127.0.0.1:0".to_string(),
+                listen: "0.0.0.0:0".to_string(),
                 auth: Auth {
                     mode: AuthMode::None,
                     keys: None,
-                },
-                retries: Retries {
-                    max_attempts: 1,
-                    backoff_ms: 0,
-                    retry_on_status: vec![],
                 },
                 timeouts: Timeouts {
                     connect_ms: 100,
                     request_ms: 100,
                     response_ms: 100,
                 },
+                retries: Retries {
+                    max_attempts: 1,
+                    backoff_ms: 10,
+                    retry_on_status: vec![],
+                },
             },
             metrics: crate::config::Metrics {
                 enabled: false,
-                listen: "127.0.0.1:0".to_string(),
+                listen: "0.0.0.0:0".to_string(),
                 path: "/metrics".to_string(),
             },
             hot_reload: crate::config::HotReload {
+                config_path: "test.json".to_string(),
                 watch: false,
-                config_path: "/tmp/config.json".to_string(),
             },
             logging: crate::config::Logging {
                 level: "info".to_string(),
                 dir: None,
             },
-            channels: vec![Channel {
-                name: "test-channel".to_string(),
-                provider_type: ProviderType::Openai,
-                base_url: "http://example.com".to_string(),
-                api_key: "test-key".to_string(),
-                anthropic_base_url: None,
-                headers: None,
-                model_map: None,
-                timeouts: None,
-            }],
+            teams: vec![],
+            channels: vec![
+                crate::config::Channel {
+                    name: "test-channel".to_string(),
+                    provider_type: ProviderType::Openai,
+                    base_url: "http://localhost:8080".to_string(),
+                    api_key: "sk-test".to_string(),
+                    anthropic_base_url: None,
+                    headers: None,
+                    model_map: None,
+                    timeouts: None,
+                },
+                crate::config::Channel {
+                    name: "test-channel-2".to_string(),
+                    provider_type: ProviderType::Anthropic,
+                    base_url: "http://localhost:8080".to_string(),
+                    api_key: "sk-test".to_string(),
+                    anthropic_base_url: None,
+                    headers: None,
+                    model_map: None,
+                    timeouts: None,
+                },
+            ],
             routers: vec![crate::config::Router {
                 name: "test-router".to_string(),
-                vkey: Some("test-vkey".to_string()),
-                channels: vec![crate::config::TargetChannel {
-                    name: "test-channel".to_string(),
-                    weight: 1,
-                }],
-                strategy: "round_robin".to_string(),
-                metadata: None,
-                fallback_channels: vec![],
                 rules: vec![crate::config::RouterRule {
                     match_spec: crate::config::MatchSpec {
                         models: vec!["*".to_string()],
@@ -614,6 +638,13 @@ mod tests {
                     }],
                     strategy: "round_robin".to_string(),
                 }],
+                channels: vec![crate::config::TargetChannel {
+                    name: "test-channel".to_string(),
+                    weight: 1,
+                }],
+                strategy: "round_robin".to_string(),
+                metadata: None,
+                fallback_channels: vec![],
             }],
         }
     }
@@ -631,6 +662,7 @@ mod tests {
                 calls: audit_calls.clone(),
             }),
             rate_limiter: Arc::new(MockRateLimiter { allow: false }), // Block everything
+            team_rate_limiter: Arc::new(TeamRateLimiter::new()),
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
@@ -661,6 +693,7 @@ mod tests {
                 calls: audit_calls.clone(),
             }),
             rate_limiter: Arc::new(MockRateLimiter { allow: true }),
+            team_rate_limiter: Arc::new(TeamRateLimiter::new()),
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
@@ -740,6 +773,7 @@ mod tests {
                 calls: audit_calls.clone(),
             }),
             rate_limiter: Arc::new(MockRateLimiter { allow: true }),
+            team_rate_limiter: Arc::new(TeamRateLimiter::new()),
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
@@ -759,5 +793,62 @@ mod tests {
         assert!(!calls.is_empty(), "should have made a call");
         // The last call should be Anthropic because that's ch2's provider type
         assert_eq!(calls.last().unwrap().0, ProviderType::Anthropic);
+    }
+
+    #[tokio::test]
+    async fn test_team_flow() {
+        let mut config = create_test_config();
+        
+        // Add a team
+        config.teams.push(crate::config::Team {
+            id: "test-team".to_string(),
+            api_key: "sk-ant-test".to_string(),
+            policy: crate::config::TeamPolicy {
+                allowed_routers: vec!["test-router".to_string()],
+                allowed_models: Some(vec!["gpt-4".to_string()]),
+                rate_limit: None,
+            },
+        });
+
+        let state = Arc::new(AppState {
+            config: Arc::new(RwLock::new(config)),
+            metrics: Arc::new(MetricsState::new().unwrap()),
+            providers: Arc::new(ProviderRegistry::new()),
+            access_audit: Arc::new(MockAccessAudit {
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            rate_limiter: Arc::new(MockRateLimiter { allow: true }),
+            team_rate_limiter: Arc::new(TeamRateLimiter::new()),
+            selector: Arc::new(RouterSelector::new()),
+            client: reqwest::Client::new(),
+            usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
+        });
+
+        // 1. Valid Request (Correct Key, Allowed Model)
+        // Note: In unit test we manually inject TeamContext because middleware is bypassed
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-ant-test")
+            .extension(TeamContext { team_id: "test-team".to_string() }) 
+            .body(Body::from(r#"{"model": "gpt-4"}"#))
+            .unwrap();
+
+        let resp = handle_openai(State(state.clone()), req).await;
+        // Should pass auth/policy checks and fail at upstream (BAD_GATEWAY) or "no channels"
+        // Since "test-router" matches "*", it should find a channel.
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY); 
+
+        // 2. Invalid Model (Not in allowed_models)
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-ant-test")
+            .extension(TeamContext { team_id: "test-team".to_string() })
+            .body(Body::from(r#"{"model": "gpt-3.5"}"#))
+            .unwrap();
+
+        let resp = handle_openai(State(state.clone()), req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
