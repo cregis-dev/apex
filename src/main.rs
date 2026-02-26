@@ -4,6 +4,7 @@ use rand::{Rng, distributions::Alphanumeric};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::io::BufRead;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
@@ -14,6 +15,7 @@ mod providers;
 mod router_selector;
 mod server;
 mod usage;
+mod logs;
 
 use config::{
     Auth, AuthMode, Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router,
@@ -431,11 +433,31 @@ fn handle_logs_command(cli: &Cli) -> anyhow::Result<()> {
     if let Some(latest) = logs.last() {
         println!("Tailing log file: {}", latest.display());
         // Use tail -f
-        std::process::Command::new("tail")
+        let mut child = std::process::Command::new("tail")
             .arg("-f")
             .arg(latest)
-            .status()
+            .stdout(std::process::Stdio::piped())
+            .spawn()
             .context("failed to execute tail")?;
+
+        if let Some(stdout) = child.stdout.take() {
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
+                        let colored_line = logs::highlight_line(&line);
+                        println!("{}", colored_line);
+                    }
+                    Err(e) => {
+                        eprintln!("Error reading log line: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Wait for child process if loop exits
+        let _ = child.wait();
     } else {
         println!("No log files found in {}", log_dir.display());
     }

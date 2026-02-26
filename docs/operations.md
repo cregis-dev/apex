@@ -28,6 +28,28 @@ cargo install --path .
 apex --version
 ```
 
+### 交叉编译 (Cross-Compilation)
+
+如果您需要在 macOS 或 Windows 上构建 Linux 二进制文件，推荐使用 `cross` 工具，它会自动处理交叉编译环境。
+
+1. **安装 cross**:
+   ```bash
+   cargo install cross
+   ```
+
+2. **构建 Linux (musl) 静态链接版本**:
+   此版本不依赖系统库，适用于任何 Linux 发行版（包括 Alpine）。
+   ```bash
+   cross build --target x86_64-unknown-linux-musl --release
+   ```
+   构建产物位于：`target/x86_64-unknown-linux-musl/release/apex`
+
+3. **构建 Linux (gnu) 动态链接版本**:
+   适用于 Ubuntu, CentOS 等标准 Linux 系统。
+   ```bash
+   cross build --target x86_64-unknown-linux-gnu --release
+   ```
+
 ## 核心概念
 
 Apex 使用 **Team (团队)** 作为鉴权和治理的核心单元。

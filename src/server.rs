@@ -100,11 +100,11 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/metrics", get(metrics_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            team_auth,
+            team_policy,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            team_policy,
+            team_auth,
         ))
         .layer(
             tower::ServiceBuilder::new()
@@ -123,10 +123,26 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                                 .get("x-forwarded-for")
                                 .and_then(|h| h.to_str().ok())
                                 .unwrap_or("unknown");
-
+                            
+                            // Try to get team_id from extensions (if already set by auth middleware)
+                            // Note: TraceLayer runs before auth middleware in the stack order defined below,
+                            // but the span is created when the request arrives.
+                            // The fields will be empty initially and populated later if we record them.
+                            // However, since we want them in the span start, we might need to rely on
+                            // the fact that we can't get team_id here yet.
+                            // Instead, we can record it later in the handler or middleware.
+                            // BUT, tracing::info_span! captures values at creation.
+                            // Let's just include the fields we can get now.
+                            // Actually, TraceLayer `make_span_with` is called when request arrives.
+                            // Auth happens inside the service.
+                            // So team_id won't be available here yet.
+                            // We will add `team_id` field as Empty and populate it in a middleware wrapper or inside the handler.
+                            // For now, let's just add the fields we have and make space for others.
+                            
                             tracing::info_span!("request",
                                 request_id = %request_id,
                                 client_ip = %client_ip,
+                                team_id = tracing::field::Empty, // Will be populated by auth middleware
                                 method = %request.method(),
                                 uri = %request.uri(),
                                 version = ?request.version()
