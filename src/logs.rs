@@ -75,7 +75,10 @@ fn format_request_context(context: &str) -> String {
     }
 
     // Team ID
-    if let Some(team_id) = parts.get("team_id").filter(|t| !t.is_empty() && **t != "Empty") {
+    if let Some(team_id) = parts
+        .get("team_id")
+        .filter(|t| !t.is_empty() && **t != "Empty")
+    {
         output.push_str(&format!("[{}] ", team_id.blue()));
     }
 
