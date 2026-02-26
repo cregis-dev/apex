@@ -1,5 +1,5 @@
 use crate::config::Router;
-use glob::Pattern;
+use glob::{MatchOptions, Pattern};
 use moka::sync::Cache;
 use rand::seq::SliceRandom;
 use std::time::Duration;
@@ -54,13 +54,20 @@ impl RouterSelector {
         // Let's just find the rule first.
         let matched_rule = router.rules.iter().find(|rule| {
             for pattern_str in &rule.match_spec.models {
-                // 1. Exact match
-                if pattern_str == model {
+                // 1. Exact match (case-insensitive)
+                if pattern_str.eq_ignore_ascii_case(model) {
                     return true;
                 }
-                // 2. Glob match
+                // 2. Glob match (case-insensitive)
                 if let Ok(pattern) = Pattern::new(pattern_str)
-                    && pattern.matches(model)
+                    && pattern.matches_with(
+                        model,
+                        MatchOptions {
+                            case_sensitive: false,
+                            require_literal_separator: false,
+                            require_literal_leading_dot: false,
+                        },
+                    )
                 {
                     return true;
                 }
@@ -242,5 +249,39 @@ mod tests {
             let ch = selector.select_channel(&router, "any").unwrap();
             assert_eq!(ch, "A"); // Should always be A because B has 0 weight
         }
+    }
+
+    #[test]
+    fn test_case_insensitive_match() {
+        let selector = RouterSelector::new();
+        let rules = vec![RouterRule {
+            match_spec: MatchSpec {
+                models: vec!["GPT-4".to_string()],
+            },
+            channels: vec![create_channel("ch1", 1)],
+            strategy: "priority".to_string(),
+        }];
+        let router = create_router(rules);
+
+        // Exact match with different case
+        assert_eq!(
+            selector.select_channel(&router, "gpt-4"),
+            Some("ch1".to_string())
+        );
+
+        // Glob match with different case
+        let rules_glob = vec![RouterRule {
+            match_spec: MatchSpec {
+                models: vec!["GPT-*".to_string()],
+            },
+            channels: vec![create_channel("ch2", 1)],
+            strategy: "priority".to_string(),
+        }];
+        let router_glob = create_router(rules_glob);
+
+        assert_eq!(
+            selector.select_channel(&router_glob, "gpt-3.5"),
+            Some("ch2".to_string())
+        );
     }
 }
