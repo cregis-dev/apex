@@ -1,7 +1,7 @@
 use colored::*;
 use regex::Regex;
-use std::sync::OnceLock;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 static LOG_REGEX: OnceLock<Regex> = OnceLock::new();
 static KV_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -13,7 +13,8 @@ pub fn highlight_line(line: &str) -> String {
         // 2024-03-20T10:00:00.123456Z  INFO request{...}: target: message
         // or
         // 2024-03-20T10:00:00.123456Z  INFO target: message
-        Regex::new(r"^([\d\-:T\.Z]+)\s+([A-Z]+)\s+(?:(request\{.*?\})[:\s]+)?(.*?):\s+(.*)$").unwrap()
+        Regex::new(r"^([\d\-:T\.Z]+)\s+([A-Z]+)\s+(?:(request\{.*?\})[:\s]+)?(.*?):\s+(.*)$")
+            .unwrap()
     });
 
     if let Some(caps) = re.captures(line) {
@@ -52,9 +53,7 @@ pub fn highlight_line(line: &str) -> String {
 }
 
 fn format_request_context(context: &str) -> String {
-    let re = REQ_CTX_REGEX.get_or_init(|| {
-        Regex::new(r"(\w+)=([^\s,}}]+)").unwrap()
-    });
+    let re = REQ_CTX_REGEX.get_or_init(|| Regex::new(r"(\w+)=([^\s,}}]+)").unwrap());
 
     let mut parts = HashMap::new();
     for cap in re.captures_iter(context) {
@@ -67,22 +66,25 @@ fn format_request_context(context: &str) -> String {
 
     // Request ID (Shortened)
     if let Some(req_id) = parts.get("request_id") {
-        let short_id = if req_id.len() > 8 { &req_id[..8] } else { req_id };
+        let short_id = if req_id.len() > 8 {
+            &req_id[..8]
+        } else {
+            req_id
+        };
         output.push_str(&format!("[{}] ", short_id.yellow()));
     }
 
     // Team ID
-    if let Some(team_id) = parts.get("team_id") {
-        if !team_id.is_empty() && *team_id != "Empty" {
-             output.push_str(&format!("[{}] ", team_id.blue()));
-        }
+    if let Some(team_id) = parts.get("team_id").filter(|t| !t.is_empty() && **t != "Empty") {
+        output.push_str(&format!("[{}] ", team_id.blue()));
     }
-    
+
     // Client IP
-    if let Some(ip) = parts.get("client_ip") {
-        if !ip.is_empty() && *ip != "unknown" {
-            output.push_str(&format!("[{}] ", ip.purple()));
-        }
+    if let Some(ip) = parts
+        .get("client_ip")
+        .filter(|ip| !ip.is_empty() && **ip != "unknown")
+    {
+        output.push_str(&format!("[{}] ", ip.purple()));
     }
 
     // URL/URI (Requested by user)
@@ -97,31 +99,31 @@ fn format_request_context(context: &str) -> String {
 
 fn highlight_message(message: &str) -> String {
     let mut result = message.to_string();
-    
+
     // Highlight HTTP methods
     let get_colored = "GET".green().to_string();
     result = result.replace("GET", &get_colored);
     result = result.replace("POST", &"POST".blue().to_string());
     result = result.replace("PUT", &"PUT".yellow().to_string());
     result = result.replace("DELETE", &"DELETE".red().to_string());
-    
+
     // Highlight key=value pairs
-    let kv_re = KV_REGEX.get_or_init(|| {
-        Regex::new(r"(\w+)=([^\s,]+)").unwrap()
-    });
-    
-    result = kv_re.replace_all(&result, |caps: &regex::Captures| {
-        let key = &caps[1];
-        let val = &caps[2];
-        format!("{}={}", key.purple(), val.cyan())
-    }).to_string();
+    let kv_re = KV_REGEX.get_or_init(|| Regex::new(r"(\w+)=([^\s,]+)").unwrap());
+
+    result = kv_re
+        .replace_all(&result, |caps: &regex::Captures| {
+            let key = &caps[1];
+            let val = &caps[2];
+            format!("{}={}", key.purple(), val.cyan())
+        })
+        .to_string();
 
     result
 }
 
 fn highlight_keywords(line: &str) -> String {
     let mut result = line.to_string();
-    
+
     if result.contains("ERROR") {
         result = result.replace("ERROR", &"ERROR".red().bold().to_string());
     } else if result.contains("WARN") {
@@ -131,7 +133,7 @@ fn highlight_keywords(line: &str) -> String {
     } else if result.contains("DEBUG") {
         result = result.replace("DEBUG", &"DEBUG".blue().to_string());
     }
-    
+
     result
 }
 
@@ -144,7 +146,7 @@ mod tests {
         colored::control::set_override(true);
         let line = "2024-03-20T10:00:00.123Z INFO request{request_id=1234567890 team_id=team_1 client_ip=127.0.0.1 uri=/v1/chat}: apex::server: Listening";
         let colored = highlight_line(line);
-        
+
         println!("Colored output: {}", colored);
 
         assert!(colored.contains("12345678")); // Shortened ID
@@ -163,7 +165,7 @@ mod tests {
         assert!(colored.contains("2024-03-20T10:00:00.123Z"));
         assert!(colored.contains("apex::server"));
         assert!(colored.contains("Listening on port 8080"));
-        
+
         // Verify coloring
         // INFO should be green
         assert!(colored.contains("\x1b[32mINFO\x1b[0m"));
@@ -172,9 +174,10 @@ mod tests {
     #[test]
     fn test_highlight_key_value() {
         colored::control::set_override(true);
-        let line = "2024-03-20T10:00:00.123Z INFO apex::request: method=GET path=/v1/chat status=200";
+        let line =
+            "2024-03-20T10:00:00.123Z INFO apex::request: method=GET path=/v1/chat status=200";
         let colored = highlight_line(line);
-        
+
         // Check if purple color is applied to status
         assert!(colored.contains("\x1b[35mstatus"));
         // Check if cyan color is applied to 200

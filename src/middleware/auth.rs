@@ -37,7 +37,9 @@ pub async fn team_auth(
 
     if let Some(id) = team_id {
         // Inject Team Context into Request Extensions
-        req.extensions_mut().insert(TeamContext { team_id: id.clone() });
+        req.extensions_mut().insert(TeamContext {
+            team_id: id.clone(),
+        });
 
         // Record in tracing span
         tracing::Span::current().record("team_id", &id);

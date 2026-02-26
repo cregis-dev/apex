@@ -3,19 +3,19 @@ use clap::{Args, Parser, Subcommand};
 use rand::{Rng, distributions::Alphanumeric};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::io::BufRead;
+use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
 mod converters;
+mod logs;
 mod metrics;
 mod middleware;
 mod providers;
 mod router_selector;
 mod server;
 mod usage;
-mod logs;
 
 use config::{
     Auth, AuthMode, Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router,

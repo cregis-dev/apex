@@ -123,7 +123,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                                 .get("x-forwarded-for")
                                 .and_then(|h| h.to_str().ok())
                                 .unwrap_or("unknown");
-                            
+
                             // Try to get team_id from extensions (if already set by auth middleware)
                             // Note: TraceLayer runs before auth middleware in the stack order defined below,
                             // but the span is created when the request arrives.
@@ -138,7 +138,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                             // So team_id won't be available here yet.
                             // We will add `team_id` field as Empty and populate it in a middleware wrapper or inside the handler.
                             // For now, let's just add the fields we have and make space for others.
-                            
+
                             tracing::info_span!("request",
                                 request_id = %request_id,
                                 client_ip = %client_ip,
