@@ -1,11 +1,11 @@
 mod common;
-use common::*;
 use apex::config::{
     Channel, MatchSpec, ProviderType, Router as GatewayRouter, RouterRule, TargetChannel,
 };
 use apex::server::{build_app, build_state};
 use axum::body::Body;
 use axum::http::StatusCode;
+use common::*;
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -17,7 +17,7 @@ async fn test_rule_based_routing_priority() {
 
     // Config
     let mut config = base_config();
-    
+
     // Channels
     config.channels.push(Channel {
         name: "channel_a".to_string(),
@@ -43,7 +43,7 @@ async fn test_rule_based_routing_priority() {
     // Router with Rules
     config.routers.push(GatewayRouter {
         name: "main_router".to_string(),
-        channels: vec![], // Legacy field empty
+        channels: vec![],                    // Legacy field empty
         strategy: "round_robin".to_string(), // Default strategy ignored by rules
         metadata: None,
         fallback_channels: vec![],
@@ -101,7 +101,7 @@ async fn test_rule_based_routing_priority() {
     let (status, body) = response_text(resp).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "upstream_b");
-    
+
     // Test 3: claude -> No Match -> 400 Bad Request (No matching router/rule)
     let req = axum::http::Request::builder()
         .method("POST")

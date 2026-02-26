@@ -47,17 +47,23 @@ impl TeamRateLimiter {
         }
     }
 
-    pub fn check(&self, team_id: &str, rpm_limit: Option<u32>, tpm_limit: Option<u32>, estimated_tokens: u32) -> bool {
+    pub fn check(
+        &self,
+        team_id: &str,
+        rpm_limit: Option<u32>,
+        tpm_limit: Option<u32>,
+        estimated_tokens: u32,
+    ) -> bool {
         let mut buckets = self.buckets.lock().unwrap();
         let team_buckets = buckets.entry(team_id.to_string()).or_default();
 
         // Check RPM
         if let Some(rpm) = rpm_limit {
             if rpm > 0 {
-                let bucket = team_buckets.entry("rpm".to_string()).or_insert_with(|| {
-                    TokenBucket::new(rpm as f64, rpm as f64 / 60.0)
-                });
-                
+                let bucket = team_buckets
+                    .entry("rpm".to_string())
+                    .or_insert_with(|| TokenBucket::new(rpm as f64, rpm as f64 / 60.0));
+
                 // Update rate if config changed
                 if (bucket.capacity - rpm as f64).abs() > 0.1 {
                     *bucket = TokenBucket::new(rpm as f64, rpm as f64 / 60.0);
@@ -71,10 +77,10 @@ impl TeamRateLimiter {
 
         // Check TPM (estimated)
         if let Some(tpm) = tpm_limit {
-             if tpm > 0 {
-                let bucket = team_buckets.entry("tpm".to_string()).or_insert_with(|| {
-                    TokenBucket::new(tpm as f64, tpm as f64 / 60.0)
-                });
+            if tpm > 0 {
+                let bucket = team_buckets
+                    .entry("tpm".to_string())
+                    .or_insert_with(|| TokenBucket::new(tpm as f64, tpm as f64 / 60.0));
 
                 if (bucket.capacity - tpm as f64).abs() > 0.1 {
                     *bucket = TokenBucket::new(tpm as f64, tpm as f64 / 60.0);

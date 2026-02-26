@@ -905,7 +905,7 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                 for matcher in &args.model_matchers {
                     let parts: Vec<&str> = matcher.splitn(2, '=').collect();
                     if parts.len() != 2 {
-                         anyhow::bail!("invalid matcher format: {}", matcher);
+                        anyhow::bail!("invalid matcher format: {}", matcher);
                     }
                     let pattern = parts[0].to_string();
                     let channel_name = parts[1].to_string();
@@ -1247,10 +1247,7 @@ fn ensure_channels_exist(config: &Config, channels: &[String]) -> anyhow::Result
 }
 
 fn print_router_table(routers: &[Router]) {
-    println!(
-        "{:<20} {:<20} {:<20}",
-        "NAME", "CHANNELS", "FALLBACKS"
-    );
+    println!("{:<20} {:<20} {:<20}", "NAME", "CHANNELS", "FALLBACKS");
     for router in routers {
         let channels_display = if !router.channels.is_empty() {
             router
@@ -1323,7 +1320,6 @@ mod tests {
         let merged = build_timeouts(&base, None, None, None);
         assert!(merged.is_none());
     }
-
 }
 
 #[cfg(test)]

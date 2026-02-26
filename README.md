@@ -1,6 +1,6 @@
 # Apex: The Team-First AI Gateway
 
-![CI](https://github.com/your-org/apex/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/cregis-dev/apex/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 ![Version](https://img.shields.io/badge/version-0.1.0-green.svg)
 ![Rust](https://img.shields.io/badge/built_with-Rust-dca282.svg)

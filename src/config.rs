@@ -136,7 +136,10 @@ pub struct Router {
     // Legacy fields (kept for backward compatibility, will be migrated to rules)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channels: Vec<TargetChannel>,
-    #[serde(default = "default_strategy", skip_serializing_if = "is_default_strategy")]
+    #[serde(
+        default = "default_strategy",
+        skip_serializing_if = "is_default_strategy"
+    )]
     pub strategy: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<RouterMetadata>,

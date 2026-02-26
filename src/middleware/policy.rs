@@ -20,25 +20,39 @@ pub async fn team_policy(
         let (rpm_limit, tpm_limit, team_id) = {
             let config = state.config.read().unwrap();
             if let Some(team) = config.teams.iter().find(|t| t.id == ctx.team_id) {
-                 let policy = &team.policy;
-                 let rpm = policy.rate_limit.as_ref().and_then(|l| l.rpm).filter(|&v| v > 0).map(|v| v as u32);
-                 let tpm = policy.rate_limit.as_ref().and_then(|l| l.tpm).filter(|&v| v > 0).map(|v| v as u32);
-                 (rpm, tpm, Some(team.id.clone()))
+                let policy = &team.policy;
+                let rpm = policy
+                    .rate_limit
+                    .as_ref()
+                    .and_then(|l| l.rpm)
+                    .filter(|&v| v > 0)
+                    .map(|v| v as u32);
+                let tpm = policy
+                    .rate_limit
+                    .as_ref()
+                    .and_then(|l| l.tpm)
+                    .filter(|&v| v > 0)
+                    .map(|v| v as u32);
+                (rpm, tpm, Some(team.id.clone()))
             } else {
                 (None, None, None)
             }
         };
 
         if let Some(id) = team_id {
-             if (rpm_limit.is_some() || tpm_limit.is_some()) && !state.team_rate_limiter.check(&id, rpm_limit, tpm_limit, 100) {
-                 return Err(Response::builder()
-                         .status(StatusCode::TOO_MANY_REQUESTS)
-                         .header("content-type", "application/json")
-                         .body(Body::from(r#"{"error": "Rate limit exceeded"}"#))
-                         .unwrap());
-             }
+            if (rpm_limit.is_some() || tpm_limit.is_some())
+                && !state
+                    .team_rate_limiter
+                    .check(&id, rpm_limit, tpm_limit, 100)
+            {
+                return Err(Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"error": "Rate limit exceeded"}"#))
+                    .unwrap());
+            }
         }
     }
-    
+
     Ok(next.run(req).await)
 }

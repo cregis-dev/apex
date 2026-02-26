@@ -1,7 +1,7 @@
 use crate::config::{AuthMode, Config};
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::metrics::MetricsState;
-use crate::middleware::auth::{team_auth, TeamContext};
+use crate::middleware::auth::{TeamContext, team_auth};
 use crate::middleware::policy::team_policy;
 use crate::middleware::ratelimit::TeamRateLimiter;
 use crate::providers::{
@@ -98,8 +98,14 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/models", get(handle_models))
         .route("/messages", post(handle_anthropic))
         .route("/metrics", get(metrics_handler))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), team_auth))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), team_policy))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            team_auth,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            team_policy,
+        ))
         .layer(
             tower::ServiceBuilder::new()
                 .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -187,7 +193,7 @@ fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Respo
             let Some(keys) = &config.global.auth.keys else {
                 return Ok(());
             };
-            
+
             let candidates = [
                 read_auth_token(headers, "authorization"),
                 read_auth_token(headers, "x-api-key"),
@@ -198,8 +204,10 @@ fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Respo
                     return Ok(());
                 }
             }
-            
-            tracing::warn!("Global auth failed. No valid token found in Authorization or x-api-key headers.");
+
+            tracing::warn!(
+                "Global auth failed. No valid token found in Authorization or x-api-key headers."
+            );
             Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized"))
         }
     }
@@ -263,59 +271,80 @@ async fn process_request(
     let router_name = if let Some(name) = router_name_override {
         name
     } else if let Some(ctx) = parts.extensions.get::<TeamContext>() {
-         // Team Flow
-         let team = config.teams.iter().find(|t| t.id == ctx.team_id);
-         if team.is_none() {
-             return error_response(StatusCode::UNAUTHORIZED, "Team not found");
-         }
-         let team = team.unwrap();
+        // Team Flow
+        let team = config.teams.iter().find(|t| t.id == ctx.team_id);
+        if team.is_none() {
+            return error_response(StatusCode::UNAUTHORIZED, "Team not found");
+        }
+        let team = team.unwrap();
 
-         // Check Allowed Models
-         let policy = &team.policy;
-         if let Some(allowed) = &policy.allowed_models {
-             if !allowed.is_empty() && !allowed.contains(&model_name_str.to_string()) {
-                 return error_response(StatusCode::FORBIDDEN, "Model not allowed by team policy");
-             }
-         }
+        // Check Allowed Models
+        let policy = &team.policy;
+        if let Some(allowed) = &policy.allowed_models {
+            if !allowed.is_empty() && !allowed.contains(&model_name_str.to_string()) {
+                return error_response(StatusCode::FORBIDDEN, "Model not allowed by team policy");
+            }
+        }
 
-         // Check Allowed Routers (Mandatory)
-         let allowed_routers = &policy.allowed_routers;
-         if allowed_routers.is_empty() {
-             return error_response(StatusCode::FORBIDDEN, "No allowed routers configured for team");
-         }
-         
-         let mut selected_router = None;
-         for r_name in allowed_routers {
-             if let Some(router) = config.routers.iter().find(|r| r.name == *r_name) {
-                 if state.selector.select_channel(router, model_name_str).is_some() {
-                     selected_router = Some(r_name.clone());
-                     break;
-                 }
-             }
-         }
-         
-         match selected_router {
-             Some(name) => name,
-             None => return error_response(StatusCode::BAD_REQUEST, "No matching router found for model in allowed routers"),
-         }
+        // Check Allowed Routers (Mandatory)
+        let allowed_routers = &policy.allowed_routers;
+        if allowed_routers.is_empty() {
+            return error_response(
+                StatusCode::FORBIDDEN,
+                "No allowed routers configured for team",
+            );
+        }
+
+        let mut selected_router = None;
+        for r_name in allowed_routers {
+            if let Some(router) = config.routers.iter().find(|r| r.name == *r_name) {
+                if state
+                    .selector
+                    .select_channel(router, model_name_str)
+                    .is_some()
+                {
+                    selected_router = Some(r_name.clone());
+                    break;
+                }
+            }
+        }
+
+        match selected_router {
+            Some(name) => name,
+            None => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "No matching router found for model in allowed routers",
+                );
+            }
+        }
     } else {
         // Global Auth Flow (Legacy/Admin)
         if let Err(resp) = enforce_global_auth(&config, &headers) {
-             return resp;
+            return resp;
         }
 
         // Try to find ANY router that handles the model
         let mut selected_router = None;
         for router in &config.routers {
-             if state.selector.select_channel(router, model_name_str).is_some() {
-                 selected_router = Some(router.name.clone());
-                 break;
-             }
+            if state
+                .selector
+                .select_channel(router, model_name_str)
+                .is_some()
+            {
+                selected_router = Some(router.name.clone());
+                break;
+            }
         }
-        
+
         match selected_router {
-             Some(name) => name,
-             None => return error_response(StatusCode::BAD_REQUEST, "No matching router found for model"),
+            Some(name) => name,
+            None => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "No matching router found for model",
+                );
+            }
         }
     };
 
@@ -798,7 +827,7 @@ mod tests {
     #[tokio::test]
     async fn test_team_flow() {
         let mut config = create_test_config();
-        
+
         // Add a team
         config.teams.push(crate::config::Team {
             id: "test-team".to_string(),
@@ -830,21 +859,25 @@ mod tests {
             .method("POST")
             .uri("/v1/chat/completions")
             .header("Authorization", "Bearer sk-ant-test")
-            .extension(TeamContext { team_id: "test-team".to_string() }) 
+            .extension(TeamContext {
+                team_id: "test-team".to_string(),
+            })
             .body(Body::from(r#"{"model": "gpt-4"}"#))
             .unwrap();
 
         let resp = handle_openai(State(state.clone()), req).await;
         // Should pass auth/policy checks and fail at upstream (BAD_GATEWAY) or "no channels"
         // Since "test-router" matches "*", it should find a channel.
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY); 
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
         // 2. Invalid Model (Not in allowed_models)
         let req = Request::builder()
             .method("POST")
             .uri("/v1/chat/completions")
             .header("Authorization", "Bearer sk-ant-test")
-            .extension(TeamContext { team_id: "test-team".to_string() })
+            .extension(TeamContext {
+                team_id: "test-team".to_string(),
+            })
             .body(Body::from(r#"{"model": "gpt-3.5"}"#))
             .unwrap();
 

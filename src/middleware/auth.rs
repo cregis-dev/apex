@@ -18,14 +18,16 @@ pub async fn team_auth(
     next: Next,
 ) -> Response {
     let headers = req.headers().clone();
-    
+
     let team_id = {
         let config = state.config.read().unwrap();
         // 1. Extract API Key
         // If no key, proceed (downstream might require it or allow generic access)
         if let Some(api_key) = extract_api_key(&headers) {
             // 2. Find Team
-            config.teams.iter()
+            config
+                .teams
+                .iter()
                 .find(|t| t.api_key == api_key)
                 .map(|t| t.id.clone())
         } else {
@@ -35,11 +37,9 @@ pub async fn team_auth(
 
     if let Some(id) = team_id {
         // Inject Team Context into Request Extensions
-        req.extensions_mut().insert(TeamContext {
-            team_id: id,
-        });
+        req.extensions_mut().insert(TeamContext { team_id: id });
     }
-    
+
     next.run(req).await
 }
 

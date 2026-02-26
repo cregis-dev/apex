@@ -1,11 +1,11 @@
 mod common;
-use common::*;
 use apex::config::{
     Channel, MatchSpec, Metrics, ProviderType, Router as GatewayRouter, RouterRule, TargetChannel,
 };
 use apex::server::{build_app, build_state};
 use axum::body::Body;
 use axum::http::StatusCode;
+use common::*;
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -20,7 +20,7 @@ async fn test_observability_metrics() {
         listen: "127.0.0.1:0".to_string(),
         path: "/metrics".to_string(),
     };
-    
+
     // Channel & Router
     config.channels.push(Channel {
         name: "test_channel".to_string(),
@@ -39,8 +39,13 @@ async fn test_observability_metrics() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
-            match_spec: MatchSpec { models: vec!["*".to_string()] },
-            channels: vec![TargetChannel { name: "test_channel".to_string(), weight: 1 }],
+            match_spec: MatchSpec {
+                models: vec!["*".to_string()],
+            },
+            channels: vec![TargetChannel {
+                name: "test_channel".to_string(),
+                weight: 1,
+            }],
             strategy: "priority".to_string(),
         }],
     });
@@ -67,10 +72,13 @@ async fn test_observability_metrics() {
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    
+
     let (_status, body) = response_text(resp).await;
-    
+
     // 3. Verify Metrics Content
-    assert!(body.contains("apex_requests_total"), "Should contain requests total metric");
+    assert!(
+        body.contains("apex_requests_total"),
+        "Should contain requests total metric"
+    );
     assert!(body.contains("test_router"), "Should contain router label");
 }
