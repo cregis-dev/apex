@@ -17,6 +17,9 @@ async fn test_rule_based_routing_priority() {
 
     // Config
     let mut config = base_config();
+    // We need a valid Global Key or Team Key because we enforced strict auth
+    config.global.auth.mode = apex::config::AuthMode::ApiKey;
+    config.global.auth.keys = Some(vec!["sk-test".to_string()]);
 
     // Channels
     config.channels.push(Channel {

@@ -50,10 +50,14 @@ async fn test_observability_metrics() {
         }],
     });
 
+    // 1. Send a request to generate metrics
+    // We need a valid Global Key or Team Key because we enforced strict auth
+    config.global.auth.mode = apex::config::AuthMode::ApiKey;
+    config.global.auth.keys = Some(vec!["sk-test".to_string()]);
+
     let state = build_state(config).unwrap();
     let app = build_app(state);
 
-    // 1. Send a request to generate metrics
     let req = axum::http::Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")

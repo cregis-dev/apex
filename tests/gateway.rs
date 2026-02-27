@@ -16,6 +16,10 @@ async fn e2e_openai_route_success() {
     let upstream = spawn_upstream_ok().await;
     ensure_upstream_ok(upstream, "/v1/chat/completions").await;
     let mut config = base_config();
+    config.global.auth = Auth {
+        mode: AuthMode::ApiKey,
+        keys: Some(vec!["vk_test".to_string()]),
+    };
     config.channels.push(Channel {
         name: "primary".to_string(),
         provider_type: ProviderType::Openai,
@@ -69,16 +73,6 @@ async fn e2e_global_auth_required() {
         mode: AuthMode::ApiKey,
         keys: Some(vec!["key1".to_string()]),
     };
-    config.channels.push(Channel {
-        name: "primary".to_string(),
-        provider_type: ProviderType::Openai,
-        base_url: base_url(upstream),
-        api_key: "".to_string(),
-        anthropic_base_url: None,
-        headers: None,
-        model_map: None,
-        timeouts: None,
-    });
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
         channels: vec![TargetChannel {
@@ -88,7 +82,26 @@ async fn e2e_global_auth_required() {
         strategy: "round_robin".to_string(),
         metadata: None,
         fallback_channels: vec![],
-        rules: vec![],
+        rules: vec![RouterRule {
+            match_spec: MatchSpec {
+                models: vec!["*".to_string()],
+            },
+            channels: vec![TargetChannel {
+                name: "primary".to_string(),
+                weight: 1,
+            }],
+            strategy: "priority".to_string(),
+        }],
+    });
+    config.channels.push(Channel {
+        name: "primary".to_string(),
+        provider_type: ProviderType::Openai,
+        base_url: base_url(upstream),
+        api_key: "".to_string(),
+        anthropic_base_url: None,
+        headers: None,
+        model_map: None,
+        timeouts: None,
     });
 
     let state = build_state(config).unwrap();
@@ -101,19 +114,23 @@ async fn e2e_global_auth_required() {
         .body(Body::from(json!({"model":"gpt-4"}).to_string()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    let (status, body) = response_text(resp).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "{}", body);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_fallback_on_failure() {
-    let primary = spawn_upstream_status(StatusCode::INTERNAL_SERVER_ERROR, r#""fail""#).await;
-    let fallback = spawn_upstream_status(StatusCode::OK, r#""ok""#).await;
+    let upstream_bad = spawn_upstream_status(StatusCode::INTERNAL_SERVER_ERROR, "error").await;
+    let upstream_good = spawn_upstream_ok().await;
+
     let mut config = base_config();
+    config.global.auth = Auth {
+        mode: AuthMode::ApiKey,
+        keys: Some(vec!["sk-test".to_string()]),
+    };
     config.channels.push(Channel {
-        name: "primary".to_string(),
+        name: "bad".to_string(),
         provider_type: ProviderType::Openai,
-        base_url: base_url(primary),
+        base_url: base_url(upstream_bad),
         api_key: "".to_string(),
         anthropic_base_url: None,
         headers: None,
@@ -121,9 +138,9 @@ async fn e2e_fallback_on_failure() {
         timeouts: None,
     });
     config.channels.push(Channel {
-        name: "fallback".to_string(),
+        name: "good".to_string(),
         provider_type: ProviderType::Openai,
-        base_url: base_url(fallback),
+        base_url: base_url(upstream_good),
         api_key: "".to_string(),
         anthropic_base_url: None,
         headers: None,
@@ -133,18 +150,18 @@ async fn e2e_fallback_on_failure() {
     config.routers.push(GatewayRouter {
         name: "r1".to_string(),
         channels: vec![TargetChannel {
-            name: "primary".to_string(),
+            name: "bad".to_string(),
             weight: 1,
         }],
         strategy: "round_robin".to_string(),
         metadata: None,
-        fallback_channels: vec!["fallback".to_string()],
+        fallback_channels: vec!["good".to_string()],
         rules: vec![RouterRule {
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
             channels: vec![TargetChannel {
-                name: "primary".to_string(),
+                name: "bad".to_string(),
                 weight: 1,
             }],
             strategy: "priority".to_string(),
@@ -157,10 +174,9 @@ async fn e2e_fallback_on_failure() {
         .method("POST")
         .uri("/v1/chat/completions")
         .header("content-type", "application/json")
-        .header("Authorization", "Bearer vk_test")
+        .header("Authorization", "Bearer sk-test")
         .body(Body::from(json!({"model":"gpt-4"}).to_string()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    let (status, body) = response_text(resp).await;
-    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(resp.status(), StatusCode::OK);
 }
