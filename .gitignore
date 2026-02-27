@@ -18,6 +18,7 @@ tests/e2e/server.log
 # Python artifacts
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # System files
 .DS_Store
