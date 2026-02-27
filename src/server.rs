@@ -267,26 +267,17 @@ async fn process_request(
     path_override: Option<String>,
 ) -> Response<Body> {
     let (parts, body) = req.into_parts();
-    let team_id = parts
-        .extensions
-        .get::<TeamContext>()
-        .map(|c| c.team_id.as_str())
-        .unwrap_or("unknown");
-    tracing::info!(
-        "Request Received: {} {} [Team: {}]",
-        parts.method,
-        parts.uri,
-        team_id
-    );
-    let headers = parts.headers;
+
+    // 1. Read Body
     let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(e) => {
+            tracing::error!("Request Failed: Failed to read body: {}", e);
+            return error_response(StatusCode::BAD_REQUEST, &e.to_string());
+        }
     };
 
-    let config = state.config.read().unwrap().clone();
-
-    // Parse model from body to use in routing (Moved UP)
+    // 2. Parse Model
     let model_name = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
         json.get("model")
             .and_then(|v| v.as_str())
@@ -295,6 +286,34 @@ async fn process_request(
         None
     };
     let model_name_str = model_name.as_deref().unwrap_or("default");
+
+    // 3. Log Request with Context
+    let team_context = parts.extensions.get::<TeamContext>();
+    let auth_info = if let Some(ctx) = team_context {
+        format!("[Team: {}, Model: {}]", ctx.team_id, model_name_str)
+    } else {
+        let has_auth_header =
+            parts.headers.contains_key("authorization") || parts.headers.contains_key("x-api-key");
+
+        if has_auth_header {
+            format!(
+                "[Auth: Global (or Invalid Team Key), Model: {}]",
+                model_name_str
+            )
+        } else {
+            format!("[Auth: None, Model: {}]", model_name_str)
+        }
+    };
+
+    tracing::info!(
+        "Request Received: {} {} {}",
+        parts.method,
+        parts.uri,
+        auth_info
+    );
+
+    let headers = parts.headers;
+    let config = state.config.read().unwrap().clone();
 
     // 2. Resolve Router
     let router_name = if let Some(name) = router_name_override {
