@@ -16,13 +16,15 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
+use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::{self, TraceLayer};
-use tracing::Level;
+use tracing::{Level, error, info};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -45,13 +47,113 @@ pub async fn run_server(path: PathBuf) -> anyhow::Result<()> {
     config.hot_reload.config_path = path.to_string_lossy().to_string();
 
     let state = build_state(config.clone())?;
-    let app = build_app(state);
+    let app = build_app(state.clone());
+
+    // Start config watcher
+    if config.hot_reload.watch {
+        let path_clone = path.clone();
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = watch_config(path_clone, state_clone).await {
+                error!("Config watcher failed: {}", e);
+            }
+        });
+    }
 
     let addr: SocketAddr = config.global.listen.parse()?;
     tracing::info!("Listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+async fn watch_config(path: PathBuf, state: Arc<AppState>) -> notify::Result<()> {
+    // Watch parent directory for robust file replacement handling (atomic saves)
+    let path = std::fs::canonicalize(&path)?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let filename = path
+        .file_name()
+        .ok_or_else(|| {
+            notify::Error::new(notify::ErrorKind::Generic("Invalid config path".into()))
+        })?
+        .to_os_string();
+
+    let (tx, mut rx) = mpsc::channel(1);
+
+    // Create a watcher that sends events to the channel
+    let mut watcher = RecommendedWatcher::new(
+        move |res: notify::Result<Event>| {
+            if let Ok(event) = res {
+                // We care about any event that affects our file
+                let matches = event
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name().map(|n| n == filename).unwrap_or(false));
+
+                if matches {
+                    let _ = tx.blocking_send(());
+                }
+            }
+        },
+        NotifyConfig::default(),
+    )?;
+
+    // Add a path to be watched. All files and directories at that path and
+    // below will be monitored for changes.
+    watcher.watch(parent, RecursiveMode::NonRecursive)?;
+
+    info!("Started watching config file: {:?}", path);
+
+    // Debounce logic
+    let debounce_duration = Duration::from_millis(500);
+
+    loop {
+        // Wait for an event
+        if rx.recv().await.is_none() {
+            break;
+        }
+
+        // Debounce: Wait for a short period to accumulate events
+        // If more events come in, we just proceed after the timeout
+        tokio::time::sleep(debounce_duration).await;
+
+        // Drain any other pending events
+        while rx.try_recv().is_ok() {}
+
+        info!("Config file changed, reloading...");
+
+        // Reload config
+        match crate::config::load_config(&path) {
+            Ok(new_config) => {
+                // Update config
+                {
+                    let mut config_guard = state.config.write().unwrap();
+                    // Preserve hot_reload config path if needed, or just overwrite
+                    // The new config from file might not have the path set in hot_reload struct if it's not in JSON
+                    // But we are reading from the same path.
+                    // Ideally we merge or just replace.
+                    // Let's replace but ensure critical internal fields are preserved if any.
+                    // Actually Config is pure data.
+
+                    // Note: If we use Arc for teams/routers/channels, deserialization creates new Arcs.
+                    // This is exactly what we want.
+                    *config_guard = new_config;
+                    // Restore the path just in case
+                    config_guard.hot_reload.config_path = path.to_string_lossy().to_string();
+                }
+
+                // Invalidate router cache
+                state.selector.invalidate_cache();
+
+                info!("Config reloaded successfully");
+            }
+            Err(e) => {
+                error!("Failed to reload config: {}", e);
+            }
+        }
+    }
 
     Ok(())
 }
