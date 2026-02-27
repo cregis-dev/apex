@@ -143,6 +143,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                                 request_id = %request_id,
                                 client_ip = %client_ip,
                                 team_id = tracing::field::Empty, // Will be populated by auth middleware
+                                router_name = tracing::field::Empty,
+                                channel_name = tracing::field::Empty,
                                 method = %request.method(),
                                 uri = %request.uri(),
                                 version = ?request.version()
@@ -222,7 +224,7 @@ fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Respo
             }
 
             tracing::warn!(
-                "Global auth failed. No valid token found in Authorization or x-api-key headers."
+                "Auth Failed: No valid token found in Authorization or x-api-key headers."
             );
             Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized"))
         }
@@ -265,6 +267,7 @@ async fn process_request(
     path_override: Option<String>,
 ) -> Response<Body> {
     let (parts, body) = req.into_parts();
+    tracing::info!("Request Received: {} {}", parts.method, parts.uri);
     let headers = parts.headers;
     let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
         Ok(b) => b,
@@ -302,12 +305,20 @@ async fn process_request(
             .filter(|a| !a.is_empty() && !a.contains(&model_name_str.to_string()))
             .is_some()
         {
+            tracing::warn!(
+                "Policy Failed: Model '{}' not allowed by team policy",
+                model_name_str
+            );
             return error_response(StatusCode::FORBIDDEN, "Model not allowed by team policy");
         }
 
         // Check Allowed Routers (Mandatory)
         let allowed_routers = &policy.allowed_routers;
         if allowed_routers.is_empty() {
+            tracing::warn!(
+                "Policy Failed: No allowed routers configured for team '{}'",
+                ctx.team_id
+            );
             return error_response(
                 StatusCode::FORBIDDEN,
                 "No allowed routers configured for team",
@@ -336,8 +347,12 @@ async fn process_request(
         match selected_router {
             Some(name) => name,
             None => {
+                tracing::warn!(
+                    "Router Resolution Failed: No matching router found for model '{}' in allowed routers",
+                    model_name_str
+                );
                 return error_response(
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::NOT_FOUND,
                     "No matching router found for model in allowed routers",
                 );
             }
@@ -364,6 +379,10 @@ async fn process_request(
         match selected_router {
             Some(name) => name,
             None => {
+                tracing::warn!(
+                    "Router Resolution Failed: No matching router found for model '{}'",
+                    model_name_str
+                );
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     "No matching router found for model",
@@ -376,7 +395,8 @@ async fn process_request(
         return error_response(StatusCode::NOT_FOUND, "router not found");
     };
 
-    tracing::info!("Router resolved: {}", router.name);
+    tracing::info!("Router Resolved: {}", router.name);
+    tracing::Span::current().record("router_name", &router.name);
 
     // 3. Resolve Channels
     let mut channels = Vec::new();
@@ -386,26 +406,41 @@ async fn process_request(
     {
         channels.push(ch);
         tracing::info!(
-            "Channel selected: {} (strategy={}, model={})",
+            "Channel Resolved: {} (strategy={}, model={})",
             ch.name,
             router.strategy,
             model_name_str
         );
-    }
+    } else {
+        tracing::info!(
+            "Fallback Triggered: No rule matched for model '{}' or all primary channels failed. Trying fallback channels.",
+            model_name_str
+        );
 
-    // Add fallbacks
-    for fb_name in &router.fallback_channels {
-        if let Some(ch) = config.channels.iter().find(|c| c.name == *fb_name) {
-            // Avoid duplicates
-            if !channels.iter().any(|c| c.name == ch.name) {
-                channels.push(ch);
+        // Fallback logic
+        for fb_name in &router.fallback_channels {
+            if let Some(channel) = config.channels.iter().find(|c| c.name == *fb_name) {
+                tracing::info!("Channel Resolved (Fallback): {}", channel.name);
+                // Avoid duplicates
+                if !channels.iter().any(|c| c.name == channel.name) {
+                    channels.push(channel);
+                }
+            } else {
+                tracing::warn!("Fallback channel not found: {}", fb_name);
             }
+        }
+
+        if channels.is_empty() {
+            tracing::error!(
+                "Channel Resolution Failed: All Channels Failed for model '{}'",
+                model_name_str
+            );
         }
     }
 
     if channels.is_empty() {
         tracing::warn!(
-            "No channels configured or matched for router: {}",
+            "Channel Resolution Failed: No channels configured or matched for router: {}",
             router_name
         );
         return error_response(StatusCode::BAD_GATEWAY, "no channels configured or matched");
@@ -429,9 +464,18 @@ async fn process_request(
     let path = path_override.unwrap_or_else(|| parts.uri.path().to_string());
     let query = parts.uri.query().map(|s| s.to_string());
 
-    for (index, channel) in channels.iter().enumerate() {
+    let mut index = 0;
+    let mut fallback_triggered = false;
+
+    while index < channels.len() {
+        let channel = channels[index];
+        tracing::Span::current().record("channel_name", &channel.name);
+
         if index > 0 {
-            tracing::warn!("Switching to fallback channel: {}", channel.name);
+            tracing::warn!(
+                "Fallback Triggered: Switching to fallback channel: {}",
+                channel.name
+            );
             state
                 .metrics
                 .fallback_total
@@ -440,10 +484,8 @@ async fn process_request(
         }
 
         if !state.rate_limiter.check(&channel.provider_type) {
-            tracing::warn!(
-                "Rate limit exceeded for provider: {:?}",
-                channel.provider_type
-            );
+            tracing::warn!("Rate Limit Exceeded: Provider {:?}", channel.provider_type);
+            index += 1;
             continue;
         }
 
@@ -459,7 +501,10 @@ async fn process_request(
                 &bytes,
             ) {
                 Ok(p) => p,
-                Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+                Err(e) => {
+                    tracing::warn!("Upstream Request Build Failed: {}", e);
+                    return error_response(StatusCode::BAD_REQUEST, &e.to_string());
+                }
             };
 
             let adapter = state.providers.adapter(channel);
@@ -475,11 +520,14 @@ async fn process_request(
 
             let req_built = match req_future {
                 Ok(r) => r,
-                Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                Err(e) => {
+                    tracing::warn!("Upstream Request Build Failed: {}", e);
+                    return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+                }
             };
 
             tracing::info!(
-                "Upstream request: method={} url={} attempt={}/{}",
+                "Upstream Request: method={} url={} attempt={}/{}",
                 req_built.method(),
                 req_built.url(),
                 attempt + 1,
@@ -500,7 +548,7 @@ async fn process_request(
 
                     let status = resp.status();
                     if status.is_success() {
-                        tracing::info!("Upstream success: {} ({}ms)", status, elapsed);
+                        tracing::info!("Upstream Success: {} ({}ms)", status, elapsed);
                         state
                             .access_audit
                             .audit(&channel.provider_type, route, true);
@@ -520,7 +568,7 @@ async fn process_request(
                         .await;
                     }
 
-                    tracing::warn!("Upstream failed: {} ({}ms)", status, elapsed);
+                    tracing::warn!("Upstream Failed: {} ({}ms)", status, elapsed);
                     state
                         .access_audit
                         .audit(&channel.provider_type, route, false);
@@ -532,7 +580,7 @@ async fn process_request(
                         // Assuming retry_on is Vec<u16>
                         if retry_on.contains(&status_code) {
                             tracing::warn!(
-                                "Retrying (attempt {}/{}) due to status {}",
+                                "Retry Triggered: attempt {}/{} due to status {}",
                                 attempt + 1,
                                 max_attempts,
                                 status_code
@@ -547,6 +595,25 @@ async fn process_request(
 
                     // If last channel and last attempt, return error
                     if index == channels.len() - 1 && attempt == max_attempts - 1 {
+                        // Check if we can trigger fallback
+                        if !fallback_triggered && !router.fallback_channels.is_empty() {
+                            tracing::warn!(
+                                "Upstream Failed: Channel '{}' failed, trying fallback...",
+                                channel.name
+                            );
+                            fallback_triggered = true;
+                            for fb_name in &router.fallback_channels {
+                                if let Some(fb_ch) =
+                                    config.channels.iter().find(|c| c.name == *fb_name).filter(
+                                        |fb_ch| !channels.iter().any(|c| c.name == fb_ch.name),
+                                    )
+                                {
+                                    channels.push(fb_ch);
+                                }
+                            }
+                            break; // Break attempt loop, proceed to next channel
+                        }
+
                         state
                             .metrics
                             .error_total
@@ -569,13 +636,13 @@ async fn process_request(
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Upstream request error: {}", e);
+                    tracing::error!("Upstream Error: {}", e);
                     state
                         .access_audit
                         .audit(&channel.provider_type, route, false);
                     if attempt + 1 < max_attempts {
                         tracing::warn!(
-                            "Retrying (attempt {}/{}) due to error",
+                            "Retry Triggered: attempt {}/{} due to error",
                             attempt + 1,
                             max_attempts
                         );
@@ -586,6 +653,30 @@ async fn process_request(
                 }
             }
         }
+
+        // If all attempts failed (network error), check fallback
+        if index == channels.len() - 1
+            && !fallback_triggered
+            && !router.fallback_channels.is_empty()
+        {
+            tracing::warn!(
+                "Upstream Failed: Channel '{}' failed (network), trying fallback...",
+                channel.name
+            );
+            fallback_triggered = true;
+            for fb_name in &router.fallback_channels {
+                if let Some(fb_ch) = config
+                    .channels
+                    .iter()
+                    .find(|c| c.name == *fb_name)
+                    .filter(|fb_ch| !channels.iter().any(|c| c.name == fb_ch.name))
+                {
+                    channels.push(fb_ch);
+                }
+            }
+        }
+
+        index += 1;
     }
 
     state

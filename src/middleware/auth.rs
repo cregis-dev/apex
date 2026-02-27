@@ -43,6 +43,7 @@ pub async fn team_auth(
 
         // Record in tracing span
         tracing::Span::current().record("team_id", &id);
+        tracing::info!("Team Resolved: {}", id);
     }
 
     next.run(req).await

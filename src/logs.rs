@@ -74,14 +74,6 @@ fn format_request_context(context: &str) -> String {
         output.push_str(&format!("[{}] ", short_id.yellow()));
     }
 
-    // Team ID
-    if let Some(team_id) = parts
-        .get("team_id")
-        .filter(|t| !t.is_empty() && **t != "Empty")
-    {
-        output.push_str(&format!("[{}] ", team_id.blue()));
-    }
-
     // Client IP
     if let Some(ip) = parts
         .get("client_ip")
@@ -90,12 +82,9 @@ fn format_request_context(context: &str) -> String {
         output.push_str(&format!("[{}] ", ip.purple()));
     }
 
-    // URL/URI (Requested by user)
-    // Adding URL might make it long, but user asked for it.
-    // Let's add it at the end of the prefix.
-    if let Some(uri) = parts.get("uri") {
-        output.push_str(&format!("{} ", uri.normal()));
-    }
+    // Other fields (team_id, router_name, etc.) are available in the span
+    // but not included in the prefix to keep logs clean and consistent.
+    // They are logged as explicit events (e.g. "Team Resolved: ...").
 
     output
 }
@@ -153,9 +142,7 @@ mod tests {
         println!("Colored output: {}", colored);
 
         assert!(colored.contains("12345678")); // Shortened ID
-        assert!(colored.contains("team_1"));
         assert!(colored.contains("127.0.0.1"));
-        assert!(colored.contains("/v1/chat"));
         assert!(!colored.contains("request{")); // Context should be hidden/formatted
     }
 
