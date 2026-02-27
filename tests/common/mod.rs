@@ -46,9 +46,9 @@ pub fn base_config() -> Config {
             level: "info".to_string(),
             dir: None,
         },
-        teams: vec![],
-        channels: vec![],
-        routers: vec![],
+        teams: std::sync::Arc::new(vec![]),
+        channels: std::sync::Arc::new(vec![]),
+        routers: std::sync::Arc::new(vec![]),
     }
 }
 

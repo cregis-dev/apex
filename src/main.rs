@@ -122,14 +122,14 @@ fn handle_team_command(cli: &Cli, command: &TeamCommand) -> anyhow::Result<()> {
                 },
             };
 
-            config.teams.push(team);
+            std::sync::Arc::make_mut(&mut config.teams).push(team);
             config::save_config(&config_path, &config)?;
             println!("Team '{}' added successfully.", args.id);
             println!("API Key: {}", api_key);
         }
         TeamCommand::Remove { id } => {
             if let Some(index) = config.teams.iter().position(|t| t.id == *id) {
-                config.teams.remove(index);
+                std::sync::Arc::make_mut(&mut config.teams).remove(index);
                 config::save_config(&config_path, &config)?;
                 println!("Team '{}' removed successfully.", id);
             } else {
@@ -142,7 +142,7 @@ fn handle_team_command(cli: &Cli, command: &TeamCommand) -> anyhow::Result<()> {
             } else {
                 println!("{:<20} {:<45} {:<20}", "ID", "API Key", "Allowed Routers");
                 println!("{:-<20} {:-<45} {:-<20}", "", "", "");
-                for team in &config.teams {
+                for team in config.teams.iter() {
                     let routers = team.policy.allowed_routers.join(", ");
                     println!("{:<20} {:<45} {:<20}", team.id, team.api_key, routers);
                 }
@@ -606,8 +606,8 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
                 retry_on_status: vec![429, 500, 502, 503, 504],
             },
         },
-        channels: Vec::new(),
-        routers: Vec::new(),
+        channels: std::sync::Arc::new(Vec::new()),
+        routers: std::sync::Arc::new(Vec::new()),
         metrics: Metrics {
             enabled: true,
             listen: "0.0.0.0:9090".to_string(),
@@ -621,7 +621,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
             level: "info".to_string(),
             dir: None,
         },
-        teams: Vec::new(),
+        teams: std::sync::Arc::new(Vec::new()),
     };
     config::save_config(path, &config)
         .with_context(|| format!("failed to write config: {}", path.display()))?;
@@ -719,7 +719,7 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                 model_map,
                 timeouts,
             };
-            config.channels.push(channel);
+            std::sync::Arc::make_mut(&mut config.channels).push(channel);
             config::save_config(&path, &config)?;
             println!("✅ 已添加 channel: {}", args.name);
         }
@@ -736,7 +736,7 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
 
             if let Some(provider_val) = &args.provider {
                 let p = parse_provider_type(provider_val)?;
-                config.channels[channel_idx].provider_type = p;
+                std::sync::Arc::make_mut(&mut config.channels)[channel_idx].provider_type = p;
                 new_provider_value = Some(provider_val.clone());
             }
 
@@ -755,7 +755,7 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                     let new_url = inquire::Text::new("OpenAI Base URL")
                         .with_default(&default_base_url)
                         .prompt()?;
-                    config.channels[channel_idx].base_url = new_url;
+                    std::sync::Arc::make_mut(&mut config.channels)[channel_idx].base_url = new_url;
                 }
 
                 // Anthropic Base URL
@@ -773,12 +773,13 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                         let new_url = inquire::Text::new("Anthropic Base URL")
                             .with_default(&default)
                             .prompt()?;
-                        config.channels[channel_idx].anthropic_base_url = Some(new_url);
+                        std::sync::Arc::make_mut(&mut config.channels)[channel_idx]
+                            .anthropic_base_url = Some(new_url);
                     }
                 }
             }
 
-            let channel = &mut config.channels[channel_idx];
+            let channel = &mut std::sync::Arc::make_mut(&mut config.channels)[channel_idx];
 
             if let Some(base_url) = &args.base_url {
                 channel.base_url = base_url.clone();
@@ -821,18 +822,18 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
         ChannelCommand::Delete { name } => {
             let mut config = load_config_or_exit(&path)?;
             let original_len = config.channels.len();
-            config.channels.retain(|c| c.name != *name);
+            std::sync::Arc::make_mut(&mut config.channels).retain(|c| c.name != *name);
             if config.channels.len() == original_len {
                 bail!("channel not found: {}", name);
             }
 
             // Remove channel from all routers' channel lists
-            for router in &mut config.routers {
+            for router in std::sync::Arc::make_mut(&mut config.routers) {
                 router.channels.retain(|c| c.name != *name);
                 router.fallback_channels.retain(|c| c != name);
             }
             // Remove routers that have no channels left
-            config.routers.retain(|r| !r.channels.is_empty());
+            std::sync::Arc::make_mut(&mut config.routers).retain(|r| !r.channels.is_empty());
 
             config::save_config(&path, &config)?;
             println!("✅ 已删除 channel: {}", name);
@@ -966,7 +967,7 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                 metadata: None,
                 fallback_channels: args.fallback_channels.clone(),
             };
-            config.routers.push(router);
+            std::sync::Arc::make_mut(&mut config.routers).push(router);
             config::save_config(&path, &config)?;
             println!("✅ 已添加 router: {}", args.name);
         }
@@ -1028,7 +1029,7 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                 ensure_channels_exist(&config, &targets)?;
             }
 
-            let router = &mut config.routers[router_idx];
+            let router = &mut std::sync::Arc::make_mut(&mut config.routers)[router_idx];
 
             if !new_channels.is_empty() {
                 router.channels = new_channels;
@@ -1061,7 +1062,7 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
         RouterCommand::Delete { name } => {
             let mut config = load_config_or_exit(&path)?;
             let original_len = config.routers.len();
-            config.routers.retain(|r| r.name != *name);
+            std::sync::Arc::make_mut(&mut config.routers).retain(|r| r.name != *name);
             if config.routers.len() == original_len {
                 bail!("router not found: {}", name);
             }

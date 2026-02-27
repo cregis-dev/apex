@@ -6,8 +6,8 @@ use std::time::Duration;
 
 #[derive(Clone)]
 pub struct RouterSelector {
-    // Cache key: "router_name:model_name" -> value: Option<TargetChannelName>
-    rule_cache: Cache<String, Option<String>>,
+    // Cache key: "router_name:model_name" -> value: Option<usize> (index of matched rule)
+    rule_cache: Cache<String, Option<usize>>,
 }
 
 impl Default for RouterSelector {
@@ -26,6 +26,12 @@ impl RouterSelector {
         }
     }
 
+    /// Invalidate the rule cache.
+    /// Should be called when configuration is reloaded.
+    pub fn invalidate_cache(&self) {
+        self.rule_cache.invalidate_all();
+    }
+
     /// Find the target channel for a given router and model.
     /// Returns the channel name.
     pub fn select_channel(&self, router: &Router, model: &str) -> Option<String> {
@@ -33,49 +39,39 @@ impl RouterSelector {
         // We cache the index of the matched rule, or None if no rule matches
         let cache_key = format!("{}:{}", router.name, model);
 
-        let _rule_idx: Option<usize> = if let Some(_idx) = self.rule_cache.get(&cache_key) {
-            // Parse cached value: "some(1)" or "none"
-            // For simplicity, let's just cache the target channel directly if it's deterministic?
-            // But wait, strategy might be random/round_robin, so we can't cache the final channel name.
-            // We MUST cache which RULE matched, and then re-apply strategy.
-            // However, our current cache stores Option<String>.
-            // Let's refactor the cache usage.
-            // Since we are changing logic significantly, let's rebuild the flow.
-            None // Disable cache for a moment to implement logic first
+        let rule_idx: Option<usize> = if let Some(idx) = self.rule_cache.get(&cache_key) {
+            idx
         } else {
-            None
+            // Find matching rule
+            let idx = router.rules.iter().position(|rule| {
+                for pattern_str in &rule.match_spec.models {
+                    // 1. Exact match (case-insensitive)
+                    if pattern_str.eq_ignore_ascii_case(model) {
+                        return true;
+                    }
+                    // 2. Glob match (case-insensitive)
+                    if Pattern::new(pattern_str).is_ok_and(|pattern| {
+                        pattern.matches_with(
+                            model,
+                            MatchOptions {
+                                case_sensitive: false,
+                                require_literal_separator: false,
+                                require_literal_leading_dot: false,
+                            },
+                        )
+                    }) {
+                        return true;
+                    }
+                }
+                false
+            });
+
+            // Cache the result (even if None)
+            self.rule_cache.insert(cache_key, idx);
+            idx
         };
 
-        // Find matching rule
-        // Note: In a real high-perf scenario, we should cache the matched rule index.
-        // For now, let's iterate rules every time or use the cache to store "channel name" IF strategy is priority (deterministic).
-        // But if strategy is round_robin, we must re-evaluate.
-
-        // Let's just find the rule first.
-        let matched_rule = router.rules.iter().find(|rule| {
-            for pattern_str in &rule.match_spec.models {
-                // 1. Exact match (case-insensitive)
-                if pattern_str.eq_ignore_ascii_case(model) {
-                    return true;
-                }
-                // 2. Glob match (case-insensitive)
-                if let Ok(pattern) = Pattern::new(pattern_str)
-                    && pattern.matches_with(
-                        model,
-                        MatchOptions {
-                            case_sensitive: false,
-                            require_literal_separator: false,
-                            require_literal_leading_dot: false,
-                        },
-                    )
-                {
-                    return true;
-                }
-            }
-            false
-        });
-
-        if let Some(rule) = matched_rule {
+        if let Some(rule) = rule_idx.and_then(|idx| router.rules.get(idx)) {
             return self.apply_strategy(&rule.channels, &rule.strategy);
         }
 

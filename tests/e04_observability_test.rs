@@ -22,7 +22,7 @@ async fn test_observability_metrics() {
     };
 
     // Channel & Router
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "test_channel".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream),
@@ -32,7 +32,7 @@ async fn test_observability_metrics() {
         model_map: None,
         timeouts: None,
     });
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "test_router".to_string(),
         channels: vec![],
         strategy: "priority".to_string(),

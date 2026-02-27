@@ -17,7 +17,7 @@ async fn test_team_allowed_models_case_insensitive() {
     let mut config = base_config();
 
     // Channel
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream),
@@ -29,7 +29,7 @@ async fn test_team_allowed_models_case_insensitive() {
     });
 
     // Router
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
             match_spec: MatchSpec {
@@ -48,7 +48,7 @@ async fn test_team_allowed_models_case_insensitive() {
     });
 
     // Team with Uppercase Model Config
-    config.teams.push(Team {
+    std::sync::Arc::make_mut(&mut config.teams).push(Team {
         id: "team-case-test".to_string(),
         api_key: "sk-team-key".to_string(),
         policy: TeamPolicy {
@@ -87,7 +87,7 @@ async fn test_team_allowed_models_glob() {
     let mut config = base_config();
 
     // Channel
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream),
@@ -99,7 +99,7 @@ async fn test_team_allowed_models_glob() {
     });
 
     // Router
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
             match_spec: MatchSpec {
@@ -118,7 +118,7 @@ async fn test_team_allowed_models_glob() {
     });
 
     // Team with Glob Pattern
-    config.teams.push(Team {
+    std::sync::Arc::make_mut(&mut config.teams).push(Team {
         id: "team-glob-test".to_string(),
         api_key: "sk-team-glob-key".to_string(),
         policy: TeamPolicy {
@@ -157,7 +157,7 @@ async fn test_team_policy_enforcement() {
     let mut config = base_config();
 
     // Channel
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream),
@@ -169,7 +169,7 @@ async fn test_team_policy_enforcement() {
     });
 
     // Router
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
             match_spec: MatchSpec {
@@ -188,7 +188,7 @@ async fn test_team_policy_enforcement() {
     });
 
     // Team that ONLY allows gpt-4
-    config.teams.push(Team {
+    std::sync::Arc::make_mut(&mut config.teams).push(Team {
         id: "team-strict".to_string(),
         api_key: "sk-team-strict".to_string(),
         policy: TeamPolicy {
@@ -228,7 +228,7 @@ async fn test_team_auth_x_api_key() {
     let mut config = base_config();
 
     // Channel
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
         provider_type: ProviderType::Anthropic, // Anthropic provider
         base_url: base_url(upstream),
@@ -240,7 +240,7 @@ async fn test_team_auth_x_api_key() {
     });
 
     // Router
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
             match_spec: MatchSpec {
@@ -259,7 +259,7 @@ async fn test_team_auth_x_api_key() {
     });
 
     // Team
-    config.teams.push(Team {
+    std::sync::Arc::make_mut(&mut config.teams).push(Team {
         id: "team-anthropic".to_string(),
         api_key: "sk-ant-team-key".to_string(),
         policy: TeamPolicy {
@@ -299,7 +299,7 @@ async fn test_team_auth_x_api_key_policy() {
     let mut config = base_config();
 
     // Channel & Router setup (same as above)
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
         provider_type: ProviderType::Anthropic,
         base_url: base_url(upstream),
@@ -309,7 +309,7 @@ async fn test_team_auth_x_api_key_policy() {
         model_map: None,
         timeouts: None,
     });
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
             match_spec: MatchSpec {
@@ -328,7 +328,7 @@ async fn test_team_auth_x_api_key_policy() {
     });
 
     // Team
-    config.teams.push(Team {
+    std::sync::Arc::make_mut(&mut config.teams).push(Team {
         id: "team-anthropic-strict".to_string(),
         api_key: "sk-ant-strict".to_string(),
         policy: TeamPolicy {
@@ -373,7 +373,7 @@ async fn test_invalid_key_rejection() {
     config.global.auth.mode = AuthMode::None;
 
     // Channel
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream),
@@ -385,7 +385,7 @@ async fn test_invalid_key_rejection() {
     });
 
     // Router
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
             match_spec: MatchSpec {
@@ -404,7 +404,7 @@ async fn test_invalid_key_rejection() {
     });
 
     // Add a Team (so config.teams is not empty)
-    config.teams.push(Team {
+    std::sync::Arc::make_mut(&mut config.teams).push(Team {
         id: "team-valid".to_string(),
         api_key: "sk-valid-team".to_string(),
         policy: TeamPolicy {
@@ -478,7 +478,7 @@ async fn test_valid_global_key_acceptance() {
     config.global.auth.keys = Some(vec!["sk-global-key".to_string()]);
 
     // Channel & Router (Standard)
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream),
@@ -488,7 +488,7 @@ async fn test_valid_global_key_acceptance() {
         model_map: None,
         timeouts: None,
     });
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
             match_spec: MatchSpec {

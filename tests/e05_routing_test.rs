@@ -22,7 +22,7 @@ async fn test_rule_based_routing_priority() {
     config.global.auth.keys = Some(vec!["sk-test".to_string()]);
 
     // Channels
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "channel_a".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream_a),
@@ -32,7 +32,7 @@ async fn test_rule_based_routing_priority() {
         model_map: None,
         timeouts: None,
     });
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "channel_b".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream_b),
@@ -44,7 +44,7 @@ async fn test_rule_based_routing_priority() {
     });
 
     // Router with Rules
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "main_router".to_string(),
         channels: vec![],                    // Legacy field empty
         strategy: "round_robin".to_string(), // Default strategy ignored by rules

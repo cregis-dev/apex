@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -10,12 +11,14 @@ pub struct Config {
     pub global: Global,
     #[serde(default)]
     pub logging: Logging,
-    pub channels: Vec<Channel>,
-    pub routers: Vec<Router>,
+    #[serde(default)]
+    pub channels: Arc<Vec<Channel>>,
+    #[serde(default)]
+    pub routers: Arc<Vec<Router>>,
     pub metrics: Metrics,
     pub hot_reload: HotReload,
     #[serde(default)]
-    pub teams: Vec<Team>,
+    pub teams: Arc<Vec<Team>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,7 +257,7 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
     let mut config = serde_json::from_str::<Config>(&content)?;
 
     // Migrate legacy configuration to rules
-    for router in &mut config.routers {
+    for router in std::sync::Arc::make_mut(&mut config.routers) {
         if router.rules.is_empty() {
             // 1. Convert metadata.model_matcher to rules
             if let Some(metadata) = &router.metadata {

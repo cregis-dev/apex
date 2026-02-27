@@ -289,8 +289,8 @@ async fn process_request(
 
     // 3. Log Request with Context
     let team_context = parts.extensions.get::<TeamContext>();
-    let auth_info = if let Some(ctx) = team_context {
-        format!("[Team: {}, Model: {}]", ctx.team_id, model_name_str)
+    let auth_info = if let Some(_ctx) = team_context {
+        format!("[Model: {}]", model_name_str)
     } else {
         let has_auth_header =
             parts.headers.contains_key("authorization") || parts.headers.contains_key("x-api-key");
@@ -389,7 +389,7 @@ async fn process_request(
 
         // Try to find ANY router that handles the model
         let mut selected_router = None;
-        for router in &config.routers {
+        for router in config.routers.iter() {
             if state
                 .selector
                 .select_channel(router, model_name_str)
@@ -771,8 +771,8 @@ mod tests {
                 level: "info".to_string(),
                 dir: None,
             },
-            teams: vec![],
-            channels: vec![
+            teams: Arc::new(vec![]),
+            channels: Arc::new(vec![
                 crate::config::Channel {
                     name: "test-channel".to_string(),
                     provider_type: ProviderType::Openai,
@@ -793,8 +793,8 @@ mod tests {
                     model_map: None,
                     timeouts: None,
                 },
-            ],
-            routers: vec![crate::config::Router {
+            ]),
+            routers: Arc::new(vec![crate::config::Router {
                 name: "test-router".to_string(),
                 rules: vec![crate::config::RouterRule {
                     match_spec: crate::config::MatchSpec {
@@ -813,7 +813,7 @@ mod tests {
                 strategy: "round_robin".to_string(),
                 metadata: None,
                 fallback_channels: vec![],
-            }],
+            }]),
         }
     }
 
@@ -904,7 +904,7 @@ mod tests {
         let mut config = create_test_config();
 
         // Add another channel
-        config.channels.push(Channel {
+        Arc::make_mut(&mut config.channels).push(Channel {
             name: "ch2".to_string(),
             provider_type: ProviderType::Anthropic, // Distinct provider
             base_url: "http://example.com".to_string(),
@@ -916,7 +916,7 @@ mod tests {
         });
 
         // Update router to match "gpt-4" to "ch2"
-        let router = &mut config.routers[0];
+        let router = &mut Arc::make_mut(&mut config.routers)[0];
         router.rules.insert(
             0,
             crate::config::RouterRule {
@@ -968,7 +968,7 @@ mod tests {
         let mut config = create_test_config();
 
         // Add a team
-        config.teams.push(crate::config::Team {
+        Arc::make_mut(&mut config.teams).push(crate::config::Team {
             id: "test-team".to_string(),
             api_key: "sk-ant-test".to_string(),
             policy: crate::config::TeamPolicy {

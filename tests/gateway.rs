@@ -20,7 +20,7 @@ async fn e2e_openai_route_success() {
         mode: AuthMode::ApiKey,
         keys: Some(vec!["vk_test".to_string()]),
     };
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream),
@@ -30,7 +30,7 @@ async fn e2e_openai_route_success() {
         model_map: None,
         timeouts: None,
     });
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         channels: vec![TargetChannel {
             name: "primary".to_string(),
@@ -73,7 +73,7 @@ async fn e2e_global_auth_required() {
         mode: AuthMode::ApiKey,
         keys: Some(vec!["key1".to_string()]),
     };
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         channels: vec![TargetChannel {
             name: "primary".to_string(),
@@ -93,7 +93,7 @@ async fn e2e_global_auth_required() {
             strategy: "priority".to_string(),
         }],
     });
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream),
@@ -127,7 +127,7 @@ async fn e2e_fallback_on_failure() {
         mode: AuthMode::ApiKey,
         keys: Some(vec!["sk-test".to_string()]),
     };
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "bad".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream_bad),
@@ -137,7 +137,7 @@ async fn e2e_fallback_on_failure() {
         model_map: None,
         timeouts: None,
     });
-    config.channels.push(Channel {
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "good".to_string(),
         provider_type: ProviderType::Openai,
         base_url: base_url(upstream_good),
@@ -147,7 +147,7 @@ async fn e2e_fallback_on_failure() {
         model_map: None,
         timeouts: None,
     });
-    config.routers.push(GatewayRouter {
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         channels: vec![TargetChannel {
             name: "bad".to_string(),
