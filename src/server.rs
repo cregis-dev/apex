@@ -267,7 +267,17 @@ async fn process_request(
     path_override: Option<String>,
 ) -> Response<Body> {
     let (parts, body) = req.into_parts();
-    tracing::info!("Request Received: {} {}", parts.method, parts.uri);
+    let team_id = parts
+        .extensions
+        .get::<TeamContext>()
+        .map(|c| c.team_id.as_str())
+        .unwrap_or("unknown");
+    tracing::info!(
+        "Request Received: {} {} [Team: {}]",
+        parts.method,
+        parts.uri,
+        team_id
+    );
     let headers = parts.headers;
     let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
         Ok(b) => b,
@@ -299,12 +309,7 @@ async fn process_request(
 
         // Check Allowed Models
         let policy = &team.policy;
-        if policy
-            .allowed_models
-            .as_ref()
-            .filter(|a| !a.is_empty() && !a.contains(&model_name_str.to_string()))
-            .is_some()
-        {
+        if !policy.is_model_allowed(model_name_str) {
             tracing::warn!(
                 "Policy Failed: Model '{}' not allowed by team policy",
                 model_name_str

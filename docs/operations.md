@@ -136,22 +136,107 @@ curl http://localhost:12356/v1/chat/completions \
 
 ## 高级配置
 
-### 团队治理 (Team Governance)
+### 团队治理与多租户 (Team Governance & Multi-Tenancy)
 
-您可以为团队配置更细粒度的权限和限流：
+Apex 使用 Team ID 和 API Key 进行多租户管理。每个 Team 拥有独立的权限策略和限流配额。
+
+#### 典型配置示例
+
+**1. 基础接入 (Basic Access)**
+
+最简单的场景，为团队分配一个路由的访问权限。
+
+```bash
+apex team add --id frontend-app --routers default-router
+```
+
+**2. 多路由与模型限制 (Multi-Router & Model Restrictions)**
+
+允许团队访问多个路由，但限制只能使用特定模型（如仅允许使用低成本模型）。
 
 ```bash
 apex team add \
-  --id engineering \
-  --routers default-openai,deepseek-router \
-  --models "gpt-4,claude-*" \
-  --rpm 100 \
-  --tpm 100000
+  --id internal-testing \
+  --routers openai-router,anthropic-router \
+  --models "gpt-3.5-*,claude-instant-*"
 ```
-- `--routers`: 允许访问的路由列表。
-- `--models`: (可选) 允许访问的模型通配符列表。
-- `--rpm`: (可选) 每分钟请求数限制。
-- `--tpm`: (可选) 每分钟 Token 数限制。
+*注意：`--models` 支持通配符匹配，且不区分大小写。*
+
+**3. 高优先级与限流 (High Priority & Rate Limiting)**
+
+为核心业务配置宽松的限流，防止滥用。
+
+```bash
+apex team add \
+  --id core-service \
+  --routers main-router \
+  --rpm 1000 \
+  --tpm 500000
+```
+
+**4. 严格限流 (Strict Rate Limiting)**
+
+为试用用户或不可信来源配置严格的 RPM/TPM 限制。
+
+```bash
+apex team add \
+  --id trial-user \
+  --routers default-router \
+  --models "gpt-3.5-turbo" \
+  --rpm 5 \
+  --tpm 10000
+```
+
+#### 管理命令
+
+- **查看所有团队**: `apex team list`
+- **删除团队**: `apex team remove --id <team-id>`
+
+参数说明：
+- `--routers`: (必填) 允许访问的路由列表，逗号分隔。
+- `--models`: (可选) 允许访问的模型通配符列表。若不传则允许该路由下的所有模型。
+- `--rpm`: (可选) 每分钟请求数限制 (Requests Per Minute)。
+- `--tpm`: (可选) 每分钟 Token 数限制 (Tokens Per Minute)。
+
+#### 配置参考 (Configuration Reference)
+
+您可以直接编辑 `config.json` 中的 `teams` 字段进行配置：
+
+```json
+{
+  "teams": [
+    {
+      "//": "示例1：基础接入",
+      "id": "frontend-app",
+      "api_key": "sk-ant-generated-key-1",
+      "policy": {
+        "allowed_routers": ["default-router"]
+      }
+    },
+    {
+      "//": "示例2：多路由与模型限制",
+      "id": "internal-testing",
+      "api_key": "sk-ant-generated-key-2",
+      "policy": {
+        "allowed_routers": ["openai-router", "anthropic-router"],
+        "allowed_models": ["gpt-3.5-*", "claude-instant-*"]
+      }
+    },
+    {
+      "//": "示例3：高优先级与限流",
+      "id": "core-service",
+      "api_key": "sk-ant-generated-key-3",
+      "policy": {
+        "allowed_routers": ["main-router"],
+        "rate_limit": {
+          "rpm": 1000,
+          "tpm": 500000
+        }
+      }
+    }
+  ]
+}
+```
 
 ### 基于规则的路由 (Rule-Based Routing)
 

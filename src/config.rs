@@ -1,3 +1,4 @@
+use glob::{MatchOptions, Pattern};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -31,6 +32,38 @@ pub struct TeamPolicy {
     pub allowed_models: Option<Vec<String>>,
     #[serde(default)]
     pub rate_limit: Option<TeamRateLimit>,
+}
+
+impl TeamPolicy {
+    pub fn is_model_allowed(&self, model: &str) -> bool {
+        match &self.allowed_models {
+            None => true,
+            Some(patterns) => {
+                if patterns.is_empty() {
+                    return true;
+                }
+                patterns.iter().any(|pattern_str| {
+                    // 1. Exact match (case-insensitive)
+                    if pattern_str.eq_ignore_ascii_case(model) {
+                        return true;
+                    }
+                    // 2. Glob match (case-insensitive)
+                    if let Ok(pattern) = Pattern::new(pattern_str) {
+                        pattern.matches_with(
+                            model,
+                            MatchOptions {
+                                case_sensitive: false,
+                                require_literal_separator: false,
+                                require_literal_leading_dot: false,
+                            },
+                        )
+                    } else {
+                        false
+                    }
+                })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
