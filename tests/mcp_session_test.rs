@@ -77,8 +77,14 @@ async fn test_mcp_session_lifecycle() {
             break;
         }
     }
-    assert!(capabilities_changed_received, "capabilitiesChanged notification not received");
-    assert_eq!(notification_count, 3, "Expected 3 list_changed notifications");
+    assert!(
+        capabilities_changed_received,
+        "capabilitiesChanged notification not received"
+    );
+    assert_eq!(
+        notification_count, 3,
+        "Expected 3 list_changed notifications"
+    );
 
     // 6. Remove session
     server.sessions().remove("test-session").await;

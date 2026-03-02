@@ -93,7 +93,9 @@ pub struct AnalyticsEngine {
 impl AnalyticsEngine {
     pub fn new(log_dir: Option<String>) -> Self {
         let dir = if let Some(d) = log_dir {
-            if d.starts_with("~") && let Some(home) = dirs::home_dir() {
+            if d.starts_with("~")
+                && let Some(home) = dirs::home_dir()
+            {
                 if d == "~" {
                     home.join("logs")
                 } else if let Some(stripped) = d.strip_prefix("~/") {
@@ -176,9 +178,7 @@ impl AnalyticsEngine {
         }
 
         let file = File::open(&file_path)?;
-        let mut reader = ReaderBuilder::new()
-            .has_headers(true)
-            .from_reader(file);
+        let mut reader = ReaderBuilder::new().has_headers(true).from_reader(file);
 
         let headers = match reader.headers() {
             Ok(h) => h.clone(),
@@ -299,12 +299,10 @@ impl AnalyticsEngine {
         // Group by model
         let mut by_model: HashMap<String, ModelStats> = HashMap::new();
         for record in &records {
-            let entry = by_model
-                .entry(record.model.clone())
-                .or_insert(ModelStats {
-                    total_requests: 0,
-                    total_tokens: 0,
-                });
+            let entry = by_model.entry(record.model.clone()).or_insert(ModelStats {
+                total_requests: 0,
+                total_tokens: 0,
+            });
             entry.total_requests += 1;
             entry.total_tokens += record.input_tokens + record.output_tokens;
         }
@@ -431,12 +429,10 @@ impl AnalyticsEngine {
         // Group by model
         let mut by_model: HashMap<String, ModelStats> = HashMap::new();
         for record in &all_records {
-            let entry = by_model
-                .entry(record.model.clone())
-                .or_insert(ModelStats {
-                    total_requests: 0,
-                    total_tokens: 0,
-                });
+            let entry = by_model.entry(record.model.clone()).or_insert(ModelStats {
+                total_requests: 0,
+                total_tokens: 0,
+            });
             entry.total_requests += 1;
             entry.total_tokens += record.input_tokens + record.output_tokens;
         }
@@ -582,12 +578,10 @@ impl AnalyticsEngine {
         // Group by model
         let mut by_model: HashMap<String, ModelStats> = HashMap::new();
         for record in &all_records {
-            let entry = by_model
-                .entry(record.model.clone())
-                .or_insert(ModelStats {
-                    total_requests: 0,
-                    total_tokens: 0,
-                });
+            let entry = by_model.entry(record.model.clone()).or_insert(ModelStats {
+                total_requests: 0,
+                total_tokens: 0,
+            });
             entry.total_requests += 1;
             entry.total_tokens += record.input_tokens + record.output_tokens;
         }
@@ -612,7 +606,8 @@ impl AnalyticsEngine {
     /// Export usage data to JSON
     pub fn export_json(&self, query: &UsageQuery) -> Result<String> {
         let records = self.query_usage(query)?;
-        serde_json::to_string_pretty(&records).map_err(|e| anyhow::anyhow!("JSON export error: {}", e))
+        serde_json::to_string_pretty(&records)
+            .map_err(|e| anyhow::anyhow!("JSON export error: {}", e))
     }
 
     /// Export usage data to CSV
@@ -620,7 +615,15 @@ impl AnalyticsEngine {
         let records = self.query_usage(query)?;
 
         let mut wtr = csv::Writer::from_writer(vec![]);
-        wtr.write_record(&["timestamp", "team_id", "router", "channel", "model", "input_tokens", "output_tokens"])?;
+        wtr.write_record(&[
+            "timestamp",
+            "team_id",
+            "router",
+            "channel",
+            "model",
+            "input_tokens",
+            "output_tokens",
+        ])?;
 
         for record in records {
             wtr.write_record(&[
@@ -634,7 +637,9 @@ impl AnalyticsEngine {
             ])?;
         }
 
-        let data = wtr.into_inner().map_err(|e| anyhow::anyhow!("CSV export error: {}", e))?;
+        let data = wtr
+            .into_inner()
+            .map_err(|e| anyhow::anyhow!("CSV export error: {}", e))?;
         String::from_utf8(data).map_err(|e| anyhow::anyhow!("UTF-8 error: {}", e))
     }
 }

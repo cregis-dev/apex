@@ -15,7 +15,11 @@ fn mask_json_secrets(value: &serde_json::Value) -> serde_json::Value {
         serde_json::Value::Object(map) => {
             let mut new_map = serde_json::Map::new();
             for (key, val) in map {
-                let masked_key = if key.contains("key") || key.contains("secret") || key.contains("password") || key.contains("token") {
+                let masked_key = if key.contains("key")
+                    || key.contains("secret")
+                    || key.contains("password")
+                    || key.contains("token")
+                {
                     mask_secret(key)
                 } else {
                     key.clone()
@@ -28,7 +32,12 @@ fn mask_json_secrets(value: &serde_json::Value) -> serde_json::Value {
             serde_json::Value::Array(arr.iter().map(mask_json_secrets).collect())
         }
         serde_json::Value::String(s) => {
-            if s.starts_with("sk-") || s.starts_with("sk_") || s.contains("secret") || s.contains("password") || (s.len() > 10 && s.chars().any(|c| c == '-')) {
+            if s.starts_with("sk-")
+                || s.starts_with("sk_")
+                || s.contains("secret")
+                || s.contains("password")
+                || (s.len() > 10 && s.chars().any(|c| c == '-'))
+            {
                 serde_json::Value::String(mask_secret(s))
             } else {
                 value.clone()
@@ -74,7 +83,11 @@ impl McpServer {
         };
         let analytics = Arc::new(AnalyticsEngine::new(log_dir));
 
-        Self { config, sessions, analytics }
+        Self {
+            config,
+            sessions,
+            analytics,
+        }
     }
 
     pub fn sessions(&self) -> Arc<SessionManager> {
@@ -120,7 +133,8 @@ impl McpServer {
             .broadcast(JsonRpcMessage::Notification(notif_tools))
             .await;
 
-        let notif_prompts = Notification::new("notifications/prompts/list_changed".to_string(), None);
+        let notif_prompts =
+            Notification::new("notifications/prompts/list_changed".to_string(), None);
         self.sessions
             .broadcast(JsonRpcMessage::Notification(notif_prompts))
             .await;
@@ -170,7 +184,10 @@ impl McpServer {
             }
         };
 
-        let level = params.get("level").and_then(|v| v.as_str()).unwrap_or("debug");
+        let level = params
+            .get("level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("debug");
 
         // Map MCP log levels to tracing levels
         let log_level = match level {
@@ -263,7 +280,8 @@ impl McpServer {
         };
 
         // Mask secrets in the JSON - only mask specific fields, not the entire content
-        let value: serde_json::Value = serde_json::from_str(&content).unwrap_or_else(|_| serde_json::Value::String(content.clone()));
+        let value: serde_json::Value = serde_json::from_str(&content)
+            .unwrap_or_else(|_| serde_json::Value::String(content.clone()));
         let masked_value = mask_json_secrets(&value);
         let masked_content = serde_json::to_string(&masked_value).unwrap_or(content);
 
@@ -575,7 +593,8 @@ impl McpServer {
                         let team_routers = team.policy.allowed_routers.clone();
                         match self.analytics.query_team_usage(tid, &team_routers, &query) {
                             Ok(stats) => {
-                                let json_str = serde_json::to_string_pretty(&stats).unwrap_or_default();
+                                let json_str =
+                                    serde_json::to_string_pretty(&stats).unwrap_or_default();
                                 vec![ToolContent::Text { text: json_str }]
                             }
                             Err(e) => {

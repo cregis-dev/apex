@@ -135,7 +135,6 @@ def apex_server(mock_servers):
         ],
         "metrics": {
             "enabled": False,
-            "listen": "127.0.0.1:9091",
             "path": "/metrics"
         },
         "hot_reload": {
