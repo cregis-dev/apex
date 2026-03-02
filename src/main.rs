@@ -209,7 +209,7 @@ fn get_log_dir(configured_dir: Option<String>) -> PathBuf {
     if let Some(dir) = configured_dir {
         let expanded = expand_path(&dir);
         // If expanded path is empty or just "~", use default
-        if expanded.as_os_str().is_empty() || expanded == PathBuf::from("~") {
+        if expanded.as_os_str().is_empty() || expanded.as_os_str() == "~" {
             return get_default_log_dir();
         }
         expanded
