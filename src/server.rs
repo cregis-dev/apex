@@ -1265,7 +1265,7 @@ mod tests {
         // Add a team
         Arc::make_mut(&mut config.teams).push(crate::config::Team {
             id: "test-team".to_string(),
-            api_key: "sk-ant-test".to_string(),
+            api_key: "sk-ap-test".to_string(),
             policy: crate::config::TeamPolicy {
                 allowed_routers: vec!["test-router".to_string()],
                 allowed_models: Some(vec!["gpt-4".to_string()]),
@@ -1296,7 +1296,7 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("/v1/chat/completions")
-            .header("Authorization", "Bearer sk-ant-test")
+            .header("Authorization", "Bearer sk-ap-test")
             .extension(TeamContext {
                 team_id: "test-team".to_string(),
             })
@@ -1312,7 +1312,7 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("/v1/chat/completions")
-            .header("Authorization", "Bearer sk-ant-test")
+            .header("Authorization", "Bearer sk-ap-test")
             .extension(TeamContext {
                 team_id: "test-team".to_string(),
             })

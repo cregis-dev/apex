@@ -114,13 +114,13 @@ fn handle_team_command(cli: &Cli, command: &TeamCommand) -> anyhow::Result<()> {
                 bail!("Team '{}' already exists", args.id);
             }
 
-            // Generate API Key: sk-ant-xxxx
+            // Generate API Key: sk-ap-xxxx
             let random_part: String = rand::thread_rng()
                 .sample_iter(&Alphanumeric)
                 .take(32)
                 .map(char::from)
                 .collect();
-            let api_key = format!("sk-ant-{}", random_part);
+            let api_key = format!("sk-ap-{}", random_part);
 
             let team = config::Team {
                 id: args.id.clone(),
