@@ -20,8 +20,8 @@ mod usage;
 mod utils;
 
 use config::{
-    Auth, AuthMode, Channel, Config, Global, HotReload, Metrics, ProviderType, Retries,
-    Router, TargetChannel, Timeouts,
+    Auth, AuthMode, Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router,
+    TargetChannel, Timeouts,
 };
 
 #[derive(Parser)]
