@@ -32,6 +32,7 @@ pub fn base_config() -> Config {
                 backoff_ms: 100,
                 retry_on_status: vec![500, 502, 503, 504],
             },
+            enable_mcp: true,
         },
         metrics: Metrics {
             enabled: true,
