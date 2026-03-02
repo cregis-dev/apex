@@ -1026,6 +1026,7 @@ mod tests {
                     backoff_ms: 10,
                     retry_on_status: vec![],
                 },
+                enable_mcp: true,
             },
             metrics: crate::config::Metrics {
                 enabled: false,
