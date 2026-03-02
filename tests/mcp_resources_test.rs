@@ -27,6 +27,7 @@ async fn test_mcp_resources() {
                 backoff_ms: 100,
                 retry_on_status: vec![],
             },
+            enable_mcp: true,
         },
         logging: Logging::default(),
         channels: Arc::new(vec![Channel {
