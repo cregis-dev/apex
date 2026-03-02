@@ -22,16 +22,16 @@ pub async fn team_auth(
     let (mut api_key_opt, mut source_opt) = extract_api_key_with_source(&headers);
 
     // If not found in headers, try query parameter (common for SSE)
-    if api_key_opt.is_none() {
-        if let Some(query) = req.uri().query() {
-            for pair in query.split('&') {
-                if let Some((key, value)) = pair.split_once('=') {
-                    if key == "api_key" {
-                        api_key_opt = Some(value.to_string());
-                        source_opt = Some("Query Parameter (api_key)".to_string());
-                        break;
-                    }
-                }
+    if api_key_opt.is_none()
+        && let Some(query) = req.uri().query()
+    {
+        for pair in query.split('&') {
+            if let Some((key, value)) = pair.split_once('=')
+                && key == "api_key"
+            {
+                api_key_opt = Some(value.to_string());
+                source_opt = Some("Query Parameter (api_key)".to_string());
+                break;
             }
         }
     }
@@ -78,15 +78,15 @@ pub async fn global_auth(State(state): State<Arc<AppState>>, req: Request, next:
     let (mut api_key_opt, _) = extract_api_key_with_source(headers);
 
     // If not found in headers, try query parameter (common for SSE/Metrics)
-    if api_key_opt.is_none() {
-        if let Some(query) = req.uri().query() {
-            for pair in query.split('&') {
-                if let Some((key, value)) = pair.split_once('=') {
-                    if key == "api_key" || key == "token" {
-                        api_key_opt = Some(value.to_string());
-                        break;
-                    }
-                }
+    if api_key_opt.is_none()
+        && let Some(query) = req.uri().query()
+    {
+        for pair in query.split('&') {
+            if let Some((key, value)) = pair.split_once('=')
+                && (key == "api_key" || key == "token")
+            {
+                api_key_opt = Some(value.to_string());
+                break;
             }
         }
     }

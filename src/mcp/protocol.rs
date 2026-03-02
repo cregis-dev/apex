@@ -56,6 +56,7 @@ pub enum Id {
 }
 
 impl Request {
+    #[allow(dead_code)]
     pub fn new(id: Id, method: String, params: Option<serde_json::Value>) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
@@ -120,6 +121,7 @@ impl ErrorResponse {
         Self::new(id, -32602, "Invalid params".to_string(), data)
     }
 
+    #[allow(dead_code)]
     pub fn internal_error(id: Option<Id>, data: Option<serde_json::Value>) -> Self {
         Self::new(id, -32603, "Internal error".to_string(), data)
     }
@@ -231,6 +233,7 @@ pub struct ListToolsResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct CallToolRequest {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]

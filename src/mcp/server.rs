@@ -90,6 +90,7 @@ impl McpServer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn sessions(&self) -> Arc<SessionManager> {
         self.sessions.clone()
     }
@@ -789,18 +790,17 @@ pub async fn mcp_auth_guard(
             k = Some(x_key.to_string());
         }
 
-        if k.is_none() {
-            if let Some(query_str) = req.uri().query() {
-                for pair in query_str.split('&') {
-                    let mut parts = pair.split('=');
-                    if let Some(param_key) = parts.next() {
-                        if param_key == "api_key" || param_key == "token" {
-                            if let Some(v) = parts.next() {
-                                k = Some(v.to_string());
-                                break;
-                            }
-                        }
-                    }
+        if k.is_none()
+            && let Some(query_str) = req.uri().query()
+        {
+            for pair in query_str.split('&') {
+                let mut parts = pair.split('=');
+                if let Some(param_key) = parts.next()
+                    && (param_key == "api_key" || param_key == "token")
+                    && let Some(v) = parts.next()
+                {
+                    k = Some(v.to_string());
+                    break;
                 }
             }
         }

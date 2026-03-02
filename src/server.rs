@@ -42,7 +42,6 @@ pub struct AppState {
 }
 
 use crate::mcp::server::{McpServer, messages_handler, sse_handler};
-use axum::extract::FromRef;
 
 // Removed standalone run_mcp_server and watch_mcp_config as they are integrated into main server
 
@@ -343,10 +342,10 @@ async fn handle_models(State(state): State<Arc<AppState>>, req: Request<Body>) -
     let config = state.config.read().unwrap().clone();
 
     // Check Team Context or AuthMode::None
-    if parts.extensions.get::<TeamContext>().is_none() {
-        if matches!(config.global.auth.mode, crate::config::AuthMode::ApiKey) {
-            return error_response(StatusCode::UNAUTHORIZED, "Team API Key Required");
-        }
+    if parts.extensions.get::<TeamContext>().is_none()
+        && matches!(config.global.auth.mode, crate::config::AuthMode::ApiKey)
+    {
+        return error_response(StatusCode::UNAUTHORIZED, "Team API Key Required");
     }
 
     // Try Authorization header first, then x-api-key (for Anthropic)

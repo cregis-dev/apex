@@ -124,44 +124,39 @@ impl AnalyticsEngine {
             .or_else(|_| NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S"))
             .or_else(|_| DateTime::parse_from_rfc3339(ts).map(|dt| dt.naive_utc()))
             .ok()
-            .map(|dt| dt)
     }
 
     /// Check if a record matches the query filters
     fn matches_query(&self, record: &UsageRecord, query: &UsageQuery) -> bool {
         // Check time range
-        if let Some(ref start) = query.start_time {
-            if let Some(rec_time) = self.parse_timestamp(&record.timestamp) {
-                if let Some(start_dt) = self.parse_timestamp(start) {
-                    if rec_time < start_dt {
-                        return false;
-                    }
-                }
-            }
+        if let Some(ref start) = query.start_time
+            && let Some(rec_time) = self.parse_timestamp(&record.timestamp)
+            && let Some(start_dt) = self.parse_timestamp(start)
+            && rec_time < start_dt
+        {
+            return false;
         }
 
-        if let Some(ref end) = query.end_time {
-            if let Some(rec_time) = self.parse_timestamp(&record.timestamp) {
-                if let Some(end_dt) = self.parse_timestamp(end) {
-                    if rec_time > end_dt {
-                        return false;
-                    }
-                }
-            }
+        if let Some(ref end) = query.end_time
+            && let Some(rec_time) = self.parse_timestamp(&record.timestamp)
+            && let Some(end_dt) = self.parse_timestamp(end)
+            && rec_time > end_dt
+        {
+            return false;
         }
 
         // Check router filter
-        if let Some(ref router) = query.router {
-            if &record.router != router {
-                return false;
-            }
+        if let Some(ref router) = query.router
+            && &record.router != router
+        {
+            return false;
         }
 
         // Check model filter
-        if let Some(ref model) = query.model {
-            if &record.model != model {
-                return false;
-            }
+        if let Some(ref model) = query.model
+            && &record.model != model
+        {
+            return false;
         }
 
         true
@@ -193,17 +188,17 @@ impl AnalyticsEngine {
             let record = result?;
             if has_team_id {
                 // New format with team_id
-                if let Some(r) = self.parse_record_new(&record) {
-                    if self.matches_query(&r, query) {
-                        records.push(r);
-                    }
+                if let Some(r) = self.parse_record_new(&record)
+                    && self.matches_query(&r, query)
+                {
+                    records.push(r);
                 }
             } else {
                 // Old format without team_id - parse manually
-                if let Some(r) = self.parse_record_old(&record) {
-                    if self.matches_query(&r, query) {
-                        records.push(r);
-                    }
+                if let Some(r) = self.parse_record_old(&record)
+                    && self.matches_query(&r, query)
+                {
+                    records.push(r);
                 }
             }
         }
@@ -615,7 +610,7 @@ impl AnalyticsEngine {
         let records = self.query_usage(query)?;
 
         let mut wtr = csv::Writer::from_writer(vec![]);
-        wtr.write_record(&[
+        wtr.write_record([
             "timestamp",
             "team_id",
             "router",
@@ -626,7 +621,7 @@ impl AnalyticsEngine {
         ])?;
 
         for record in records {
-            wtr.write_record(&[
+            wtr.write_record([
                 &record.timestamp,
                 &record.team_id,
                 &record.router,

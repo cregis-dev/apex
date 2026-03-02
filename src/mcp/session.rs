@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SessionState {
     Connected,
     Authenticated,
@@ -17,7 +18,9 @@ pub enum SessionState {
 pub struct Session {
     pub id: String,
     pub tx: mpsc::Sender<JsonRpcMessage>,
+    #[allow(dead_code)]
     pub state: Arc<RwLock<SessionState>>,
+    #[allow(dead_code)]
     pub created_at: std::time::Instant,
 }
 
@@ -31,12 +34,14 @@ impl Session {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_state(&self, state: SessionState) {
         if let Ok(mut s) = self.state.write() {
             *s = state;
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_state(&self) -> SessionState {
         self.state
             .read()
@@ -77,6 +82,7 @@ impl SessionManager {
         self.sessions.get(id).await
     }
 
+    #[allow(dead_code)]
     pub async fn remove(&self, id: &str) {
         self.sessions.invalidate(id).await;
     }
@@ -100,6 +106,7 @@ impl SessionManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn broadcast_except(
         &self,
         session_id: &str,
