@@ -306,3 +306,120 @@ apex channel add \
 - `apex router list`: 查看 Router
 - `apex status`: 查看服务状态
 - `apex logs`: 查看日志
+
+## MCP 使用与管理 (MCP Usage & Management)
+
+Apex 内置了 Model Context Protocol (MCP) Server，支持通过 MCP 协议向客户端（如 Claude Desktop, Cursor, AI IDEs）暴露配置、提示词 (Prompts) 和工具 (Tools)。
+
+### 1. 运行模式
+
+Apex 支持两种 MCP 运行模式：
+
+#### A. 本地 Stdio 模式 (Local Stdio)
+适用于本地运行的 Claude Desktop 或 IDE。
+使用命令：
+```bash
+apex mcp start
+```
+这将启动一个通过标准输入输出 (stdio) 通信的 MCP Server 进程。
+
+#### B. 远程 SSE 模式 (Remote SSE)
+适用于远程连接。SSE 服务集成在 Apex 主服务中，与常规 API 共用端口（默认 3000）。
+
+**启动主服务**:
+```bash
+apex gateway start
+```
+此时 MCP Server 已在 `/mcp/sse` 路径下可用。
+
+### 2. 远程连接指南 (Remote Connection)
+
+如果您的 Apex 部署在 `https://gateway.cregis.ai`，远程 MCP Client 连接配置如下：
+
+- **SSE URL**: `https://gateway.cregis.ai/mcp/sse`
+- **Auth**: 需要提供 API Key（与 OpenAI/Anthropic 接口共用 Team/Global Key）。
+
+**认证方式**:
+由于 MCP Client 可能不支持自定义 Header，支持通过 Query Param 传递 Key：
+`https://gateway.cregis.ai/mcp/sse?api_key=sk-your-team-key`
+
+**注意**:
+- 确保您的 API Key 具有访问权限。
+- 客户端会自动接收 `endpoint` 事件，指向 `/mcp/messages?session_id=...`（客户端需处理相对路径或追加到 Base URL）。
+- 所有的 MCP 交互（List Tools, Call Tool 等）都受相同的 Team Policy 控制。
+
+### 3. 客户端配置示例
+
+#### Claude Desktop (Stdio)
+编辑 `~/Library/Application Support/Claude/claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "apex-local": {
+      "command": "/path/to/apex",
+      "args": ["mcp", "start"]
+    }
+  }
+}
+```
+
+#### Cursor / VS Code (Stdio)
+在 MCP 插件配置中添加：
+*   **Type**: `command`
+*   **Command**: `apex mcp start`
+
+### 4. 功能特性 (Features)
+
+#### 资源 (Resources)
+Apex 通过 `resources` 暴露配置文件的只读访问，支持 `config://` 协议。
+
+*   `config://config.json`: 完整配置文件（敏感信息如 API Key 会被自动脱敏）。
+*   `config://teams`: 团队配置列表。
+*   `config://routers`: 路由配置列表。
+*   `config://channels`: 通道配置列表。
+
+**使用示例**:
+在 Client 中输入 `@apex-gateway/config.json` 即可读取当前网关配置。
+
+#### 提示词 (Prompts)
+在 `config.json` 中定义 `prompts`，Client 可直接调用。
+
+**配置示例**:
+```json
+{
+  "prompts": [
+    {
+      "name": "code-review",
+      "description": "标准代码审查模板",
+      "arguments": [
+        { "name": "code", "description": "待审查代码", "required": true }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": {
+            "type": "text",
+            "text": "请审查以下代码并提供改进建议：\n\n{{code}}"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+#### 工具 (Tools)
+Apex 提供内置工具供 Agent 调用进行诊断或查询。
+
+*   `list_models`: 列出当前所有 Channel 支持的模型映射关系。
+*   `echo`: 测试工具，原样返回输入。
+
+**使用示例**:
+Agent 可以调用 `list_models` 来查询当前网关可用的模型列表，以便智能选择模型。
+
+### 5. 热重载 (Hot Reload)
+修改 `config.json` 后，Apex 会自动检测变更并通过 MCP 协议通知客户端刷新 Resources, Prompts 和 Tools 列表，无需重启服务或客户端。
+
+### 6. 故障排查
+*   **Stdio 模式**: 日志默认输出到 stderr，可以在 Claude Desktop 的日志文件中查看。
+*   **连接失败**: 检查 `apex` 二进制文件是否在 PATH 中，或在配置中使用绝对路径。

@@ -60,6 +60,7 @@ impl UsageLogger {
         if !file_exists {
             writer.write_record([
                 "timestamp",
+                "team_id",
                 "router",
                 "channel",
                 "model",
@@ -76,6 +77,7 @@ impl UsageLogger {
 
     pub fn log(
         &self,
+        team_id: &str,
         router: &str,
         channel: &str,
         model: &str,
@@ -86,6 +88,7 @@ impl UsageLogger {
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_record([
                 &timestamp,
+                team_id,
                 router,
                 channel,
                 model,
@@ -100,6 +103,7 @@ impl UsageLogger {
 }
 
 struct UsageTrackerState {
+    team_id: String,
     router: String,
     channel: String,
     model: String,
@@ -112,6 +116,7 @@ struct UsageTrackerState {
 
 impl UsageTrackerState {
     fn new(
+        team_id: String,
         router: String,
         channel: String,
         model: String,
@@ -119,6 +124,7 @@ impl UsageTrackerState {
         metrics: Arc<MetricsState>,
     ) -> Self {
         Self {
+            team_id,
             router,
             channel,
             model,
@@ -208,6 +214,7 @@ impl UsageTrackerState {
                 .inc_by(self.output_tokens);
 
             self.logger.log(
+                &self.team_id,
                 &self.router,
                 &self.channel,
                 &self.model,
@@ -252,6 +259,7 @@ where
 
 pub async fn wrap_response(
     response: Response<Body>,
+    team_id: String,
     router: String,
     channel: String,
     model: String,
@@ -269,7 +277,7 @@ pub async fn wrap_response(
 
     if is_sse {
         let state = Arc::new(Mutex::new(UsageTrackerState::new(
-            router, channel, model, logger, metrics,
+            team_id, router, channel, model, logger, metrics,
         )));
         let stream = body.into_data_stream();
         let usage_stream = UsageStream {
@@ -285,7 +293,7 @@ pub async fn wrap_response(
         };
 
         // Process usage
-        let mut state = UsageTrackerState::new(router, channel, model, logger, metrics);
+        let mut state = UsageTrackerState::new(team_id, router, channel, model, logger, metrics);
 
         if let Ok(json) = serde_json::from_slice::<Value>(&bytes) {
             state.extract_usage(&json);
@@ -332,7 +340,7 @@ mod tests {
         let content = fs::read_to_string(file_path).unwrap();
         assert_eq!(
             content.trim(),
-            "timestamp,router,channel,model,input_tokens,output_tokens"
+            "timestamp,team_id,router,channel,model,input_tokens,output_tokens"
         );
     }
 
@@ -342,14 +350,14 @@ mod tests {
         let dir_path = dir.path().to_str().unwrap().to_string();
 
         let logger = UsageLogger::new(Some(dir_path.clone())).unwrap();
-        logger.log("r1", "c1", "m1", 10, 20);
+        logger.log("team1", "r1", "c1", "m1", 10, 20);
 
         let file_path = dir.path().join("usage.csv");
         let content = fs::read_to_string(file_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
 
         assert_eq!(lines.len(), 2);
-        assert!(lines[1].contains("r1,c1,m1,10,20"));
+        assert!(lines[1].contains("team1,r1,c1,m1,10,20"));
     }
 
     #[test]
@@ -360,6 +368,7 @@ mod tests {
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
+            "team1".to_string(),
             "r1".to_string(),
             "c1".to_string(),
             "m1".to_string(),
@@ -387,6 +396,7 @@ mod tests {
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
+            "team1".to_string(),
             "r1".to_string(),
             "c1".to_string(),
             "m1".to_string(),
@@ -417,6 +427,7 @@ mod tests {
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
+            "team1".to_string(),
             "r1".to_string(),
             "c1".to_string(),
             "m1".to_string(),
@@ -444,6 +455,7 @@ mod tests {
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
+            "team1".to_string(),
             "r1".to_string(),
             "c1".to_string(),
             "m1".to_string(),
@@ -466,6 +478,7 @@ mod tests {
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
+            "team1".to_string(),
             "r1".to_string(),
             "c1".to_string(),
             "m1".to_string(),

@@ -3,7 +3,8 @@
   "global": {
     "listen": "0.0.0.0:12356",
     "auth": {
-      "mode": "none"
+      "mode": "api_key",
+      "keys": ["sk-your-secret-key-here"]
     },
     "timeouts": {
       "connect_ms": 1000,
@@ -16,49 +17,99 @@
       "retry_on_status": [500, 502, 503, 504]
     }
   },
+  "logging": {
+    "level": "info",
+    "dir": "logs"
+  },
   "channels": [
     {
-      "name": "mock-channel",
+      "name": "openai-coding",
       "provider_type": "openai",
-      "base_url": "http://mock-openai:8000/v1",
-      "api_key": "mock-key"
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "${OPENAI_API_KEY}"
+    },
+    {
+      "name": "anthropic-fast",
+      "provider_type": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "api_key": "${ANTHROPIC_API_KEY}",
+      "model_map": {
+        "claude-3-5-sonnet": "claude-sonnet-4-20250514"
+      }
+    },
+    {
+      "name": "minimax-coding",
+      "provider_type": "minimax",
+      "base_url": "https://api.minimax.chat/v1",
+      "api_key": "${MINIMAX_API_KEY}"
     }
   ],
   "routers": [
     {
-      "name": "default-router",
+      "name": "default",
       "rules": [
         {
           "match": {
-            "model": "*"
+            "models": ["*"]
           },
           "channels": [
             {
-              "name": "mock-channel"
+              "name": "openai-coding",
+              "weight": 1
+            },
+            {
+              "name": "anthropic-fast",
+              "weight": 1
             }
-          ]
+          ],
+          "strategy": "round_robin"
         }
-      ]
+      ],
+      "fallback_channels": ["minimax-coding"]
     }
   ],
   "teams": [
     {
       "id": "demo-team",
-      "api_key": "sk-apex-demo",
+      "api_key": "sk-team-demo-key",
       "policy": {
-        "allowed_routers": ["default-router"],
-        "allowed_models": null,
-        "rate_limit": null
+        "allowed_routers": ["default"]
       }
+    }
+  ],
+  "prompts": [
+    {
+      "name": "code-review",
+      "description": "Generate a code review for the provided diff",
+      "arguments": [
+        {
+          "name": "language",
+          "description": "Programming language",
+          "required": true
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": {
+            "text": "You are an expert code reviewer."
+          }
+        },
+        {
+          "role": "user",
+          "content": {
+            "text": "Review this {{language}} code.\n\n```\n{{diff}}\n```"
+          }
+        }
+      ]
     }
   ],
   "metrics": {
     "enabled": true,
-    "listen": "0.0.0.0:9090",
     "path": "/metrics"
   },
   "hot_reload": {
-    "config_path": "/app/config.json",
+    "config_path": "config.json",
     "watch": true
   }
 }

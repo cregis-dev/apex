@@ -19,6 +19,38 @@ pub struct Config {
     pub hot_reload: HotReload,
     #[serde(default)]
     pub teams: Arc<Vec<Team>>,
+    #[serde(default)]
+    pub prompts: Arc<Vec<Prompt>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Prompt {
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub arguments: Vec<PromptArgument>,
+    pub messages: Vec<PromptMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptArgument {
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptMessage {
+    pub role: String,
+    pub content: PromptContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum PromptContent {
+    Text { text: String },
+    // Simplified for now, can be extended
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,7 +274,6 @@ pub struct RouterMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metrics {
     pub enabled: bool,
-    pub listen: String,
     pub path: String,
 }
 

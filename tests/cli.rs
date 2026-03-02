@@ -72,7 +72,8 @@ fn test_router_multichannel() {
     assert_eq!(r["name"], "r_multi");
     assert_eq!(r["strategy"], "random");
 
-    let channels = r["channels"].as_array().unwrap();
+    // New format: channels are in rules[0].channels
+    let channels = r["rules"][0]["channels"].as_array().unwrap();
     assert_eq!(channels.len(), 2);
 
     assert_eq!(channels[0]["name"], "c1");
@@ -210,7 +211,8 @@ fn test_router_lifecycle() {
     let routers = json["routers"].as_array().unwrap();
     assert_eq!(routers.len(), 1);
     assert_eq!(routers[0]["name"], "r1");
-    assert_eq!(routers[0]["channels"][0]["name"], "c1");
+    // New format: channels are in rules[0].channels
+    assert_eq!(routers[0]["rules"][0]["channels"][0]["name"], "c1");
 
     // 3. Delete Router
     apex_cmd(config_str)

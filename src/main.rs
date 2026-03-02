@@ -10,12 +10,14 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod config;
 mod converters;
 mod logs;
+mod mcp;
 mod metrics;
 mod middleware;
 mod providers;
 mod router_selector;
 mod server;
 mod usage;
+mod utils;
 
 use config::{
     Auth, AuthMode, Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router,
@@ -52,8 +54,23 @@ enum Commands {
         #[command(subcommand)]
         command: TeamCommand,
     },
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
     Status,
     Logs,
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    Start {
+        config: Option<String>,
+        #[arg(long, default_value = "stdio")]
+        transport: String,
+        #[arg(long, default_value = "3000")]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand)]
@@ -154,29 +171,50 @@ fn handle_team_command(cli: &Cli, command: &TeamCommand) -> anyhow::Result<()> {
 }
 
 fn expand_path(path_str: &str) -> PathBuf {
-    if path_str.starts_with("~")
-        && let Some(home) = dirs::home_dir()
-    {
-        if path_str == "~" {
-            return home;
+    let trimmed = path_str.trim();
+
+    // Empty string - use default
+    if trimmed.is_empty() {
+        return get_default_log_dir();
+    }
+
+    // Handle ~ expansion
+    if trimmed.starts_with('~') {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        if trimmed == "~" {
+            // ~ alone - use default log location
+            return get_default_log_dir();
         }
-        if let Some(stripped) = path_str.strip_prefix("~/") {
+        if let Some(stripped) = trimmed.strip_prefix("~/") {
             return home.join(stripped);
         }
     }
-    PathBuf::from(path_str)
+
+    PathBuf::from(trimmed)
+}
+
+fn get_default_log_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        home.join("Library").join("Logs").join("apex")
+    } else if cfg!(target_os = "linux") {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        home.join(".local").join("share").join("apex").join("logs")
+    } else {
+        PathBuf::from("logs")
+    }
 }
 
 fn get_log_dir(configured_dir: Option<String>) -> PathBuf {
     if let Some(dir) = configured_dir {
-        return expand_path(&dir);
-    }
-
-    if cfg!(target_os = "macos") {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join("Library").join("Logs").join("apex")
+        let expanded = expand_path(&dir);
+        // If expanded path is empty or just "~", use default
+        if expanded.as_os_str().is_empty() || expanded == PathBuf::from("~") {
+            return get_default_log_dir();
+        }
+        expanded
     } else {
-        PathBuf::from("logs")
+        get_default_log_dir()
     }
 }
 
@@ -356,6 +394,16 @@ fn main() -> anyhow::Result<()> {
             .init();
 
         Some(guard)
+    } else if let Commands::Mcp { .. } = cli.command {
+        // Setup stderr logging for MCP to keep stdout clean for JSON-RPC
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| env_filter.into()),
+            )
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .init();
+        None
     } else {
         // Setup standard logging
         tracing_subscriber::registry()
@@ -392,6 +440,16 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Commands::Status => handle_status_command(&cli)?,
         Commands::Logs => handle_logs_command(&cli)?,
         Commands::Team { command } => handle_team_command(&cli, command)?,
+        Commands::Mcp { command } => match command {
+            McpCommand::Start {
+                config,
+                transport,
+                port,
+            } => {
+                let path = resolve_config_path(cli.config.clone().or_else(|| config.clone()));
+                server::run_mcp_server(path, transport.clone(), *port).await?;
+            }
+        },
     }
     Ok(())
 }
@@ -610,7 +668,6 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
         routers: std::sync::Arc::new(Vec::new()),
         metrics: Metrics {
             enabled: true,
-            listen: "0.0.0.0:9090".to_string(),
             path: "/metrics".to_string(),
         },
         hot_reload: HotReload {
@@ -622,6 +679,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
             dir: None,
         },
         teams: std::sync::Arc::new(Vec::new()),
+        prompts: std::sync::Arc::new(Vec::new()),
     };
     config::save_config(path, &config)
         .with_context(|| format!("failed to write config: {}", path.display()))?;
@@ -961,8 +1019,8 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             let router = Router {
                 name: args.name.clone(),
                 rules,
-                // Legacy fields empty
-                channels: target_channels,
+                // Legacy fields - don't set channels when using rules-based config
+                channels: Vec::new(),
                 strategy: args.strategy.clone(),
                 metadata: None,
                 fallback_channels: args.fallback_channels.clone(),

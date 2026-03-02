@@ -19,7 +19,22 @@ pub async fn team_auth(
     next: Next,
 ) -> Response {
     let headers = req.headers().clone();
-    let (api_key_opt, source_opt) = extract_api_key_with_source(&headers);
+    let (mut api_key_opt, mut source_opt) = extract_api_key_with_source(&headers);
+
+    // If not found in headers, try query parameter (common for SSE)
+    if api_key_opt.is_none() {
+        if let Some(query) = req.uri().query() {
+            for pair in query.split('&') {
+                if let Some((key, value)) = pair.split_once('=') {
+                    if key == "api_key" {
+                        api_key_opt = Some(value.to_string());
+                        source_opt = Some("Query Parameter (api_key)".to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     let team_id = if let Some(api_key) = api_key_opt {
         let config = state.config.read().unwrap();
@@ -27,30 +42,18 @@ pub async fn team_auth(
         if let Some(team) = config.teams.iter().find(|t| t.api_key == api_key) {
             Some(team.id.clone())
         } else {
-            // 2. Check Global Keys (if any)
-            let is_global = if let Some(global_keys) = &config.global.auth.keys {
-                global_keys.contains(&api_key)
-            } else {
-                false
-            };
-
-            if is_global {
-                // Valid Global Key -> Pass
-                None
-            } else {
-                // 3. Invalid Key -> Reject
-                let source = source_opt.unwrap_or_else(|| "unknown".to_string());
-                tracing::warn!(
-                    "Auth Failed: Invalid API Key '{}' provided in {}",
-                    api_key,
-                    source
-                );
-                return Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"error": "Invalid API Key"}"#))
-                    .unwrap();
-            }
+            // 2. Invalid Key -> Reject (Global keys are NOT allowed for model requests)
+            let source = source_opt.unwrap_or_else(|| "unknown".to_string());
+            tracing::warn!(
+                "Auth Failed: Invalid Team API Key '{}' provided in {}",
+                api_key,
+                source
+            );
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"error": "Invalid Team API Key"}"#))
+                .unwrap();
         }
     } else {
         None
@@ -68,6 +71,63 @@ pub async fn team_auth(
     }
 
     next.run(req).await
+}
+
+pub async fn global_auth(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let headers = req.headers();
+    let (mut api_key_opt, _) = extract_api_key_with_source(headers);
+
+    // If not found in headers, try query parameter (common for SSE/Metrics)
+    if api_key_opt.is_none() {
+        if let Some(query) = req.uri().query() {
+            for pair in query.split('&') {
+                if let Some((key, value)) = pair.split_once('=') {
+                    if key == "api_key" || key == "token" {
+                        api_key_opt = Some(value.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let (mode, global_keys) = {
+        let config = state.config.read().unwrap();
+        (
+            config.global.auth.mode.clone(),
+            config.global.auth.keys.clone(),
+        )
+    };
+
+    match mode {
+        crate::config::AuthMode::None => {
+            // No auth required
+            next.run(req).await
+        }
+        crate::config::AuthMode::ApiKey => {
+            let authorized = if let Some(api_key) = api_key_opt {
+                if let Some(keys) = &global_keys {
+                    keys.contains(&api_key)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if authorized {
+                next.run(req).await
+            } else {
+                Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"error": "Unauthorized: Global Access Required"}"#,
+                    ))
+                    .unwrap()
+            }
+        }
+    }
 }
 
 fn extract_api_key_with_source(headers: &HeaderMap) -> (Option<String>, Option<String>) {

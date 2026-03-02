@@ -1,6 +1,7 @@
 mod common;
 use apex::config::{
     Channel, MatchSpec, Metrics, ProviderType, Router as GatewayRouter, RouterRule, TargetChannel,
+    Team,
 };
 use apex::server::{build_app, build_state};
 use axum::body::Body;
@@ -17,7 +18,6 @@ async fn test_observability_metrics() {
     let mut config = base_config();
     config.metrics = Metrics {
         enabled: true,
-        listen: "127.0.0.1:0".to_string(),
         path: "/metrics".to_string(),
     };
 
@@ -51,9 +51,20 @@ async fn test_observability_metrics() {
     });
 
     // 1. Send a request to generate metrics
-    // We need a valid Global Key or Team Key because we enforced strict auth
+    // Set up a team for team_auth
     config.global.auth.mode = apex::config::AuthMode::ApiKey;
-    config.global.auth.keys = Some(vec!["sk-test".to_string()]);
+    config.global.auth.keys = Some(vec!["sk-global-key".to_string()]);
+
+    // Add a team with API key
+    std::sync::Arc::make_mut(&mut config.teams).push(Team {
+        id: "test-team".to_string(),
+        api_key: "sk-test".to_string(),
+        policy: apex::config::TeamPolicy {
+            allowed_routers: vec!["test_router".to_string()],
+            allowed_models: None,
+            rate_limit: None,
+        },
+    });
 
     let state = build_state(config).unwrap();
     let app = build_app(state);
@@ -68,10 +79,11 @@ async fn test_observability_metrics() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // 2. Fetch Metrics
+    // 2. Fetch Metrics (using global key for global_auth)
     let req = axum::http::Request::builder()
         .method("GET")
         .uri("/metrics")
+        .header("Authorization", "Bearer sk-global-key")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();

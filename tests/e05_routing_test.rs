@@ -17,9 +17,16 @@ async fn test_rule_based_routing_priority() {
 
     // Config
     let mut config = base_config();
-    // We need a valid Global Key or Team Key because we enforced strict auth
-    config.global.auth.mode = apex::config::AuthMode::ApiKey;
-    config.global.auth.keys = Some(vec!["sk-test".to_string()]);
+    // Add a team with the API key (new strict auth requires team key)
+    std::sync::Arc::make_mut(&mut config.teams).push(apex::config::Team {
+        id: "test-team".to_string(),
+        api_key: "sk-test".to_string(),
+        policy: apex::config::TeamPolicy {
+            allowed_routers: vec!["main_router".to_string()],
+            allowed_models: None, // Allow all models
+            rate_limit: None,
+        },
+    });
 
     // Channels
     std::sync::Arc::make_mut(&mut config.channels).push(Channel {
@@ -105,7 +112,7 @@ async fn test_rule_based_routing_priority() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "\"upstream_b\"");
 
-    // Test 3: claude -> No Match -> 400 Bad Request (No matching router/rule)
+    // Test 3: claude -> No Match -> 404 Not Found (No matching router/rule for team)
     let req = axum::http::Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")
@@ -115,5 +122,5 @@ async fn test_rule_based_routing_priority() {
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     let (status, _body) = response_text(resp).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

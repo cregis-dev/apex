@@ -49,7 +49,7 @@ async fn test_hot_reload_routing() {
             "config_path": "",
             "watch": true
         },
-        "metrics": { "enabled": false, "listen": "127.0.0.1:9090", "path": "/metrics" },
+        "metrics": { "enabled": false, "path": "/metrics" },
         "channels": [
             {
                 "name": "channel1",
@@ -126,7 +126,7 @@ async fn test_hot_reload_routing() {
             "config_path": "",
             "watch": true
         },
-        "metrics": { "enabled": false, "listen": "127.0.0.1:9090", "path": "/metrics" },
+        "metrics": { "enabled": false, "path": "/metrics" },
         "channels": [
             {
                 "name": "channel1",

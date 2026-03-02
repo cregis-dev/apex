@@ -1,7 +1,7 @@
 use crate::config::{AuthMode, Config};
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::metrics::MetricsState;
-use crate::middleware::auth::{TeamContext, team_auth};
+use crate::middleware::auth::{TeamContext, global_auth, team_auth};
 use crate::middleware::policy::team_policy;
 use crate::middleware::ratelimit::TeamRateLimiter;
 use crate::providers::{
@@ -17,6 +17,7 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use serde_json::json;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -37,7 +38,13 @@ pub struct AppState {
     pub selector: Arc<RouterSelector>,
     pub client: reqwest::Client,
     pub usage_logger: Arc<UsageLogger>,
+    pub mcp_server: Arc<McpServer>,
 }
+
+use crate::mcp::server::{McpServer, messages_handler, sse_handler};
+use axum::extract::FromRef;
+
+// Removed standalone run_mcp_server and watch_mcp_config as they are integrated into main server
 
 pub async fn run_server(path: PathBuf) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(&path)?;
@@ -147,6 +154,9 @@ async fn watch_config(path: PathBuf, state: Arc<AppState>) -> notify::Result<()>
                 // Invalidate router cache
                 state.selector.invalidate_cache();
 
+                // Notify MCP clients about config change
+                state.mcp_server.update_config().await;
+
                 info!("Config reloaded successfully");
             }
             Err(e) => {
@@ -155,6 +165,31 @@ async fn watch_config(path: PathBuf, state: Arc<AppState>) -> notify::Result<()>
         }
     }
 
+    Ok(())
+}
+
+pub async fn run_mcp_server(
+    path: std::path::PathBuf,
+    transport: String,
+    _port: u16,
+) -> anyhow::Result<()> {
+    use crate::config;
+    let config = config::load_config(&path)?;
+    let state = build_state(config)?;
+
+    match transport.as_str() {
+        "stdio" => {
+            state.mcp_server.run_stdio().await?;
+        }
+        "sse" => {
+            anyhow::bail!(
+                "SSE transport via 'apex mcp' is deprecated. Use 'apex serve' to run the main server with MCP support."
+            );
+        }
+        _ => {
+            anyhow::bail!("Unknown transport: {}", transport);
+        }
+    }
     Ok(())
 }
 
@@ -171,9 +206,11 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
     let client = builder.build()?;
 
     let usage_logger = Arc::new(UsageLogger::new(config.logging.dir.clone())?);
+    let config_arc = Arc::new(RwLock::new(config));
+    let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
 
     Ok(Arc::new(AppState {
-        config: Arc::new(RwLock::new(config)),
+        config: config_arc,
         metrics: Arc::new(MetricsState::new()?),
         providers: Arc::new(ProviderRegistry::new()),
         access_audit: Arc::new(NoOpAccessAudit),
@@ -182,24 +219,24 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
         selector: Arc::new(RouterSelector::new()),
         client,
         usage_logger,
+        mcp_server,
     }))
 }
 
 pub fn build_app(state: Arc<AppState>) -> Router {
-    Router::new()
-        // Standard OpenAI/Anthropic routes
+    // Model Routes (Protected by Team Auth)
+    let model_routes = Router::new()
         .route("/v1/chat/completions", post(handle_openai))
         .route("/v1/completions", post(handle_openai))
         .route("/v1/embeddings", post(handle_openai))
         .route("/v1/models", get(handle_models))
         .route("/v1/messages", post(handle_anthropic))
-        // Compatibility routes (no /v1 prefix) for clients that omit it
+        // Compatibility routes (no /v1 prefix)
         .route("/chat/completions", post(handle_openai))
         .route("/completions", post(handle_openai))
         .route("/embeddings", post(handle_openai))
         .route("/models", get(handle_models))
         .route("/messages", post(handle_anthropic))
-        .route("/metrics", get(metrics_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             team_policy,
@@ -207,7 +244,38 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             team_auth,
-        ))
+        ));
+
+    // Admin/System Routes
+    let metrics_enabled = state.config.read().unwrap().metrics.enabled;
+
+    let mut admin_routes = Router::new()
+        .merge(model_routes)
+        .route("/admin/teams", get(handle_admin_teams))
+        .route("/admin/routers", get(handle_admin_routers))
+        .route("/admin/channels", get(handle_admin_channels))
+        .nest(
+            "/mcp",
+            Router::new()
+                .route("/sse", get(sse_handler))
+                .route("/messages", post(messages_handler))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.mcp_server.as_ref().clone(),
+                    crate::mcp::server::mcp_auth_guard,
+                )),
+        );
+
+    if metrics_enabled {
+        admin_routes = admin_routes.route(
+            "/metrics",
+            get(metrics_handler).layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                global_auth,
+            )),
+        );
+    }
+
+    admin_routes
         .layer(
             tower::ServiceBuilder::new()
                 .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -226,25 +294,10 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                                 .and_then(|h| h.to_str().ok())
                                 .unwrap_or("unknown");
 
-                            // Try to get team_id from extensions (if already set by auth middleware)
-                            // Note: TraceLayer runs before auth middleware in the stack order defined below,
-                            // but the span is created when the request arrives.
-                            // The fields will be empty initially and populated later if we record them.
-                            // However, since we want them in the span start, we might need to rely on
-                            // the fact that we can't get team_id here yet.
-                            // Instead, we can record it later in the handler or middleware.
-                            // BUT, tracing::info_span! captures values at creation.
-                            // Let's just include the fields we can get now.
-                            // Actually, TraceLayer `make_span_with` is called when request arrives.
-                            // Auth happens inside the service.
-                            // So team_id won't be available here yet.
-                            // We will add `team_id` field as Empty and populate it in a middleware wrapper or inside the handler.
-                            // For now, let's just add the fields we have and make space for others.
-
                             tracing::info_span!("request",
                                 request_id = %request_id,
                                 client_ip = %client_ip,
-                                team_id = tracing::field::Empty, // Will be populated by auth middleware
+                                team_id = tracing::field::Empty,
                                 router_name = tracing::field::Empty,
                                 channel_name = tracing::field::Empty,
                                 method = %request.method(),
@@ -288,9 +341,14 @@ async fn handle_models(State(state): State<Arc<AppState>>, req: Request<Body>) -
     let headers = &parts.headers;
 
     let config = state.config.read().unwrap().clone();
-    if let Err(resp) = enforce_global_auth(&config, headers) {
-        return resp;
+
+    // Check Team Context or AuthMode::None
+    if parts.extensions.get::<TeamContext>().is_none() {
+        if matches!(config.global.auth.mode, crate::config::AuthMode::ApiKey) {
+            return error_response(StatusCode::UNAUTHORIZED, "Team API Key Required");
+        }
     }
+
     // Try Authorization header first, then x-api-key (for Anthropic)
     let _vkey =
         read_auth_token(headers, "authorization").or_else(|| read_auth_token(headers, "x-api-key"));
@@ -300,6 +358,123 @@ async fn handle_models(State(state): State<Arc<AppState>>, req: Request<Body>) -
         .status(StatusCode::OK)
         .header("content-type", "application/json")
         .body(Body::from(r#"{"object":"list","data":[]}"#))
+        .unwrap()
+}
+
+async fn handle_admin_teams(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let headers = &parts.headers;
+
+    let config = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config, headers) {
+        return resp;
+    }
+
+    let data = config
+        .teams
+        .iter()
+        .map(|team| {
+            let rate_limit = team.policy.rate_limit.as_ref().map(|l| {
+                json!({
+                    "rpm": l.rpm,
+                    "tpm": l.tpm
+                })
+            });
+            json!({
+                "id": team.id,
+                "api_key": mask_secret(&team.api_key),
+                "policy": {
+                    "allowed_routers": team.policy.allowed_routers,
+                    "allowed_models": team.policy.allowed_models,
+                    "rate_limit": rate_limit
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "object": "list",
+                "data": data
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+async fn handle_admin_routers(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let headers = &parts.headers;
+
+    let config = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config, headers) {
+        return resp;
+    }
+
+    let data = config
+        .routers
+        .iter()
+        .filter_map(|router| serde_json::to_value(router).ok())
+        .collect::<Vec<_>>();
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "object": "list",
+                "data": data
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+async fn handle_admin_channels(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let headers = &parts.headers;
+
+    let config = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config, headers) {
+        return resp;
+    }
+
+    let data = config
+        .channels
+        .iter()
+        .map(|channel| {
+            json!({
+                "name": channel.name,
+                "provider_type": channel.provider_type,
+                "base_url": channel.base_url,
+                "api_key": mask_secret(&channel.api_key),
+                "anthropic_base_url": channel.anthropic_base_url
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "object": "list",
+                "data": data
+            })
+            .to_string(),
+        ))
         .unwrap()
 }
 
@@ -345,8 +520,10 @@ fn read_auth_token(headers: &HeaderMap, key: &str) -> Option<String> {
     None
 }
 
+use crate::utils::mask_secret;
+
 fn error_response(status: StatusCode, message: &str) -> Response<Body> {
-    let body = serde_json::json!({
+    let body = json!({
         "error": {
             "message": message,
             "type": "invalid_request_error",
@@ -415,6 +592,13 @@ async fn process_request(
     );
 
     let headers = parts.headers;
+
+    // Extract team_id for usage logging
+    let team_id = parts
+        .extensions
+        .get::<crate::middleware::auth::TeamContext>()
+        .map(|ctx| ctx.team_id.clone())
+        .unwrap_or_else(|| "global".to_string());
     let config = state.config.read().unwrap().clone();
 
     // 2. Resolve Router
@@ -685,6 +869,7 @@ async fn process_request(
                         );
                         return crate::usage::wrap_response(
                             response,
+                            team_id.clone(),
                             router_name.clone(),
                             channel.name.clone(),
                             model_name_str.to_string(),
@@ -862,7 +1047,6 @@ mod tests {
             },
             metrics: crate::config::Metrics {
                 enabled: false,
-                listen: "0.0.0.0:0".to_string(),
                 path: "/metrics".to_string(),
             },
             hot_reload: crate::config::HotReload {
@@ -874,6 +1058,7 @@ mod tests {
                 dir: None,
             },
             teams: Arc::new(vec![]),
+            prompts: Arc::new(vec![]),
             channels: Arc::new(vec![
                 crate::config::Channel {
                     name: "test-channel".to_string(),
@@ -922,10 +1107,12 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limiter_blocks() {
         let config = create_test_config();
+        let config_arc = Arc::new(RwLock::new(config));
+        let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
         let state = Arc::new(AppState {
-            config: Arc::new(RwLock::new(config)),
+            config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
             providers: Arc::new(ProviderRegistry::new()),
             access_audit: Arc::new(MockAccessAudit {
@@ -936,6 +1123,7 @@ mod tests {
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
+            mcp_server,
         });
 
         let req = Request::builder()
@@ -953,10 +1141,12 @@ mod tests {
     #[tokio::test]
     async fn test_access_audit_logged() {
         let config = create_test_config();
+        let config_arc = Arc::new(RwLock::new(config));
+        let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
         let state = Arc::new(AppState {
-            config: Arc::new(RwLock::new(config)),
+            config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
             providers: Arc::new(ProviderRegistry::new()),
             access_audit: Arc::new(MockAccessAudit {
@@ -967,6 +1157,7 @@ mod tests {
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
+            mcp_server,
         });
 
         let req = Request::builder()
@@ -1034,9 +1225,11 @@ mod tests {
         );
 
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
+        let config_arc = Arc::new(RwLock::new(config));
+        let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
 
         let state = Arc::new(AppState {
-            config: Arc::new(RwLock::new(config)),
+            config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
             providers: Arc::new(ProviderRegistry::new()),
             access_audit: Arc::new(MockAccessAudit {
@@ -1047,6 +1240,7 @@ mod tests {
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
+            mcp_server,
         });
 
         // Request with model "gpt-4" -> should go to ch2 (Anthropic)
@@ -1080,8 +1274,11 @@ mod tests {
             },
         });
 
+        let config_arc = Arc::new(RwLock::new(config));
+        let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
+
         let state = Arc::new(AppState {
-            config: Arc::new(RwLock::new(config)),
+            config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
             providers: Arc::new(ProviderRegistry::new()),
             access_audit: Arc::new(MockAccessAudit {
@@ -1092,6 +1289,7 @@ mod tests {
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
+            mcp_server,
         });
 
         // 1. Valid Request (Correct Key, Allowed Model)

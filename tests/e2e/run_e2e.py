@@ -75,7 +75,7 @@ def setup_config():
                 "fallback_channels": []
             }
         ],
-        "metrics": { "enabled": False, "listen": "127.0.0.1:9091", "path": "/metrics" },
+        "metrics": { "enabled": False, "path": "/metrics" },
         "hot_reload": { "config_path": CONFIG_PATH, "watch": False }
     }
     

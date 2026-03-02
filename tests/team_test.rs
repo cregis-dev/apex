@@ -477,6 +477,17 @@ async fn test_valid_global_key_acceptance() {
     config.global.auth.mode = AuthMode::ApiKey;
     config.global.auth.keys = Some(vec!["sk-global-key".to_string()]);
 
+    // Add team for strict auth (global keys no longer work for model requests)
+    std::sync::Arc::make_mut(&mut config.teams).push(Team {
+        id: "test-team".to_string(),
+        api_key: "sk-global-key".to_string(),
+        policy: TeamPolicy {
+            allowed_routers: vec!["r1".to_string()],
+            allowed_models: None,
+            rate_limit: None,
+        },
+    });
+
     // Channel & Router (Standard)
     std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),

@@ -35,7 +35,6 @@ pub fn base_config() -> Config {
         },
         metrics: Metrics {
             enabled: true,
-            listen: "127.0.0.1:0".to_string(),
             path: "/metrics".to_string(),
         },
         hot_reload: HotReload {
@@ -49,6 +48,7 @@ pub fn base_config() -> Config {
         teams: std::sync::Arc::new(vec![]),
         channels: std::sync::Arc::new(vec![]),
         routers: std::sync::Arc::new(vec![]),
+        prompts: std::sync::Arc::new(vec![]),
     }
 }
 

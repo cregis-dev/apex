@@ -115,8 +115,31 @@ epics:
         name: Compliance Middleware
         status: Pending
 
+  - id: E08
+    name: MCP Server Operations & Analytics
+    status: In Progress
+    stories:
+      - id: S01
+        name: MCP Protocol & Transport Support
+        status: Done
+      - id: S02
+        name: Session Lifecycle & Capability Negotiation
+        status: Done
+      - id: S03
+        name: Management Control Plane
+        status: Pending
+      - id: S04
+        name: Resource Listing & Key Masking
+        status: Done
+      - id: S05
+        name: Analytics Reporting & Export
+        status: Done
+
 summary:
-  total_stories: 26
-  completed_stories: 24
-  pending_stories: 2
-  progress: 92%
+  total_stories: 31
+  completed_stories: 28
+  in_progress_stories: 0
+  review_stories: 0
+  ready_for_dev_stories: 0
+  pending_stories: 3
+  progress: 90%
