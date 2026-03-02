@@ -88,6 +88,7 @@ impl Notification {
 }
 
 impl ErrorResponse {
+    #[allow(dead_code)]
     pub fn new(
         id: Option<Id>,
         code: i32,
@@ -105,10 +106,12 @@ impl ErrorResponse {
         }
     }
 
+    #[allow(dead_code)]
     pub fn parse_error(data: Option<serde_json::Value>) -> Self {
         Self::new(None, -32700, "Parse error".to_string(), data)
     }
 
+    #[allow(dead_code)]
     pub fn invalid_request(data: Option<serde_json::Value>) -> Self {
         Self::new(None, -32600, "Invalid Request".to_string(), data)
     }

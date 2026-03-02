@@ -95,6 +95,7 @@ impl McpServer {
         self.sessions.clone()
     }
 
+    #[allow(dead_code)]
     pub async fn run_stdio(&self) -> anyhow::Result<()> {
         let (tx_to_server, mut rx_from_client) = mpsc::channel(32);
         let (tx_to_client, rx_from_server) = mpsc::channel(32);

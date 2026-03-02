@@ -98,6 +98,7 @@ impl SessionManager {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn send_message(&self, session_id: &str, msg: JsonRpcMessage) -> anyhow::Result<()> {
         if let Some(session) = self.get(session_id).await {
             session.send(msg).await

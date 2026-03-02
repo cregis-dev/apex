@@ -4,11 +4,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdin, Stdout};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
+#[allow(dead_code)]
 pub struct StdinTransport {
     stdin: BufReader<Stdin>,
     stdout: Stdout,
 }
 
+#[allow(dead_code)]
 impl StdinTransport {
     pub fn new() -> Self {
         Self {
@@ -17,6 +19,7 @@ impl StdinTransport {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn run(
         self,
         tx: mpsc::Sender<JsonRpcMessage>,
