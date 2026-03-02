@@ -138,6 +138,12 @@ pub struct Global {
     pub auth: Auth,
     pub timeouts: Timeouts,
     pub retries: Retries,
+    #[serde(default = "default_true")]
+    pub enable_mcp: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

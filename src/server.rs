@@ -43,7 +43,7 @@ pub struct AppState {
 
 use crate::mcp::server::{McpServer, messages_handler, sse_handler};
 
-// Removed standalone run_mcp_server and watch_mcp_config as they are integrated into main server
+// MCP is integrated into main server, controlled by global.enable_mcp config
 
 pub async fn run_server(path: PathBuf) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(&path)?;
@@ -167,31 +167,6 @@ async fn watch_config(path: PathBuf, state: Arc<AppState>) -> notify::Result<()>
     Ok(())
 }
 
-pub async fn run_mcp_server(
-    path: std::path::PathBuf,
-    transport: String,
-    _port: u16,
-) -> anyhow::Result<()> {
-    use crate::config;
-    let config = config::load_config(&path)?;
-    let state = build_state(config)?;
-
-    match transport.as_str() {
-        "stdio" => {
-            state.mcp_server.run_stdio().await?;
-        }
-        "sse" => {
-            anyhow::bail!(
-                "SSE transport via 'apex mcp' is deprecated. Use 'apex serve' to run the main server with MCP support."
-            );
-        }
-        _ => {
-            anyhow::bail!("Unknown transport: {}", transport);
-        }
-    }
-    Ok(())
-}
-
 pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
     let mut builder = reqwest::Client::builder();
     if config.global.timeouts.connect_ms > 0 {
@@ -223,6 +198,10 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
 }
 
 pub fn build_app(state: Arc<AppState>) -> Router {
+    let config = state.config.read().unwrap();
+    let mcp_enabled = config.global.enable_mcp;
+    drop(config);
+
     // Model Routes (Protected by Team Auth)
     let model_routes = Router::new()
         .route("/v1/chat/completions", post(handle_openai))
@@ -252,8 +231,11 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(model_routes)
         .route("/admin/teams", get(handle_admin_teams))
         .route("/admin/routers", get(handle_admin_routers))
-        .route("/admin/channels", get(handle_admin_channels))
-        .nest(
+        .route("/admin/channels", get(handle_admin_channels));
+
+    // Conditionally add MCP routes
+    if mcp_enabled {
+        admin_routes = admin_routes.nest(
             "/mcp",
             Router::new()
                 .route("/sse", get(sse_handler))
@@ -263,6 +245,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                     crate::mcp::server::mcp_auth_guard,
                 )),
         );
+    }
 
     if metrics_enabled {
         admin_routes = admin_routes.route(

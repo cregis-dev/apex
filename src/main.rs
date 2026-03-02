@@ -20,8 +20,8 @@ mod usage;
 mod utils;
 
 use config::{
-    Auth, AuthMode, Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router,
-    TargetChannel, Timeouts,
+    Auth, AuthMode, Channel, Config, Global, HotReload, Metrics, ProviderType, Retries,
+    Router, TargetChannel, Timeouts,
 };
 
 #[derive(Parser)]
@@ -54,23 +54,8 @@ enum Commands {
         #[command(subcommand)]
         command: TeamCommand,
     },
-    Mcp {
-        #[command(subcommand)]
-        command: McpCommand,
-    },
     Status,
     Logs,
-}
-
-#[derive(Subcommand)]
-enum McpCommand {
-    Start {
-        config: Option<String>,
-        #[arg(long, default_value = "stdio")]
-        transport: String,
-        #[arg(long, default_value = "3000")]
-        port: u16,
-    },
 }
 
 #[derive(Subcommand)]
@@ -394,16 +379,6 @@ fn main() -> anyhow::Result<()> {
             .init();
 
         Some(guard)
-    } else if let Commands::Mcp { .. } = cli.command {
-        // Setup stderr logging for MCP to keep stdout clean for JSON-RPC
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| env_filter.into()),
-            )
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-            .init();
-        None
     } else {
         // Setup standard logging
         tracing_subscriber::registry()
@@ -440,16 +415,6 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Commands::Status => handle_status_command(&cli)?,
         Commands::Logs => handle_logs_command(&cli)?,
         Commands::Team { command } => handle_team_command(&cli, command)?,
-        Commands::Mcp { command } => match command {
-            McpCommand::Start {
-                config,
-                transport,
-                port,
-            } => {
-                let path = resolve_config_path(cli.config.clone().or_else(|| config.clone()));
-                server::run_mcp_server(path, transport.clone(), *port).await?;
-            }
-        },
     }
     Ok(())
 }
@@ -663,6 +628,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
                 backoff_ms: 200,
                 retry_on_status: vec![429, 500, 502, 503, 504],
             },
+            enable_mcp: true,
         },
         channels: std::sync::Arc::new(Vec::new()),
         routers: std::sync::Arc::new(Vec::new()),
