@@ -200,6 +200,7 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
 pub fn build_app(state: Arc<AppState>) -> Router {
     let config = state.config.read().unwrap();
     let mcp_enabled = config.global.enable_mcp;
+    let metrics_enabled = config.metrics.enabled;
     drop(config);
 
     // Model Routes (Protected by Team Auth)
@@ -224,41 +225,53 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             team_auth,
         ));
 
-    // Admin/System Routes
-    let metrics_enabled = state.config.read().unwrap().metrics.enabled;
+    // MCP Routes (Protected by Global API Key) - separate to avoid team_auth
+    let mcp_routes = if mcp_enabled {
+        Some(
+            Router::new()
+                .route("/mcp/sse", get(sse_handler))
+                .route("/mcp/messages", post(messages_handler))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.mcp_server.as_ref().clone(),
+                    crate::mcp::server::mcp_auth_guard,
+                )),
+        )
+    } else {
+        None
+    };
 
-    // Build admin_routes: merge model_routes (with team_auth)
-    // MCP routes will be conditionally added below
-    let mut admin_routes = Router::new()
-        .merge(model_routes)
+    // Admin/System Routes (no auth required)
+    let admin_routes = Router::new()
         .route("/admin/teams", get(handle_admin_teams))
         .route("/admin/routers", get(handle_admin_routers))
         .route("/admin/channels", get(handle_admin_channels));
 
-    // Conditionally add MCP routes (Protected by Global API Key)
-    // NOTE: Must use merge (not nest) to avoid inheriting team_auth from parent
-    if mcp_enabled {
-        let mcp_routes = Router::new()
-            .route("/mcp/sse", get(sse_handler))
-            .route("/mcp/messages", post(messages_handler))
-            .layer(axum::middleware::from_fn_with_state(
-                state.mcp_server.as_ref().clone(),
-                crate::mcp::server::mcp_auth_guard,
-            ));
-        admin_routes = admin_routes.merge(mcp_routes);
+    // Metrics (Protected by Global API Key)
+    let metrics_routes = if metrics_enabled {
+        Some(
+            Router::new()
+                .route("/metrics", get(metrics_handler))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    global_auth,
+                )),
+        )
+    } else {
+        None
+    };
+
+    // Combine all routes using merge (each has its own middleware)
+    let mut app = model_routes.merge(admin_routes);
+
+    if let Some(mcp) = mcp_routes {
+        app = app.merge(mcp);
     }
 
-    if metrics_enabled {
-        admin_routes = admin_routes.route(
-            "/metrics",
-            get(metrics_handler).layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                global_auth,
-            )),
-        );
+    if let Some(metrics) = metrics_routes {
+        app = app.merge(metrics);
     }
 
-    admin_routes
+    app
         .layer(
             tower::ServiceBuilder::new()
                 .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
