@@ -227,24 +227,25 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     // Admin/System Routes
     let metrics_enabled = state.config.read().unwrap().metrics.enabled;
 
+    // Build admin_routes: merge model_routes (with team_auth)
+    // MCP routes will be conditionally added below
     let mut admin_routes = Router::new()
         .merge(model_routes)
         .route("/admin/teams", get(handle_admin_teams))
         .route("/admin/routers", get(handle_admin_routers))
         .route("/admin/channels", get(handle_admin_channels));
 
-    // Conditionally add MCP routes
+    // Conditionally add MCP routes (Protected by Global API Key)
+    // NOTE: Must use merge (not nest) to avoid inheriting team_auth from parent
     if mcp_enabled {
-        admin_routes = admin_routes.nest(
-            "/mcp",
-            Router::new()
-                .route("/sse", get(sse_handler))
-                .route("/messages", post(messages_handler))
-                .layer(axum::middleware::from_fn_with_state(
-                    state.mcp_server.as_ref().clone(),
-                    crate::mcp::server::mcp_auth_guard,
-                )),
-        );
+        let mcp_routes = Router::new()
+            .route("/mcp/sse", get(sse_handler))
+            .route("/mcp/messages", post(messages_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.mcp_server.as_ref().clone(),
+                crate::mcp::server::mcp_auth_guard,
+            ));
+        admin_routes = admin_routes.merge(mcp_routes);
     }
 
     if metrics_enabled {
