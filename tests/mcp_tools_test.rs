@@ -57,6 +57,7 @@ async fn test_mcp_tools() {
         },
         teams: Arc::new(vec![]),
         prompts: Arc::new(vec![]),
+        compliance: None,
     };
 
     let server = McpServer::new(Arc::new(RwLock::new(config)));

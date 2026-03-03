@@ -1050,6 +1050,7 @@ mod tests {
             },
             teams: Arc::new(vec![]),
             prompts: Arc::new(vec![]),
+            compliance: None,
             channels: Arc::new(vec![
                 crate::config::Channel {
                     name: "test-channel".to_string(),

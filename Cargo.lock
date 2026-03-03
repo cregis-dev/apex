@@ -95,6 +95,7 @@ dependencies = [
  "inquire",
  "moka",
  "notify",
+ "once_cell",
  "predicates",
  "prometheus",
  "rand 0.8.5",

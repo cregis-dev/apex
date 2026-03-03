@@ -44,6 +44,7 @@ async fn test_mcp_session_lifecycle() {
         },
         teams: Arc::new(vec![]),
         prompts: Arc::new(vec![]),
+        compliance: None,
     };
     let config_arc = Arc::new(RwLock::new(config.clone()));
     let server = McpServer::new(config_arc);

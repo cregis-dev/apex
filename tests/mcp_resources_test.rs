@@ -59,6 +59,7 @@ async fn test_mcp_resources() {
             },
         }]),
         prompts: Arc::new(vec![]),
+        compliance: None,
     };
 
     let server = McpServer::new(Arc::new(RwLock::new(config)));

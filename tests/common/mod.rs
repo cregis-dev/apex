@@ -50,6 +50,7 @@ pub fn base_config() -> Config {
         channels: std::sync::Arc::new(vec![]),
         routers: std::sync::Arc::new(vec![]),
         prompts: std::sync::Arc::new(vec![]),
+        compliance: None,
     }
 }
 

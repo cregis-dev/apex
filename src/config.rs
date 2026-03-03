@@ -21,6 +21,8 @@ pub struct Config {
     pub teams: Arc<Vec<Team>>,
     #[serde(default)]
     pub prompts: Arc<Vec<Prompt>>,
+    #[serde(default)]
+    pub compliance: Option<Compliance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +289,43 @@ pub struct Metrics {
 pub struct HotReload {
     pub config_path: String,
     pub watch: bool,
+}
+
+/// PII action type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum PiiAction {
+    Mask,
+    Block,
+}
+
+/// PII rule for detection and handling
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PiiRule {
+    pub name: String,
+    pub pattern: String,
+    #[serde(default = "default_pii_action")]
+    pub action: PiiAction,
+    #[serde(default = "default_mask_char")]
+    pub mask_char: char,
+    #[serde(default)]
+    pub replace_with: Option<String>,
+}
+
+fn default_pii_action() -> PiiAction {
+    PiiAction::Mask
+}
+
+fn default_mask_char() -> char {
+    '*'
+}
+
+/// Compliance configuration for PII masking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Compliance {
+    pub enabled: bool,
+    #[serde(default)]
+    pub rules: Vec<PiiRule>,
 }
 
 pub fn load_config(path: &Path) -> anyhow::Result<Config> {

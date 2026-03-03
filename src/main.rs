@@ -646,6 +646,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
         },
         teams: std::sync::Arc::new(Vec::new()),
         prompts: std::sync::Arc::new(Vec::new()),
+        compliance: None,
     };
     config::save_config(path, &config)
         .with_context(|| format!("failed to write config: {}", path.display()))?;

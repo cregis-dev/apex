@@ -106,11 +106,11 @@ epics:
 
   - id: E07
     name: Data Compliance
-    status: Pending
+    status: In Progress
     stories:
       - id: S01
         name: PII Masking Engine
-        status: Pending
+        status: Review
       - id: S02
         name: Compliance Middleware
         status: Pending

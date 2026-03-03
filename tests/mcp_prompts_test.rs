@@ -58,6 +58,7 @@ async fn test_mcp_prompts() {
                 },
             }],
         }]),
+        compliance: None,
     };
 
     let server = McpServer::new(Arc::new(RwLock::new(config)));
