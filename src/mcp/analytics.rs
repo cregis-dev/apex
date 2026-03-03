@@ -363,7 +363,7 @@ impl AnalyticsEngine {
 
         let records = self.query_usage(&base_query)?;
         for record in records {
-            if team_routers.contains(&record.router) {
+            if record.team_id == team_id && team_routers.contains(&record.router) {
                 all_records.push(record);
             }
         }
@@ -509,7 +509,7 @@ impl AnalyticsEngine {
 
             let team_records: Vec<&UsageRecord> = all_records
                 .iter()
-                .filter(|r| team_routers.contains(&r.router))
+                .filter(|r| r.team_id == *team_id && team_routers.contains(&r.router))
                 .collect();
 
             if team_records.is_empty() {

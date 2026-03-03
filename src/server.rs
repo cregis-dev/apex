@@ -248,14 +248,9 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 
     // Metrics (Protected by Global API Key)
     let metrics_routes = if metrics_enabled {
-        Some(
-            Router::new()
-                .route("/metrics", get(metrics_handler))
-                .layer(axum::middleware::from_fn_with_state(
-                    state.clone(),
-                    global_auth,
-                )),
-        )
+        Some(Router::new().route("/metrics", get(metrics_handler)).layer(
+            axum::middleware::from_fn_with_state(state.clone(), global_auth),
+        ))
     } else {
         None
     };
@@ -271,40 +266,39 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         app = app.merge(metrics);
     }
 
-    app
-        .layer(
-            tower::ServiceBuilder::new()
-                .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-                .layer(PropagateRequestIdLayer::x_request_id())
-                .layer(
-                    TraceLayer::new_for_http()
-                        .make_span_with(|request: &Request<Body>| {
-                            let request_id = request
-                                .extensions()
-                                .get::<tower_http::request_id::RequestId>()
-                                .map(|id| id.header_value().to_str().unwrap_or("unknown"))
-                                .unwrap_or("unknown");
-                            let client_ip = request
-                                .headers()
-                                .get("x-forwarded-for")
-                                .and_then(|h| h.to_str().ok())
-                                .unwrap_or("unknown");
+    app.layer(
+        tower::ServiceBuilder::new()
+            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+            .layer(PropagateRequestIdLayer::x_request_id())
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(|request: &Request<Body>| {
+                        let request_id = request
+                            .extensions()
+                            .get::<tower_http::request_id::RequestId>()
+                            .map(|id| id.header_value().to_str().unwrap_or("unknown"))
+                            .unwrap_or("unknown");
+                        let client_ip = request
+                            .headers()
+                            .get("x-forwarded-for")
+                            .and_then(|h| h.to_str().ok())
+                            .unwrap_or("unknown");
 
-                            tracing::info_span!("request",
-                                request_id = %request_id,
-                                client_ip = %client_ip,
-                                team_id = tracing::field::Empty,
-                                router_name = tracing::field::Empty,
-                                channel_name = tracing::field::Empty,
-                                method = %request.method(),
-                                uri = %request.uri(),
-                                version = ?request.version()
-                            )
-                        })
-                        .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
-                ),
-        )
-        .with_state(state)
+                        tracing::info_span!("request",
+                            request_id = %request_id,
+                            client_ip = %client_ip,
+                            team_id = tracing::field::Empty,
+                            router_name = tracing::field::Empty,
+                            channel_name = tracing::field::Empty,
+                            method = %request.method(),
+                            uri = %request.uri(),
+                            version = ?request.version()
+                        )
+                    })
+                    .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
+            ),
+    )
+    .with_state(state)
 }
 
 async fn metrics_handler(state: State<Arc<AppState>>) -> Response<Body> {
