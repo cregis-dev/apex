@@ -363,7 +363,9 @@ impl AnalyticsEngine {
 
         let records = self.query_usage(&base_query)?;
         for record in records {
-            if record.team_id == team_id && team_routers.contains(&record.router) {
+            // Match team_id exactly, OR match legacy records with empty team_id
+            let team_matches = record.team_id == team_id || record.team_id.is_empty();
+            if team_matches && team_routers.contains(&record.router) {
                 all_records.push(record);
             }
         }
@@ -501,6 +503,10 @@ impl AnalyticsEngine {
         let mut total_output_tokens = 0u64;
         let mut by_team: HashMap<String, TeamStats> = HashMap::new();
 
+        // Collect all known team IDs
+        let known_teams: std::collections::HashSet<&str> =
+            teams.iter().map(|(id, _)| *id).collect();
+
         // For each team, filter records by their allowed routers
         for (team_id, team_routers) in teams {
             if team_routers.is_empty() {
@@ -537,6 +543,38 @@ impl AnalyticsEngine {
                 TeamStats {
                     total_requests: team_req_count,
                     total_tokens: team_input + team_output,
+                    routers_used,
+                },
+            );
+        }
+
+        // Handle records with unknown/empty team_id (legacy records without team_id)
+        let unknown_records: Vec<&UsageRecord> = all_records
+            .iter()
+            .filter(|r| r.team_id.is_empty() || !known_teams.contains(r.team_id.as_str()))
+            .collect();
+
+        if !unknown_records.is_empty() {
+            let unknown_req_count = unknown_records.len() as u64;
+            let unknown_input: u64 = unknown_records.iter().map(|r| r.input_tokens).sum();
+            let unknown_output: u64 = unknown_records.iter().map(|r| r.output_tokens).sum();
+
+            total_requests += unknown_req_count;
+            total_input_tokens += unknown_input;
+            total_output_tokens += unknown_output;
+
+            let routers_used: Vec<String> = unknown_records
+                .iter()
+                .map(|r| r.router.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+
+            by_team.insert(
+                "unknown".to_string(),
+                TeamStats {
+                    total_requests: unknown_req_count,
+                    total_tokens: unknown_input + unknown_output,
                     routers_used,
                 },
             );

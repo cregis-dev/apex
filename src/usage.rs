@@ -85,13 +85,14 @@ impl UsageLogger {
         output_tokens: u64,
     ) {
         let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let model_lower = model.to_lowercase();
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_record([
                 &timestamp,
                 team_id,
                 router,
                 channel,
-                model,
+                &model_lower,
                 &input_tokens.to_string(),
                 &output_tokens.to_string(),
             ]);
@@ -204,13 +205,14 @@ impl UsageTrackerState {
 
     fn flush(&self) {
         if self.input_tokens > 0 || self.output_tokens > 0 {
+            let model_lower = self.model.to_lowercase();
             self.metrics
                 .token_total
-                .with_label_values(&[&self.router, &self.channel, &self.model, "input"])
+                .with_label_values(&[&self.router, &self.channel, &model_lower, "input"])
                 .inc_by(self.input_tokens);
             self.metrics
                 .token_total
-                .with_label_values(&[&self.router, &self.channel, &self.model, "output"])
+                .with_label_values(&[&self.router, &self.channel, &model_lower, "output"])
                 .inc_by(self.output_tokens);
 
             self.logger.log(
