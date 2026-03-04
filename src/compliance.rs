@@ -63,20 +63,20 @@ impl PiiProcessor {
         }
 
         // Add custom rules from config
-        if let Some(compliance_config) = compliance {
-            if compliance_config.enabled {
-                for rule in &compliance_config.rules {
-                    match Regex::new(&rule.pattern) {
-                        Ok(regex) => {
-                            compiled_rules.push((rule.clone(), regex));
-                        }
-                        Err(e) => {
-                            warn!(
-                                rule = %rule.name,
-                                error = %e,
-                                "Failed to compile PII regex pattern, skipping rule"
-                            );
-                        }
+        if let Some(compliance_config) = compliance
+            && compliance_config.enabled
+        {
+            for rule in &compliance_config.rules {
+                match Regex::new(&rule.pattern) {
+                    Ok(regex) => {
+                        compiled_rules.push((rule.clone(), regex));
+                    }
+                    Err(e) => {
+                        warn!(
+                            rule = %rule.name,
+                            error = %e,
+                            "Failed to compile PII regex pattern, skipping rule"
+                        );
                     }
                 }
             }
@@ -127,14 +127,14 @@ impl PiiProcessor {
     /// Check if text contains any PII that should be blocked
     pub fn should_block(&self, text: &str) -> Option<PiiDetection> {
         for (rule, regex) in &self.compiled_rules {
-            if rule.action == PiiAction::Block {
-                if let Some(m) = regex.find(text) {
-                    return Some(PiiDetection {
-                        rule_name: rule.name.clone(),
-                        matched_text: m.as_str().to_string(),
-                        action: rule.action.clone(),
-                    });
-                }
+            if rule.action == PiiAction::Block
+                && let Some(m) = regex.find(text)
+            {
+                return Some(PiiDetection {
+                    rule_name: rule.name.clone(),
+                    matched_text: m.as_str().to_string(),
+                    action: rule.action.clone(),
+                });
             }
         }
         None
