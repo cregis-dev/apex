@@ -305,6 +305,19 @@ pub fn convert_anthropic_to_openai(body: &Bytes) -> Bytes {
         }
     }
 
+    // Map tools and tool_choice (for function calling)
+    if let Some(tools) = value.get("tools") {
+        new_body.insert("tools".to_string(), tools.clone());
+    }
+    if let Some(tool_choice) = value.get("tool_choice") {
+        new_body.insert("tool_choice".to_string(), tool_choice.clone());
+    }
+
+    // Map response_format (for structured output)
+    if let Some(response_format) = value.get("response_format") {
+        new_body.insert("response_format".to_string(), response_format.clone());
+    }
+
     match serde_json::to_vec(&new_body) {
         Ok(vec) => Bytes::from(vec),
         Err(_) => body.clone(),
