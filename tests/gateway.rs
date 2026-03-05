@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use apex::config::{
-    Auth, AuthMode, Channel, MatchSpec, ProviderType, Router as GatewayRouter, RouterRule,
+    Channel, MatchSpec, ProviderType, Router as GatewayRouter, RouterRule,
     TargetChannel, Team, TeamPolicy, TeamRateLimit,
 };
 use apex::server::{build_app, build_state};
@@ -75,10 +75,7 @@ async fn e2e_openai_route_success() {
 async fn e2e_global_auth_required() {
     let upstream = spawn_upstream_ok().await;
     let mut config = base_config();
-    config.global.auth = Auth {
-        mode: AuthMode::ApiKey,
-        keys: Some(vec!["key1".to_string()]),
-    };
+    config.global.auth_keys = vec!["key1".to_string()];
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         channels: vec![TargetChannel {
@@ -196,10 +193,7 @@ async fn e2e_fallback_on_failure() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_list_requires_global_auth() {
     let mut config = base_config();
-    config.global.auth = Auth {
-        mode: AuthMode::ApiKey,
-        keys: Some(vec!["admin-key".to_string()]),
-    };
+    config.global.auth_keys = vec!["admin-key".to_string()];
 
     let state = build_state(config).unwrap();
     let app = build_app(state);
@@ -215,10 +209,7 @@ async fn admin_list_requires_global_auth() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_list_masks_keys() {
     let mut config = base_config();
-    config.global.auth = Auth {
-        mode: AuthMode::ApiKey,
-        keys: Some(vec!["admin-key".to_string()]),
-    };
+    config.global.auth_keys = vec!["admin-key".to_string()];
     std::sync::Arc::make_mut(&mut config.teams).push(Team {
         id: "team-a".to_string(),
         api_key: "sk-ant-abcdef123456".to_string(),

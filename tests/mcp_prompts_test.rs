@@ -1,5 +1,5 @@
 use apex::config::{
-    Auth, AuthMode, Channel, Config, Global, HotReload, Logging, Metrics, Prompt, PromptArgument,
+    Channel, Config, Global, HotReload, Logging, Metrics, Prompt, PromptArgument,
     PromptContent, PromptMessage, Retries, Team, Timeouts,
 };
 use apex::mcp::protocol::{
@@ -15,10 +15,7 @@ async fn test_mcp_prompts() {
         version: "1.0".to_string(),
         global: Global {
             listen: "127.0.0.1:8080".to_string(),
-            auth: Auth {
-                mode: AuthMode::None,
-                keys: None,
-            },
+            auth_keys: vec![],
             timeouts: Timeouts {
                 connect_ms: 1000,
                 request_ms: 1000,

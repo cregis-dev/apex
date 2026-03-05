@@ -808,36 +808,25 @@ pub async fn mcp_auth_guard(
         k
     };
 
-    let (mode, global_keys) = {
+    let auth_keys = {
         let config = state.config.read().unwrap();
-        (
-            config.global.auth.mode.clone(),
-            config.global.auth.keys.clone(),
-        )
+        config.global.auth_keys.clone()
     };
 
-    match mode {
-        crate::config::AuthMode::None => next.run(req).await,
-        crate::config::AuthMode::ApiKey => {
-            let authorized = if let Some(api_key) = &key {
-                if let Some(keys) = &global_keys {
-                    keys.contains(api_key)
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
+    // If no auth_keys configured, skip validation
+    if auth_keys.is_empty() {
+        return next.run(req).await;
+    }
 
-            if authorized {
-                next.run(req).await
-            } else {
-                AxumResponse::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"error": "Unauthorized"}"#))
-                    .unwrap()
-            }
-        }
+    let authorized = key.as_ref().map(|k| auth_keys.contains(k)).unwrap_or(false);
+
+    if authorized {
+        next.run(req).await
+    } else {
+        AxumResponse::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"error": "Unauthorized"}"#))
+            .unwrap()
     }
 }

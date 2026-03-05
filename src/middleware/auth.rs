@@ -75,59 +75,64 @@ pub async fn team_auth(
 
 pub async fn global_auth(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
     let headers = req.headers();
-    let (mut api_key_opt, _) = extract_api_key_with_source(headers);
+    let api_key_opt = extract_api_key(headers);
 
     // If not found in headers, try query parameter (common for SSE/Metrics)
-    if api_key_opt.is_none()
+    let mut api_key = api_key_opt;
+    if api_key.is_none()
         && let Some(query) = req.uri().query()
     {
         for pair in query.split('&') {
             if let Some((key, value)) = pair.split_once('=')
                 && (key == "api_key" || key == "token")
             {
-                api_key_opt = Some(value.to_string());
+                api_key = Some(value.to_string());
                 break;
             }
         }
     }
 
-    let (mode, global_keys) = {
+    let auth_keys = {
         let config = state.config.read().unwrap();
-        (
-            config.global.auth.mode.clone(),
-            config.global.auth.keys.clone(),
-        )
+        config.global.auth_keys.clone()
     };
 
-    match mode {
-        crate::config::AuthMode::None => {
-            // No auth required
-            next.run(req).await
-        }
-        crate::config::AuthMode::ApiKey => {
-            let authorized = if let Some(api_key) = api_key_opt {
-                if let Some(keys) = &global_keys {
-                    keys.contains(&api_key)
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if authorized {
-                next.run(req).await
-            } else {
-                Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"error": "Unauthorized: Global Access Required"}"#,
-                    ))
-                    .unwrap()
-            }
-        }
+    // If no auth_keys configured, skip validation
+    if auth_keys.is_empty() {
+        return next.run(req).await;
     }
+
+    // Check if provided key is authorized
+    let authorized = api_key.map(|k| auth_keys.contains(&k)).unwrap_or(false);
+
+    if authorized {
+        next.run(req).await
+    } else {
+        Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"error": "Unauthorized: Global Access Required"}"#,
+            ))
+            .unwrap()
+    }
+}
+
+fn extract_api_key(headers: &HeaderMap) -> Option<String> {
+    // Try Authorization: Bearer <token>
+    if let Some(auth_val) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        if let Some(stripped) = auth_val.strip_prefix("Bearer ") {
+            return Some(stripped.to_string());
+        }
+        return Some(auth_val.to_string());
+    }
+
+    // Try x-api-key (Anthropic style)
+    if let Some(key_val) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        return Some(key_val.to_string());
+    }
+
+    None
 }
 
 fn extract_api_key_with_source(headers: &HeaderMap) -> (Option<String>, Option<String>) {

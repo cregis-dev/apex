@@ -51,9 +51,8 @@ async fn test_observability_metrics() {
     });
 
     // 1. Send a request to generate metrics
-    // Set up a team for team_auth
-    config.global.auth.mode = apex::config::AuthMode::ApiKey;
-    config.global.auth.keys = Some(vec!["sk-global-key".to_string()]);
+    // Set up global auth keys
+    config.global.auth_keys = vec!["sk-global-key".to_string()];
 
     // Add a team with API key
     std::sync::Arc::make_mut(&mut config.teams).push(Team {

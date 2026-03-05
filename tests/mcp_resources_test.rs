@@ -1,5 +1,5 @@
 use apex::config::{
-    Auth, AuthMode, Channel, Config, Global, HotReload, Logging, Metrics, ProviderType, Retries,
+    Channel, Config, Global, HotReload, Logging, Metrics, ProviderType, Retries,
     Team, Timeouts,
 };
 use apex::mcp::protocol::{Id, JsonRpcMessage, ListResourcesResult, ReadResourceResult, Request};
@@ -13,10 +13,7 @@ async fn test_mcp_resources() {
         version: "1.0".to_string(),
         global: Global {
             listen: "127.0.0.1:8080".to_string(),
-            auth: Auth {
-                mode: AuthMode::ApiKey,
-                keys: Some(vec!["sk-global-secret-key".to_string()]),
-            },
+            auth_keys: vec!["sk-global-secret-key".to_string()],
             timeouts: Timeouts {
                 connect_ms: 1000,
                 request_ms: 1000,

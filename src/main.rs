@@ -20,7 +20,7 @@ mod usage;
 mod utils;
 
 use config::{
-    Auth, AuthMode, Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router,
+    Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router,
     TargetChannel, Timeouts,
 };
 
@@ -614,10 +614,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
         version: "1".to_string(),
         global: Global {
             listen: "0.0.0.0:12356".to_string(),
-            auth: Auth {
-                mode: AuthMode::None,
-                keys: None,
-            },
+            auth_keys: vec![],
             timeouts: Timeouts {
                 connect_ms: 2000,
                 request_ms: 30000,

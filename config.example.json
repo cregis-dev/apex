@@ -2,10 +2,7 @@
   "version": "1.0",
   "global": {
     "listen": "0.0.0.0:12356",
-    "auth": {
-      "mode": "api_key",
-      "keys": ["sk-your-secret-key-here"]
-    },
+    "auth_keys": ["sk-your-secret-key-here"],
     "timeouts": {
       "connect_ms": 1000,
       "request_ms": 10000,

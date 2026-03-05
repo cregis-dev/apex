@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use apex::config::{
-    AuthMode, Channel, MatchSpec, ProviderType, Router as GatewayRouter, RouterRule, TargetChannel,
+    Channel, MatchSpec, ProviderType, Router as GatewayRouter, RouterRule, TargetChannel,
     Team, TeamPolicy,
 };
 use apex::server::{build_app, build_state};
@@ -370,7 +370,7 @@ async fn test_invalid_key_rejection() {
     let mut config = base_config();
 
     // Ensure Global Auth is None (Open)
-    config.global.auth.mode = AuthMode::None;
+    config.global.auth_keys = vec![];
 
     // Channel
     std::sync::Arc::make_mut(&mut config.channels).push(Channel {
@@ -473,9 +473,8 @@ async fn test_valid_global_key_acceptance() {
     let upstream = spawn_upstream_ok().await;
     let mut config = base_config();
 
-    // Set Global Auth to ApiKey with a key
-    config.global.auth.mode = AuthMode::ApiKey;
-    config.global.auth.keys = Some(vec!["sk-global-key".to_string()]);
+    // Set Global Auth keys
+    config.global.auth_keys = vec!["sk-global-key".to_string()];
 
     // Add team for strict auth (global keys no longer work for model requests)
     std::sync::Arc::make_mut(&mut config.teams).push(Team {

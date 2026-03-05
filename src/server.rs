@@ -1,4 +1,4 @@
-use crate::config::{AuthMode, Config};
+use crate::config::Config;
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::metrics::MetricsState;
 use crate::middleware::auth::{TeamContext, global_auth, team_auth};
@@ -332,9 +332,9 @@ async fn handle_models(State(state): State<Arc<AppState>>, req: Request<Body>) -
 
     let config = state.config.read().unwrap().clone();
 
-    // Check Team Context or AuthMode::None
+    // Check Team Context or global auth required
     if parts.extensions.get::<TeamContext>().is_none()
-        && matches!(config.global.auth.mode, crate::config::AuthMode::ApiKey)
+        && !config.global.auth_keys.is_empty()
     {
         return error_response(StatusCode::UNAUTHORIZED, "Team API Key Required");
     }
@@ -472,30 +472,28 @@ async fn handle_admin_channels(
 
 #[allow(clippy::result_large_err)]
 fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Response<Body>> {
-    match config.global.auth.mode {
-        AuthMode::None => Ok(()),
-        AuthMode::ApiKey => {
-            let Some(keys) = &config.global.auth.keys else {
-                return Ok(());
-            };
+    let keys = &config.global.auth_keys;
 
-            let candidates = [
-                read_auth_token(headers, "authorization"),
-                read_auth_token(headers, "x-api-key"),
-            ];
+    // If no auth_keys configured, skip validation
+    if keys.is_empty() {
+        return Ok(());
+    }
 
-            for token in candidates.into_iter().flatten() {
-                if keys.contains(&token) {
-                    return Ok(());
-                }
-            }
+    let candidates = [
+        read_auth_token(headers, "authorization"),
+        read_auth_token(headers, "x-api-key"),
+    ];
 
-            tracing::warn!(
-                "Auth Failed: No valid token found in Authorization or x-api-key headers."
-            );
-            Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized"))
+    for token in candidates.into_iter().flatten() {
+        if keys.contains(&token) {
+            return Ok(());
         }
     }
+
+    tracing::warn!(
+        "Auth Failed: No valid token found in Authorization or x-api-key headers."
+    );
+    Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized"))
 }
 
 fn read_auth_token(headers: &HeaderMap, key: &str) -> Option<String> {
@@ -991,7 +989,7 @@ async fn process_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Auth, Channel, Global, ProviderType, Retries, Timeouts};
+    use crate::config::{Channel, Global, ProviderType, Retries, Timeouts};
     use crate::providers::{AccessAudit, RateLimiter, RouteKind};
     use std::sync::Mutex;
 
@@ -1020,10 +1018,7 @@ mod tests {
             version: "1".to_string(),
             global: Global {
                 listen: "0.0.0.0:0".to_string(),
-                auth: Auth {
-                    mode: AuthMode::None,
-                    keys: None,
-                },
+                auth_keys: vec![],
                 timeouts: Timeouts {
                     connect_ms: 100,
                     request_ms: 100,

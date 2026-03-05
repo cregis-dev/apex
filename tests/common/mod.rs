@@ -2,7 +2,7 @@
 #![allow(unused_imports)]
 
 use apex::config::{
-    Auth, AuthMode, Channel, Config, Global, HotReload, Metrics, ProviderType, Retries,
+    Channel, Config, Global, HotReload, Metrics, ProviderType, Retries,
     Router as GatewayRouter, Timeouts,
 };
 use apex::server::{build_app, build_state};
@@ -18,10 +18,7 @@ pub fn base_config() -> Config {
         version: "1".to_string(),
         global: Global {
             listen: "127.0.0.1:0".to_string(),
-            auth: Auth {
-                mode: AuthMode::None,
-                keys: None,
-            },
+            auth_keys: vec![],
             timeouts: Timeouts {
                 connect_ms: 1000,
                 request_ms: 1000,

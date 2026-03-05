@@ -137,7 +137,8 @@ impl Default for Logging {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Global {
     pub listen: String,
-    pub auth: Auth,
+    #[serde(default)]
+    pub auth_keys: Vec<String>,
     pub timeouts: Timeouts,
     pub retries: Retries,
     #[serde(default = "default_true")]
@@ -146,19 +147,6 @@ pub struct Global {
 
 fn default_true() -> bool {
     true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Auth {
-    pub mode: AuthMode,
-    pub keys: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthMode {
-    ApiKey,
-    None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
