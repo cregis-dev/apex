@@ -2,8 +2,8 @@
 #![allow(unused_imports)]
 
 use apex::config::{
-    Channel, Config, Global, HotReload, Metrics, ProviderType, Retries,
-    Router as GatewayRouter, Timeouts,
+    Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router as GatewayRouter,
+    Timeouts,
 };
 use apex::server::{build_app, build_state};
 use axum::http::StatusCode;

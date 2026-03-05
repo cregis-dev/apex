@@ -1,6 +1,5 @@
 use apex::config::{
-    Channel, Config, Global, HotReload, Logging, Metrics, ProviderType, Retries,
-    Team, Timeouts,
+    Channel, Config, Global, HotReload, Logging, Metrics, ProviderType, Retries, Team, Timeouts,
 };
 use apex::mcp::protocol::{Id, JsonRpcMessage, ListResourcesResult, ReadResourceResult, Request};
 use apex::mcp::server::McpServer;

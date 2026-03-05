@@ -1,6 +1,6 @@
 use apex::config::{
-    Channel, Config, Global, HotReload, Logging, Metrics, Prompt, PromptArgument,
-    PromptContent, PromptMessage, Retries, Team, Timeouts,
+    Channel, Config, Global, HotReload, Logging, Metrics, Prompt, PromptArgument, PromptContent,
+    PromptMessage, Retries, Team, Timeouts,
 };
 use apex::mcp::protocol::{
     GetPromptResult, Id, JsonRpcMessage, ListPromptsResult, PromptMessageContent, Request,

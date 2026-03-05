@@ -2,8 +2,8 @@ mod common;
 use common::*;
 
 use apex::config::{
-    Channel, MatchSpec, ProviderType, Router as GatewayRouter, RouterRule,
-    TargetChannel, Team, TeamPolicy, TeamRateLimit,
+    Channel, MatchSpec, ProviderType, Router as GatewayRouter, RouterRule, TargetChannel, Team,
+    TeamPolicy, TeamRateLimit,
 };
 use apex::server::{build_app, build_state};
 use axum::body::Body;

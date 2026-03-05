@@ -1,6 +1,4 @@
-use apex::config::{
-    Config, Global, HotReload, Logging, Metrics, Retries, Timeouts,
-};
+use apex::config::{Config, Global, HotReload, Logging, Metrics, Retries, Timeouts};
 use apex::mcp::protocol::JsonRpcMessage;
 use apex::mcp::server::McpServer;
 use std::sync::{Arc, RwLock};

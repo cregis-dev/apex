@@ -333,9 +333,7 @@ async fn handle_models(State(state): State<Arc<AppState>>, req: Request<Body>) -
     let config = state.config.read().unwrap().clone();
 
     // Check Team Context or global auth required
-    if parts.extensions.get::<TeamContext>().is_none()
-        && !config.global.auth_keys.is_empty()
-    {
+    if parts.extensions.get::<TeamContext>().is_none() && !config.global.auth_keys.is_empty() {
         return error_response(StatusCode::UNAUTHORIZED, "Team API Key Required");
     }
 
@@ -490,9 +488,7 @@ fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Respo
         }
     }
 
-    tracing::warn!(
-        "Auth Failed: No valid token found in Authorization or x-api-key headers."
-    );
+    tracing::warn!("Auth Failed: No valid token found in Authorization or x-api-key headers.");
     Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized"))
 }
 

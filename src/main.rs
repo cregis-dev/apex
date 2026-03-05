@@ -20,8 +20,8 @@ mod usage;
 mod utils;
 
 use config::{
-    Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router,
-    TargetChannel, Timeouts,
+    Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router, TargetChannel,
+    Timeouts,
 };
 
 #[derive(Parser)]
