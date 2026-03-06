@@ -210,12 +210,14 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/v1/embeddings", post(handle_openai))
         .route("/v1/models", get(handle_models))
         .route("/v1/messages", post(handle_anthropic))
+        .route("/v1/responses", post(handle_openai))
         // Compatibility routes (no /v1 prefix)
         .route("/chat/completions", post(handle_openai))
         .route("/completions", post(handle_openai))
         .route("/embeddings", post(handle_openai))
         .route("/models", get(handle_models))
         .route("/messages", post(handle_anthropic))
+        .route("/responses", post(handle_openai))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             team_policy,
