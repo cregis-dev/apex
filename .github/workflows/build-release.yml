@@ -31,9 +31,6 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: apex-aarch64-macos
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            artifact: apex-x86_64-windows.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -52,6 +49,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install aarch64 Linux cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
+
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
@@ -62,17 +65,18 @@ jobs:
           npm run build
 
       - name: Build release
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --features embedded-web --target ${{ matrix.target }}
 
       - name: Prepare artifact
         shell: bash
         run: |
           mkdir -p release/${{ matrix.artifact }}
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp target/${{ matrix.target }}/release/apex.exe release/${{ matrix.artifact }}/apex.exe
-          else
-            cp target/${{ matrix.target }}/release/apex release/${{ matrix.artifact }}/apex
-          fi
+          cp target/${{ matrix.target }}/release/apex release/${{ matrix.artifact }}/apex
           cp config.example.json release/${{ matrix.artifact }}/config.example.json
           cp install.sh release/${{ matrix.artifact }}/install.sh
 
