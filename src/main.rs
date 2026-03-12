@@ -7,6 +7,7 @@ use std::io::BufRead;
 use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod compliance;
 mod config;
 mod converters;
 mod database;

@@ -68,3 +68,53 @@ cargo test
 - 添加更多边界情况测试
 - 添加 HTTP/SSE 传输层集成测试
 - 添加 E2E 测试验证完整 MCP 流程
+
+---
+
+# Dashboard E2E 回归摘要（2026-03-12）
+
+## 测试框架
+
+- **框架**: Playwright
+- **目录**: `/Users/shawn/workspace/code/apex/web/tests`
+- **执行命令**: `npx playwright test tests/dashboard.spec.ts`
+
+## 本次回归覆盖
+
+### Dashboard 页面
+
+| 测试文件 | 状态 | 覆盖内容 |
+|---------|------|------|
+| [web/tests/dashboard.spec.ts](/Users/shawn/workspace/code/apex/web/tests/dashboard.spec.ts) | ✅ 通过 | 根路径认证入口与空提交校验 |
+| [web/tests/dashboard.spec.ts](/Users/shawn/workspace/code/apex/web/tests/dashboard.spec.ts) | ✅ 通过 | URL `token` 引导、地址清洗、本地存储恢复 |
+| [web/tests/dashboard.spec.ts](/Users/shawn/workspace/code/apex/web/tests/dashboard.spec.ts) | ✅ 通过 | 无效 `token` 回退到连接页并清理本地凭证 |
+| [web/tests/dashboard.spec.ts](/Users/shawn/workspace/code/apex/web/tests/dashboard.spec.ts) | ✅ 通过 | 已存储 token 自动登录与断开连接 |
+| [web/tests/dashboard.spec.ts](/Users/shawn/workspace/code/apex/web/tests/dashboard.spec.ts) | ✅ 通过 | 时间范围、团队、模型筛选与 URL/API 参数同步 |
+| [web/tests/dashboard.spec.ts](/Users/shawn/workspace/code/apex/web/tests/dashboard.spec.ts) | ✅ 通过 | Overview、Team、System、Model、Records 五个 tabs 渲染 |
+| [web/tests/dashboard.spec.ts](/Users/shawn/workspace/code/apex/web/tests/dashboard.spec.ts) | ✅ 通过 | Request ID 复制反馈与 records 详情抽屉 |
+| [web/tests/dashboard.spec.ts](/Users/shawn/workspace/code/apex/web/tests/dashboard.spec.ts) | ✅ 通过 | 翻页后刷新提示新记录并跳回最新页 |
+| [web/tests/dashboard.spec.ts](/Users/shawn/workspace/code/apex/web/tests/dashboard.spec.ts) | ✅ 通过 | 刷新失败 banner 与旧快照保留 |
+| [web/tests/dashboard.spec.ts](/Users/shawn/workspace/code/apex/web/tests/dashboard.spec.ts) | ✅ 通过 | CSV 导出文件名与内容 |
+
+## 执行结果
+
+- **通过数**: 10/10
+- **失败数**: 0
+- **总耗时**: 35.3s
+
+## 备注
+
+- 本次测试全部通过 mocked dashboard API 完成，重点验证前端状态机、URL 状态、交互路径和导出行为。
+- 尚未覆盖真实后端联调、跨浏览器矩阵和移动端视口专项回归。
+
+## Dashboard 真实后端联调（2026-03-12）
+
+- **Seed 数据**: 写入 `/tmp/apex-dashboard-integration/data/apex.db`，共 25 条近 24 小时 `usage_records`
+- **后端配置**: 使用临时 config 监听 `127.0.0.1:12356`，`web_dir` 指向 `target/web`
+- **API 验证**: `GET /api/dashboard/analytics?range=24h` 返回 200，概览口径为 `25 requests / 7450 tokens / 84.0% success rate`
+- **页面验证**: `GET /dashboard/` 返回 200，静态资源由真实 Apex 后端提供
+- **真实浏览器 smoke**: `RUN_REAL_DASHBOARD_TESTS=true BASE_URL=http://127.0.0.1:12356 DASHBOARD_API_KEY=sk-dashboard-admin-key npx playwright test tests/dashboard.backend.spec.ts --config playwright.real.config.ts`
+- **复用脚本**:
+  - `scripts/dashboard/setup_real_backend_fixture.sh`
+  - `scripts/dashboard/run_real_backend_smoke.sh`
+- **执行结果**: 2/2 通过

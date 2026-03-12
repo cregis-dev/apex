@@ -1,6 +1,7 @@
+use crate::compliance::{PiiProcessor, process_json_content};
 use crate::config::Config;
 use crate::converters::convert_openai_response_to_anthropic;
-use crate::database::Database;
+use crate::database::{Database, UsageRecord as DashboardUsageRecord, UsageRecordQuery};
 use crate::metrics::MetricsState;
 use crate::middleware::auth::{TeamContext, global_auth, team_auth};
 use crate::middleware::policy::team_policy;
@@ -18,8 +19,10 @@ use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, HeaderValue, Request, Response as HttpResponse, StatusCode, Uri};
 use axum::response::{Redirect, Response};
 use axum::routing::{get, post};
+use chrono::{Duration as ChronoDuration, Local, NaiveDateTime};
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -271,6 +274,11 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                 .route("/api/metrics", get(metrics_api_handler))
                 .route("/api/metrics/trends", get(trends_api_handler))
                 .route("/api/metrics/rankings", get(rankings_api_handler))
+                .route(
+                    "/api/dashboard/analytics",
+                    get(dashboard_analytics_api_handler),
+                )
+                .route("/api/dashboard/records", get(dashboard_records_api_handler))
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     global_auth,
@@ -620,6 +628,893 @@ async fn rankings_api_handler(
     }
 }
 
+#[derive(Debug, Clone)]
+enum DashboardBucket {
+    Hour,
+    Day,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardWindow {
+    range: String,
+    bucket: DashboardBucket,
+    current_start: NaiveDateTime,
+    current_end: NaiveDateTime,
+    previous_start: NaiveDateTime,
+    previous_end: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardRecordCursor {
+    id: i64,
+    timestamp: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardFilterOptions {
+    teams: Vec<String>,
+    models: Vec<String>,
+    routers: Vec<String>,
+    channels: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardOverviewDelta {
+    total_requests: f64,
+    total_tokens: f64,
+    avg_latency_ms: f64,
+    success_rate: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardOverview {
+    total_requests: i64,
+    total_tokens: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    avg_latency_ms: f64,
+    success_rate: f64,
+    delta: DashboardOverviewDelta,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardTrendPoint {
+    bucket: String,
+    label: String,
+    requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    total_tokens: i64,
+    error_rate: f64,
+    avg_latency_ms: f64,
+    success_rate: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardTrendSection {
+    unit: String,
+    points: Vec<DashboardTrendPoint>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardTeamLeaderboardItem {
+    team_id: String,
+    total_requests: i64,
+    total_tokens: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardTeamModelUsageItem {
+    team_id: String,
+    model: String,
+    total_requests: i64,
+    total_tokens: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardTeamUsageSection {
+    leaderboard: Vec<DashboardTeamLeaderboardItem>,
+    model_usage: Vec<DashboardTeamModelUsageItem>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardChannelLatencyItem {
+    channel: String,
+    total_requests: i64,
+    avg_latency_ms: f64,
+    p95_latency_ms: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardSystemReliabilitySection {
+    error_rate_trend: Vec<DashboardTrendPoint>,
+    channel_latency: Vec<DashboardChannelLatencyItem>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardShareItem {
+    name: String,
+    requests: i64,
+    total_tokens: i64,
+    percentage: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardModelRouterSection {
+    model_share: Vec<DashboardShareItem>,
+    router_summary: Vec<DashboardShareItem>,
+    channel_summary: Vec<DashboardShareItem>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardTopologyNode {
+    name: String,
+    kind: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardTopologyLink {
+    source: usize,
+    target: usize,
+    value: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardFlowSummary {
+    team_id: String,
+    router: String,
+    channel: String,
+    model: String,
+    requests: i64,
+    total_tokens: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardTopologySection {
+    nodes: Vec<DashboardTopologyNode>,
+    links: Vec<DashboardTopologyLink>,
+    flows: Vec<DashboardFlowSummary>,
+    render_mode: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardRecordsMeta {
+    total: usize,
+    latest_cursor: Option<DashboardRecordCursor>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardAnalyticsResponse {
+    generated_at: String,
+    range: String,
+    filter_options: DashboardFilterOptions,
+    overview: DashboardOverview,
+    trend: DashboardTrendSection,
+    topology: DashboardTopologySection,
+    team_usage: DashboardTeamUsageSection,
+    system_reliability: DashboardSystemReliabilitySection,
+    model_router: DashboardModelRouterSection,
+    records_meta: DashboardRecordsMeta,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardRecordsResponse {
+    data: Vec<DashboardUsageRecord>,
+    total: usize,
+    limit: usize,
+    offset: usize,
+    latest_cursor: Option<DashboardRecordCursor>,
+    new_records: usize,
+}
+
+#[derive(Default)]
+struct TrendAccumulator {
+    label: String,
+    requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    error_count: i64,
+    latency_sum: f64,
+    latency_count: i64,
+}
+
+fn dashboard_window(range: Option<&str>) -> DashboardWindow {
+    let now = Local::now().naive_local();
+    let (range_key, bucket, duration) = match range.unwrap_or("24h") {
+        "1h" => ("1h", DashboardBucket::Hour, ChronoDuration::hours(1)),
+        "7d" => ("7d", DashboardBucket::Day, ChronoDuration::days(7)),
+        "30d" => ("30d", DashboardBucket::Day, ChronoDuration::days(30)),
+        _ => ("24h", DashboardBucket::Hour, ChronoDuration::hours(24)),
+    };
+    let current_start = now - duration;
+    let previous_end = current_start - ChronoDuration::seconds(1);
+    let previous_start = previous_end - duration + ChronoDuration::seconds(1);
+
+    DashboardWindow {
+        range: range_key.to_string(),
+        bucket,
+        current_start,
+        current_end: now,
+        previous_start,
+        previous_end,
+    }
+}
+
+fn format_dashboard_timestamp(value: NaiveDateTime) -> String {
+    value.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn parse_dashboard_timestamp(value: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S"))
+        .ok()
+}
+
+fn normalize_query_filter(params: &HashMap<String, String>, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && *value != "all")
+        .map(str::to_string)
+}
+
+fn build_dashboard_usage_query(
+    params: &HashMap<String, String>,
+    start: NaiveDateTime,
+    end: NaiveDateTime,
+) -> UsageRecordQuery {
+    UsageRecordQuery {
+        team_id: normalize_query_filter(params, "team_id"),
+        router: normalize_query_filter(params, "router"),
+        channel: normalize_query_filter(params, "channel"),
+        model: normalize_query_filter(params, "model"),
+        status: normalize_query_filter(params, "status"),
+        start_time: Some(format_dashboard_timestamp(start)),
+        end_time: Some(format_dashboard_timestamp(end)),
+    }
+}
+
+fn usage_record_total_tokens(record: &DashboardUsageRecord) -> i64 {
+    record.input_tokens.max(0) + record.output_tokens.max(0)
+}
+
+fn usage_record_is_error(record: &DashboardUsageRecord) -> bool {
+    matches!(record.status.as_str(), "error" | "fallback_error")
+}
+
+fn percent_change(current: f64, previous: f64) -> f64 {
+    if previous.abs() < f64::EPSILON {
+        return if current.abs() < f64::EPSILON {
+            0.0
+        } else {
+            100.0
+        };
+    }
+
+    ((current - previous) / previous) * 100.0
+}
+
+fn percentile(values: &mut [f64], percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    values.sort_by(f64::total_cmp);
+    let rank = ((values.len() - 1) as f64 * percentile.clamp(0.0, 1.0)).floor() as usize;
+    values.get(rank).copied().unwrap_or(0.0)
+}
+
+fn build_filter_options(records: &[DashboardUsageRecord]) -> DashboardFilterOptions {
+    let mut teams = BTreeSet::new();
+    let mut models = BTreeSet::new();
+    let mut routers = BTreeSet::new();
+    let mut channels = BTreeSet::new();
+
+    for record in records {
+        teams.insert(record.team_id.clone());
+        models.insert(record.model.clone());
+        routers.insert(record.router.clone());
+        channels.insert(record.final_channel.clone());
+    }
+
+    DashboardFilterOptions {
+        teams: teams.into_iter().collect(),
+        models: models.into_iter().collect(),
+        routers: routers.into_iter().collect(),
+        channels: channels.into_iter().collect(),
+    }
+}
+
+fn build_overview(
+    current_records: &[DashboardUsageRecord],
+    previous_records: &[DashboardUsageRecord],
+) -> DashboardOverview {
+    let total_requests = current_records.len() as i64;
+    let input_tokens = current_records
+        .iter()
+        .map(|record| record.input_tokens.max(0))
+        .sum();
+    let output_tokens = current_records
+        .iter()
+        .map(|record| record.output_tokens.max(0))
+        .sum();
+    let total_tokens = input_tokens + output_tokens;
+    let current_errors = current_records
+        .iter()
+        .filter(|record| usage_record_is_error(record))
+        .count();
+    let success_rate = if total_requests > 0 {
+        ((total_requests - current_errors as i64) as f64 / total_requests as f64) * 100.0
+    } else {
+        0.0
+    };
+    let avg_latency_ms = {
+        let latencies = current_records
+            .iter()
+            .filter_map(|record| record.latency_ms)
+            .filter(|latency| latency.is_finite())
+            .collect::<Vec<_>>();
+        if latencies.is_empty() {
+            0.0
+        } else {
+            latencies.iter().sum::<f64>() / latencies.len() as f64
+        }
+    };
+
+    let previous_requests = previous_records.len() as f64;
+    let previous_tokens = previous_records
+        .iter()
+        .map(usage_record_total_tokens)
+        .sum::<i64>() as f64;
+    let previous_latency_values = previous_records
+        .iter()
+        .filter_map(|record| record.latency_ms)
+        .filter(|latency| latency.is_finite())
+        .collect::<Vec<_>>();
+    let previous_latency = if previous_latency_values.is_empty() {
+        0.0
+    } else {
+        previous_latency_values.iter().sum::<f64>() / previous_latency_values.len() as f64
+    };
+    let previous_errors = previous_records
+        .iter()
+        .filter(|record| usage_record_is_error(record))
+        .count() as f64;
+    let previous_success_rate = if previous_requests > 0.0 {
+        ((previous_requests - previous_errors) / previous_requests) * 100.0
+    } else {
+        0.0
+    };
+
+    DashboardOverview {
+        total_requests,
+        total_tokens,
+        input_tokens,
+        output_tokens,
+        avg_latency_ms,
+        success_rate,
+        delta: DashboardOverviewDelta {
+            total_requests: percent_change(total_requests as f64, previous_requests),
+            total_tokens: percent_change(total_tokens as f64, previous_tokens),
+            avg_latency_ms: percent_change(avg_latency_ms, previous_latency),
+            success_rate: percent_change(success_rate, previous_success_rate),
+        },
+    }
+}
+
+fn bucket_key(bucket: &DashboardBucket, timestamp: NaiveDateTime) -> String {
+    match bucket {
+        DashboardBucket::Hour => timestamp.format("%Y-%m-%d %H:00:00").to_string(),
+        DashboardBucket::Day => timestamp.format("%Y-%m-%d").to_string(),
+    }
+}
+
+fn bucket_label(bucket: &DashboardBucket, timestamp: NaiveDateTime) -> String {
+    match bucket {
+        DashboardBucket::Hour => timestamp.format("%H:%M").to_string(),
+        DashboardBucket::Day => timestamp.format("%m-%d").to_string(),
+    }
+}
+
+fn iter_bucket_points(window: &DashboardWindow) -> Vec<(String, String)> {
+    let mut current = window.current_start;
+    let step = match window.bucket {
+        DashboardBucket::Hour => ChronoDuration::hours(1),
+        DashboardBucket::Day => ChronoDuration::days(1),
+    };
+    let mut items = Vec::new();
+
+    while current <= window.current_end {
+        items.push((
+            bucket_key(&window.bucket, current),
+            bucket_label(&window.bucket, current),
+        ));
+        current += step;
+    }
+
+    items
+}
+
+fn build_trend_section(
+    current_records: &[DashboardUsageRecord],
+    window: &DashboardWindow,
+) -> DashboardTrendSection {
+    let mut buckets = BTreeMap::new();
+    for (key, label) in iter_bucket_points(window) {
+        buckets.insert(
+            key,
+            TrendAccumulator {
+                label,
+                ..TrendAccumulator::default()
+            },
+        );
+    }
+
+    for record in current_records {
+        let Some(timestamp) = parse_dashboard_timestamp(&record.timestamp) else {
+            continue;
+        };
+        let key = bucket_key(&window.bucket, timestamp);
+        let entry = buckets.entry(key).or_insert_with(|| TrendAccumulator {
+            label: bucket_label(&window.bucket, timestamp),
+            ..TrendAccumulator::default()
+        });
+        entry.requests += 1;
+        entry.input_tokens += record.input_tokens.max(0);
+        entry.output_tokens += record.output_tokens.max(0);
+        if usage_record_is_error(record) {
+            entry.error_count += 1;
+        }
+        if let Some(latency) = record.latency_ms.filter(|latency| latency.is_finite()) {
+            entry.latency_sum += latency;
+            entry.latency_count += 1;
+        }
+    }
+
+    let points = buckets
+        .into_iter()
+        .map(|(bucket, item)| {
+            let total_tokens = item.input_tokens + item.output_tokens;
+            let error_rate = if item.requests > 0 {
+                (item.error_count as f64 / item.requests as f64) * 100.0
+            } else {
+                0.0
+            };
+            let avg_latency_ms = if item.latency_count > 0 {
+                item.latency_sum / item.latency_count as f64
+            } else {
+                0.0
+            };
+
+            DashboardTrendPoint {
+                bucket,
+                label: item.label,
+                requests: item.requests,
+                input_tokens: item.input_tokens,
+                output_tokens: item.output_tokens,
+                total_tokens,
+                error_rate,
+                avg_latency_ms,
+                success_rate: if item.requests > 0 {
+                    100.0 - error_rate
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect();
+
+    DashboardTrendSection {
+        unit: match window.bucket {
+            DashboardBucket::Hour => "hour".to_string(),
+            DashboardBucket::Day => "day".to_string(),
+        },
+        points,
+    }
+}
+
+fn build_team_usage_section(records: &[DashboardUsageRecord]) -> DashboardTeamUsageSection {
+    let mut team_totals: HashMap<String, (i64, i64)> = HashMap::new();
+    let mut team_model: HashMap<(String, String), (i64, i64)> = HashMap::new();
+
+    for record in records {
+        let total_tokens = usage_record_total_tokens(record);
+        let team_entry = team_totals.entry(record.team_id.clone()).or_insert((0, 0));
+        team_entry.0 += 1;
+        team_entry.1 += total_tokens;
+
+        let model_entry = team_model
+            .entry((record.team_id.clone(), record.model.clone()))
+            .or_insert((0, 0));
+        model_entry.0 += 1;
+        model_entry.1 += total_tokens;
+    }
+
+    let mut leaderboard = team_totals
+        .into_iter()
+        .map(
+            |(team_id, (total_requests, total_tokens))| DashboardTeamLeaderboardItem {
+                team_id,
+                total_requests,
+                total_tokens,
+            },
+        )
+        .collect::<Vec<_>>();
+    leaderboard.sort_by(|left, right| {
+        right
+            .total_tokens
+            .cmp(&left.total_tokens)
+            .then_with(|| right.total_requests.cmp(&left.total_requests))
+    });
+    leaderboard.truncate(5);
+
+    let mut model_usage = team_model
+        .into_iter()
+        .map(
+            |((team_id, model), (total_requests, total_tokens))| DashboardTeamModelUsageItem {
+                team_id,
+                model,
+                total_requests,
+                total_tokens,
+            },
+        )
+        .collect::<Vec<_>>();
+    model_usage.sort_by(|left, right| {
+        left.team_id
+            .cmp(&right.team_id)
+            .then_with(|| right.total_tokens.cmp(&left.total_tokens))
+    });
+
+    DashboardTeamUsageSection {
+        leaderboard,
+        model_usage,
+    }
+}
+
+fn build_system_reliability_section(
+    records: &[DashboardUsageRecord],
+    trend: &DashboardTrendSection,
+) -> DashboardSystemReliabilitySection {
+    let mut channel_latency: HashMap<String, Vec<f64>> = HashMap::new();
+
+    for record in records {
+        if let Some(latency) = record.latency_ms.filter(|latency| latency.is_finite()) {
+            channel_latency
+                .entry(record.final_channel.clone())
+                .or_default()
+                .push(latency);
+        }
+    }
+
+    let mut channel_items = channel_latency
+        .into_iter()
+        .map(|(channel, mut latencies)| {
+            let total_requests = latencies.len() as i64;
+            let avg_latency_ms = if latencies.is_empty() {
+                0.0
+            } else {
+                latencies.iter().sum::<f64>() / latencies.len() as f64
+            };
+            let p95_latency_ms = percentile(&mut latencies, 0.95);
+            DashboardChannelLatencyItem {
+                channel,
+                total_requests,
+                avg_latency_ms,
+                p95_latency_ms,
+            }
+        })
+        .collect::<Vec<_>>();
+    channel_items.sort_by(|left, right| {
+        right
+            .avg_latency_ms
+            .total_cmp(&left.avg_latency_ms)
+            .then_with(|| left.channel.cmp(&right.channel))
+    });
+
+    DashboardSystemReliabilitySection {
+        error_rate_trend: trend.points.clone(),
+        channel_latency: channel_items,
+    }
+}
+
+fn build_model_router_section(records: &[DashboardUsageRecord]) -> DashboardModelRouterSection {
+    let total_requests = records.len() as f64;
+    let mut model_map: HashMap<String, (i64, i64)> = HashMap::new();
+    let mut router_map: HashMap<String, (i64, i64)> = HashMap::new();
+    let mut channel_map: HashMap<String, (i64, i64)> = HashMap::new();
+
+    for record in records {
+        let total_tokens = usage_record_total_tokens(record);
+        model_map
+            .entry(record.model.clone())
+            .and_modify(|entry| {
+                entry.0 += 1;
+                entry.1 += total_tokens;
+            })
+            .or_insert((1, total_tokens));
+        router_map
+            .entry(record.router.clone())
+            .and_modify(|entry| {
+                entry.0 += 1;
+                entry.1 += total_tokens;
+            })
+            .or_insert((1, total_tokens));
+        channel_map
+            .entry(record.final_channel.clone())
+            .and_modify(|entry| {
+                entry.0 += 1;
+                entry.1 += total_tokens;
+            })
+            .or_insert((1, total_tokens));
+    }
+
+    let to_items = |map: HashMap<String, (i64, i64)>| {
+        let mut items = map
+            .into_iter()
+            .map(|(name, (requests, total_tokens))| DashboardShareItem {
+                name,
+                requests,
+                total_tokens,
+                percentage: if total_requests > 0.0 {
+                    (requests as f64 / total_requests) * 100.0
+                } else {
+                    0.0
+                },
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|left, right| right.requests.cmp(&left.requests));
+        items
+    };
+
+    DashboardModelRouterSection {
+        model_share: to_items(model_map),
+        router_summary: to_items(router_map),
+        channel_summary: to_items(channel_map),
+    }
+}
+
+fn build_topology_section(records: &[DashboardUsageRecord]) -> DashboardTopologySection {
+    let mut flow_map: HashMap<(String, String, String, String), (i64, i64)> = HashMap::new();
+    for record in records {
+        let key = (
+            record.team_id.clone(),
+            record.router.clone(),
+            record.final_channel.clone(),
+            record.model.clone(),
+        );
+        let total_tokens = usage_record_total_tokens(record);
+        flow_map
+            .entry(key)
+            .and_modify(|entry| {
+                entry.0 += 1;
+                entry.1 += total_tokens;
+            })
+            .or_insert((1, total_tokens));
+    }
+
+    let mut flows = flow_map
+        .into_iter()
+        .map(
+            |((team_id, router, channel, model), (requests, total_tokens))| DashboardFlowSummary {
+                team_id,
+                router,
+                channel,
+                model,
+                requests,
+                total_tokens,
+            },
+        )
+        .collect::<Vec<_>>();
+    flows.sort_by(|left, right| right.requests.cmp(&left.requests));
+
+    let mut nodes = Vec::new();
+    let mut node_index: HashMap<(String, String), usize> = HashMap::new();
+    let mut ensure_node = |name: &str, kind: &str| -> usize {
+        let key = (kind.to_string(), name.to_string());
+        if let Some(index) = node_index.get(&key) {
+            return *index;
+        }
+
+        let index = nodes.len();
+        nodes.push(DashboardTopologyNode {
+            name: name.to_string(),
+            kind: kind.to_string(),
+        });
+        node_index.insert(key, index);
+        index
+    };
+
+    let mut link_values: HashMap<(usize, usize), i64> = HashMap::new();
+    for flow in &flows {
+        let team_idx = ensure_node(&flow.team_id, "team");
+        let router_idx = ensure_node(&flow.router, "router");
+        let channel_idx = ensure_node(&flow.channel, "channel");
+        let model_idx = ensure_node(&flow.model, "model");
+
+        for pair in [
+            (team_idx, router_idx),
+            (router_idx, channel_idx),
+            (channel_idx, model_idx),
+        ] {
+            link_values
+                .entry(pair)
+                .and_modify(|value| *value += flow.requests)
+                .or_insert(flow.requests);
+        }
+    }
+
+    let links = link_values
+        .into_iter()
+        .map(|((source, target), value)| DashboardTopologyLink {
+            source,
+            target,
+            value,
+        })
+        .collect::<Vec<_>>();
+
+    DashboardTopologySection {
+        nodes,
+        links,
+        flows,
+        render_mode: "flow-summary".to_string(),
+    }
+}
+
+fn latest_cursor(records: &[DashboardUsageRecord]) -> Option<DashboardRecordCursor> {
+    records.first().map(|record| DashboardRecordCursor {
+        id: record.id,
+        timestamp: record.timestamp.clone(),
+    })
+}
+
+fn count_new_records(
+    records: &[DashboardUsageRecord],
+    since_timestamp: Option<&str>,
+    since_id: Option<i64>,
+) -> usize {
+    let (Some(since_timestamp), Some(since_id)) = (since_timestamp, since_id) else {
+        return 0;
+    };
+
+    let mut count = 0;
+    for record in records {
+        if record.timestamp == since_timestamp && record.id == since_id {
+            break;
+        }
+        count += 1;
+    }
+
+    count
+}
+
+async fn dashboard_analytics_api_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Response<Body> {
+    let window = dashboard_window(params.get("range").map(String::as_str));
+    let query = build_dashboard_usage_query(&params, window.current_start, window.current_end);
+    let previous_query =
+        build_dashboard_usage_query(&params, window.previous_start, window.previous_end);
+    let options_query = UsageRecordQuery {
+        start_time: Some(format_dashboard_timestamp(window.current_start)),
+        end_time: Some(format_dashboard_timestamp(window.current_end)),
+        ..UsageRecordQuery::default()
+    };
+
+    let current_records = match state.database.get_usage_records_for_analytics(&query) {
+        Ok(records) => records,
+        Err(err) => {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(err.to_string()))
+                .unwrap();
+        }
+    };
+    let previous_records = match state
+        .database
+        .get_usage_records_for_analytics(&previous_query)
+    {
+        Ok(records) => records,
+        Err(err) => {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(err.to_string()))
+                .unwrap();
+        }
+    };
+    let option_records = match state
+        .database
+        .get_usage_records_for_analytics(&options_query)
+    {
+        Ok(records) => records,
+        Err(err) => {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(err.to_string()))
+                .unwrap();
+        }
+    };
+
+    let trend = build_trend_section(&current_records, &window);
+    let response = DashboardAnalyticsResponse {
+        generated_at: format_dashboard_timestamp(Local::now().naive_local()),
+        range: window.range,
+        filter_options: build_filter_options(&option_records),
+        overview: build_overview(&current_records, &previous_records),
+        topology: build_topology_section(&current_records),
+        team_usage: build_team_usage_section(&current_records),
+        system_reliability: build_system_reliability_section(&current_records, &trend),
+        model_router: build_model_router_section(&current_records),
+        records_meta: DashboardRecordsMeta {
+            total: current_records.len(),
+            latest_cursor: latest_cursor(&current_records),
+        },
+        trend,
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&response).unwrap_or_default(),
+        ))
+        .unwrap()
+}
+
+async fn dashboard_records_api_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Response<Body> {
+    let window = dashboard_window(params.get("range").map(String::as_str));
+    let query = build_dashboard_usage_query(&params, window.current_start, window.current_end);
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(20)
+        .min(100);
+    let offset = params
+        .get("offset")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let since_timestamp = params.get("since_timestamp").map(String::as_str);
+    let since_id = params
+        .get("since_id")
+        .and_then(|value| value.parse::<i64>().ok());
+
+    match state.database.get_usage_records_for_analytics(&query) {
+        Ok(records) => {
+            let total = records.len();
+            let latest = latest_cursor(&records);
+            let new_records = count_new_records(&records, since_timestamp, since_id);
+            let data = records
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .collect::<Vec<_>>();
+            let payload = DashboardRecordsResponse {
+                data,
+                total,
+                limit,
+                offset,
+                latest_cursor: latest,
+                new_records,
+            };
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&payload).unwrap_or_default(),
+                ))
+                .unwrap()
+        }
+        Err(err) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(err.to_string()))
+            .unwrap(),
+    }
+}
+
 async fn handle_openai(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response<Body> {
     process_request(state, req, RouteKind::Openai, None, None).await
 }
@@ -937,6 +1832,40 @@ async fn process_request(
         .unwrap_or_else(|| "global".to_string());
     let config = state.config.read().unwrap().clone();
 
+    // 2.5. PII Masking (AC6) - Process request body before forwarding
+    let bytes = if let Some(ref compliance_config) = config.compliance
+        && compliance_config.enabled
+    {
+        let processor = PiiProcessor::new(&config.compliance);
+        let body_str = String::from_utf8_lossy(&bytes);
+
+        // Check if request should be blocked
+        if let Some(detection) = processor.should_block(&body_str) {
+            tracing::warn!(
+                "Request Blocked: PII detected (rule={}, action=block)",
+                detection.rule_name
+            );
+            return error_response(
+                StatusCode::FORBIDDEN,
+                &format!("Request blocked: {} detected", detection.rule_name),
+            );
+        }
+
+        // Process and mask PII
+        let (processed_body, detections) = process_json_content(&processor, &body_str);
+
+        if !detections.is_empty() {
+            tracing::info!(
+                "PII Masking Applied: {} detections in request",
+                detections.len()
+            );
+        }
+
+        Bytes::from(processed_body)
+    } else {
+        bytes
+    };
+
     // 2. Resolve Router
     let router_name = if let Some(name) = router_name_override {
         name
@@ -1046,18 +1975,29 @@ async fn process_request(
 
     // 3. Resolve Channels
     let mut channels = Vec::new();
+    let primary_selection = state
+        .selector
+        .select_channel_with_rule(router, model_name_str);
+    let mut matched_rule = primary_selection
+        .as_ref()
+        .and_then(|selection| selection.matched_rule.clone());
 
-    if let Some(ch_name) = state.selector.select_channel(router, model_name_str)
+    if let Some(selection) = primary_selection.as_ref()
+        && let Some(ch_name) = Some(selection.channel_name.as_str())
         && let Some(ch) = config.channels.iter().find(|c| c.name == ch_name)
     {
         channels.push(ch);
         tracing::info!(
-            "Channel Resolved: {} (strategy={}, model={})",
+            "Channel Resolved: {} (strategy={}, model={}, matched_rule={})",
             ch.name,
             router.strategy,
-            model_name_str
+            model_name_str,
+            selection.matched_rule.as_deref().unwrap_or("n/a")
         );
     } else {
+        if matched_rule.is_none() {
+            matched_rule = Some("fallback".to_string());
+        }
         tracing::info!(
             "Fallback Triggered: No rule matched for model '{}' or all primary channels failed. Trying fallback channels.",
             model_name_str
@@ -1093,6 +2033,7 @@ async fn process_request(
             request_id.as_deref(),
             &team_id,
             &router_name,
+            matched_rule.as_deref(),
             "unresolved",
             model_name_str,
             None,
@@ -1232,6 +2173,7 @@ async fn process_request(
                             request_id.clone(),
                             team_id.clone(),
                             router_name.clone(),
+                            matched_rule.clone(),
                             channel.name.clone(),
                             model_name_str.to_string(),
                             state.usage_logger.clone(),
@@ -1305,6 +2247,7 @@ async fn process_request(
                             request_id.as_deref(),
                             &team_id,
                             &router_name,
+                            matched_rule.as_deref(),
                             &channel.name,
                             model_name_str,
                             Some(elapsed),
@@ -1392,6 +2335,7 @@ async fn process_request(
         request_id.as_deref(),
         &team_id,
         &router_name,
+        matched_rule.as_deref(),
         last_channel,
         model_name_str,
         None,
@@ -1617,6 +2561,41 @@ mod tests {
 
         let uri: Uri = "/dashboard".parse().unwrap();
         assert_eq!(dashboard_redirect_target(&uri), "/dashboard/");
+    }
+
+    #[test]
+    fn topology_keeps_same_name_in_different_dimensions_separate() {
+        let records = vec![DashboardUsageRecord {
+            id: 1,
+            timestamp: "2026-03-12 12:00:00".to_string(),
+            request_id: Some("req-1".to_string()),
+            team_id: "default".to_string(),
+            router: "default".to_string(),
+            matched_rule: Some("*".to_string()),
+            final_channel: "openai".to_string(),
+            channel: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            input_tokens: 10,
+            output_tokens: 20,
+            latency_ms: Some(100.0),
+            fallback_triggered: false,
+            status: "success".to_string(),
+            status_code: Some(200),
+            error_message: None,
+            provider_trace_id: None,
+            provider_error_body: None,
+        }];
+
+        let topology = build_topology_section(&records);
+        let default_nodes = topology
+            .nodes
+            .iter()
+            .filter(|node| node.name == "default")
+            .collect::<Vec<_>>();
+
+        assert_eq!(default_nodes.len(), 2);
+        assert!(default_nodes.iter().any(|node| node.kind == "team"));
+        assert!(default_nodes.iter().any(|node| node.kind == "router"));
     }
 
     #[tokio::test]
