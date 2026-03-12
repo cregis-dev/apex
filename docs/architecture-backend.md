@@ -119,12 +119,12 @@ pub struct Config {
 | OpenAI | OpenAI | https://api.openai.com |
 | Anthropic | Anthropic | https://api.anthropic.com |
 | Gemini | OpenAI | https://generativelanguage.googleapis.com |
-| DeepSeek | OpenAI | https://api.deepseek.com |
-| Moonshot | OpenAI | https://api.moonshot.cn |
+| DeepSeek | Dual | https://api.deepseek.com |
+| Moonshot | Dual | https://api.moonshot.cn |
 | Minimax | Dual | https://api.minimax.io |
-| Ollama | OpenAI | http://localhost:11434 |
+| Ollama | Dual | http://localhost:11434 |
 | Jina | OpenAI | https://api.jina.ai |
-| OpenRouter | OpenAI | https://openrouter.ai |
+| OpenRouter | Dual | https://openrouter.ai |
 
 **协议转换**:
 - OpenAI → Anthropic: `convert_openai_to_anthropic()`

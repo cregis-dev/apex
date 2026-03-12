@@ -302,16 +302,7 @@ impl Database {
             "SELECT id, timestamp, request_id, team_id, router, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body FROM usage_records WHERE 1=1",
         );
         sql.push_str(&where_clause);
-        sql.push_str(
-            " ORDER BY CASE
-                WHEN status = 'fallback_error' THEN 0
-                WHEN status = 'error' THEN 1
-                WHEN status = 'fallback' THEN 2
-                ELSE 3
-              END,
-              timestamp DESC
-              LIMIT ? OFFSET ?",
-        );
+        sql.push_str(" ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?");
 
         let mut params_vec = count_params_vec;
         params_vec.push(Box::new(limit));
@@ -345,6 +336,91 @@ impl Database {
             .collect();
 
         Ok((records, total))
+    }
+
+    pub fn get_usage_records_for_analytics(
+        &self,
+        team_id: Option<&str>,
+        router: Option<&str>,
+        channel: Option<&str>,
+        model: Option<&str>,
+        status: Option<&str>,
+        start_time: Option<&str>,
+        end_time: Option<&str>,
+    ) -> Result<Vec<UsageRecord>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let mut sql = String::from(
+            "SELECT id, timestamp, request_id, team_id, router, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body FROM usage_records WHERE 1=1",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(team_id) = team_id {
+            sql.push_str(" AND team_id = ?");
+            params_vec.push(Box::new(team_id.to_string()));
+        }
+        if let Some(router) = router {
+            sql.push_str(" AND router = ?");
+            params_vec.push(Box::new(router.to_string()));
+        }
+        if let Some(channel) = channel {
+            sql.push_str(" AND channel = ?");
+            params_vec.push(Box::new(channel.to_string()));
+        }
+        if let Some(model) = model {
+            sql.push_str(" AND model = ?");
+            params_vec.push(Box::new(model.to_string()));
+        }
+        if let Some(status) = status {
+            match status {
+                "errors" => sql.push_str(" AND status IN ('error', 'fallback_error')"),
+                "fallbacks" => sql.push_str(" AND fallback_triggered = 1"),
+                _ => {
+                    sql.push_str(" AND status = ?");
+                    params_vec.push(Box::new(status.to_string()));
+                }
+            }
+        }
+        if let Some(start_time) = start_time {
+            sql.push_str(" AND timestamp >= ?");
+            params_vec.push(Box::new(start_time.to_string()));
+        }
+        if let Some(end_time) = end_time {
+            sql.push_str(" AND timestamp <= ?");
+            params_vec.push(Box::new(end_time.to_string()));
+        }
+
+        sql.push_str(" ORDER BY timestamp DESC");
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let records = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                Ok(UsageRecord {
+                    id: row.get(0)?,
+                    timestamp: row.get(1)?,
+                    request_id: row.get(2)?,
+                    team_id: row.get(3)?,
+                    router: row.get(4)?,
+                    channel: row.get(5)?,
+                    model: row.get(6)?,
+                    input_tokens: row.get(7)?,
+                    output_tokens: row.get(8)?,
+                    latency_ms: row.get(9)?,
+                    fallback_triggered: row.get::<_, i64>(10)? > 0,
+                    status: row.get(11)?,
+                    status_code: row.get(12)?,
+                    error_message: row.get(13)?,
+                    provider_trace_id: row.get(14)?,
+                    provider_error_body: row.get(15)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(records)
     }
 
     #[allow(dead_code)]
@@ -727,4 +803,67 @@ pub struct RankingItem {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub percentage: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use rusqlite::params;
+    use tempfile::tempdir;
+
+    #[test]
+    fn usage_records_are_sorted_by_latest_timestamp_first() {
+        let dir = tempdir().expect("create temp dir");
+        let db = Database::new(Some(dir.path().to_string_lossy().into_owned())).expect("create db");
+
+        {
+            let conn = db.conn.lock().expect("lock db");
+            conn.execute(
+                "INSERT INTO usage_records (timestamp, request_id, team_id, router, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    "2026-03-10 09:00:00",
+                    "req-error",
+                    "team-a",
+                    "primary",
+                    "chat",
+                    "gpt-4o",
+                    10,
+                    20,
+                    123.0_f64,
+                    0,
+                    "error"
+                ],
+            )
+            .expect("insert older error record");
+
+            conn.execute(
+                "INSERT INTO usage_records (timestamp, request_id, team_id, router, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    "2026-03-11 09:00:00",
+                    "req-success",
+                    "team-a",
+                    "primary",
+                    "chat",
+                    "gpt-4o",
+                    10,
+                    20,
+                    100.0_f64,
+                    0,
+                    "success"
+                ],
+            )
+            .expect("insert newer success record");
+        }
+
+        let (records, total) = db
+            .get_usage_records(None, None, None, None, None, None, None, 20, 0)
+            .expect("query usage records");
+
+        assert_eq!(total, 2);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].request_id.as_deref(), Some("req-success"));
+        assert_eq!(records[1].request_id.as_deref(), Some("req-error"));
+    }
 }

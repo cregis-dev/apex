@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AlertCircle, Clock3, Download, RefreshCw, X } from "lucide-react";
 import {
@@ -142,7 +142,11 @@ export default function DashboardClient() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const [loading, setLoading] = useState(true);
+  const [bootstrapping, setBootstrapping] = useState(true);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [dashboardReady, setDashboardReady] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
   const [trends, setTrends] = useState<TrendData[]>([]);
   const [usage, setUsage] = useState<UsageRecord[]>([]);
@@ -167,9 +171,13 @@ export default function DashboardClient() {
   const [authInput, setAuthInput] = useState("");
   const [authMessage, setAuthMessage] = useState("");
   const [requestError, setRequestError] = useState("");
+  const [exportError, setExportError] = useState("");
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<UsageRecord | null>(null);
   const [drilldown, setDrilldown] = useState<DrilldownState>(null);
+  const [exporting, setExporting] = useState(false);
+  const usageEffectInitialized = useRef(false);
+  const trendsEffectInitialized = useRef(false);
 
   const apiBaseUrl = useMemo(() => {
     if (typeof window === "undefined") {
@@ -287,16 +295,25 @@ export default function DashboardClient() {
     localStorage.removeItem(API_KEY_STORAGE_KEY);
     setAuthToken("");
     setAuthInput("");
+    setBootstrapping(false);
+    setAuthLoading(false);
+    setDashboardLoading(false);
+    setDashboardReady(false);
+    setRefreshing(false);
+    setTableLoading(false);
     setMetrics(null);
     setTrends([]);
     setUsage([]);
     setTotal(0);
     setRequestError("");
+    setExportError("");
     setAuthMessage(message);
     setLastUpdated(null);
     setSelectedRecord(null);
     setDrilldown(null);
-    setLoading(false);
+    setExporting(false);
+    usageEffectInitialized.current = false;
+    trendsEffectInitialized.current = false;
   }, []);
 
   useEffect(() => {
@@ -331,28 +348,25 @@ export default function DashboardClient() {
 
     if (queryToken) {
       localStorage.setItem(API_KEY_STORAGE_KEY, queryToken);
+
+      if (typeof window !== "undefined") {
+        const params = new URLSearchParams(searchParams.toString());
+        params.delete("auth_token");
+        const query = params.toString();
+        const nextPath = query ? `${normalizeDashboardPath(pathname)}?${query}` : normalizeDashboardPath(pathname);
+        window.history.replaceState({}, "", nextPath);
+      }
+    }
+
+    if (token) {
+      setDashboardLoading(true);
+      setDashboardReady(false);
     }
 
     setAuthInput(token);
     setAuthToken(token);
-    setLoading(false);
+    setBootstrapping(false);
   }, [pathname, router, searchParams]);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !authToken) {
-      return;
-    }
-
-    const url = new URL(window.location.href);
-    if (!url.searchParams.has("auth_token")) {
-      return;
-    }
-
-    url.searchParams.delete("auth_token");
-    const query = url.searchParams.toString();
-    const nextPath = query ? `${normalizeDashboardPath(pathname)}?${query}` : normalizeDashboardPath(pathname);
-    window.history.replaceState({}, "", nextPath);
-  }, [authToken, pathname, searchParams]);
 
   const getDateRange = useCallback(() => {
     const today = getToday();
@@ -379,6 +393,94 @@ export default function DashboardClient() {
 
   const buildAuthHeaders = useCallback(() => ({ Authorization: `Bearer ${authToken}` }), [authToken]);
 
+  const buildUsageParams = useCallback(
+    (limit: number, offset: number) => {
+      const { start_date, end_date } = getDateRange();
+      const params = new URLSearchParams();
+      if (filters.team_id) params.set("team_id", filters.team_id);
+      if (filters.router) params.set("router", filters.router);
+      if (filters.channel) params.set("channel", filters.channel);
+      if (filters.model) params.set("model", filters.model);
+      if (filters.status) params.set("status", filters.status);
+      params.set("start_date", start_date);
+      params.set("end_date", end_date);
+      params.set("limit", String(limit));
+      params.set("offset", String(offset));
+      return params;
+    },
+    [filters, getDateRange]
+  );
+
+  const csvEscape = (value: string | number | boolean | null | undefined) => {
+    const normalized = value == null ? "" : String(value);
+    if (/[",\n]/.test(normalized)) {
+      return `"${normalized.replace(/"/g, '""')}"`;
+    }
+
+    return normalized;
+  };
+
+  const buildUsageCsv = useCallback(
+    (records: UsageRecord[]) => {
+      const headers = [
+        "timestamp",
+        "request_id",
+        "team_id",
+        "router",
+        "channel",
+        "model",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "latency_ms",
+        "status",
+        "fallback_triggered",
+        "status_code",
+        "error_message",
+        "provider_trace_id",
+        "provider_error_body",
+      ];
+
+      const rows = records.map((record) =>
+        [
+          record.timestamp,
+          record.request_id ?? "",
+          record.team_id,
+          record.router,
+          record.channel,
+          record.model,
+          record.input_tokens,
+          record.output_tokens,
+          record.input_tokens + record.output_tokens,
+          record.latency_ms ?? "",
+          record.status,
+          record.fallback_triggered,
+          record.status_code ?? "",
+          record.error_message ?? "",
+          record.provider_trace_id ?? "",
+          record.provider_error_body ?? "",
+        ]
+          .map(csvEscape)
+          .join(",")
+      );
+
+      return [headers.join(","), ...rows].join("\n");
+    },
+    []
+  );
+
+  const downloadCsv = useCallback((content: string) => {
+    const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `apex-usage-report-${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }, []);
+
   const fetchMetrics = useCallback(async () => {
     const res = await fetch(getApiUrl("/api/metrics"), {
       headers: buildAuthHeaders(),
@@ -386,7 +488,7 @@ export default function DashboardClient() {
 
     if (res.status === 401 || res.status === 403) {
       clearAuth("Invalid API Key");
-      return false;
+      throw new Error("AUTH_INVALID");
     }
 
     if (!res.ok) {
@@ -410,36 +512,39 @@ export default function DashboardClient() {
       headers: buildAuthHeaders(),
     });
 
+    if (res.status === 401 || res.status === 403) {
+      clearAuth("Invalid API Key");
+      throw new Error("AUTH_INVALID");
+    }
+
     if (!res.ok) {
-      return;
+      throw new Error(`Trends request failed with status ${res.status}`);
     }
 
     const data: TrendResponse = await res.json();
     setTrends(data.data);
-  }, [buildAuthHeaders, getApiUrl, getDateRange]);
+  }, [buildAuthHeaders, clearAuth, getApiUrl, getDateRange]);
 
-  const fetchUsage = useCallback(async () => {
-    setTableLoading(true);
+  const fetchUsage = useCallback(async (options?: { background?: boolean }) => {
+    const background = options?.background ?? false;
+    if (!background) {
+      setTableLoading(true);
+    }
 
     try {
-      const { start_date, end_date } = getDateRange();
-      const params = new URLSearchParams();
-      if (filters.team_id) params.set("team_id", filters.team_id);
-      if (filters.router) params.set("router", filters.router);
-      if (filters.channel) params.set("channel", filters.channel);
-      if (filters.model) params.set("model", filters.model);
-      if (filters.status) params.set("status", filters.status);
-      params.set("start_date", start_date);
-      params.set("end_date", end_date);
-      params.set("limit", String(pagination.limit));
-      params.set("offset", String(pagination.offset));
+      const params = buildUsageParams(pagination.limit, pagination.offset);
 
       const res = await fetch(getApiUrl(`/api/usage?${params}`), {
         headers: buildAuthHeaders(),
       });
 
+      if (res.status === 401 || res.status === 403) {
+        clearAuth("Invalid API Key");
+        throw new Error("AUTH_INVALID");
+      }
+
       if (!res.ok) {
-        return;
+        throw new Error(`Usage request failed with status ${res.status}`);
       }
 
       const data: UsageResponse = await res.json();
@@ -449,12 +554,23 @@ export default function DashboardClient() {
         setSelectedRecord(null);
       }
     } finally {
-      setTableLoading(false);
+      if (!background) {
+        setTableLoading(false);
+      }
     }
-  }, [buildAuthHeaders, filters, getApiUrl, getDateRange, pagination.limit, pagination.offset]);
+  }, [buildAuthHeaders, buildUsageParams, clearAuth, getApiUrl, pagination.limit, pagination.offset]);
 
-  const loadDashboardData = useCallback(async () => {
-    setLoading(true);
+  const loadDashboardData = useCallback(async (options?: { initial?: boolean }) => {
+    const initial = options?.initial ?? false;
+    let authInvalid = false;
+
+    if (initial) {
+      setDashboardLoading(true);
+      setDashboardReady(false);
+    } else {
+      setRefreshing(true);
+    }
+
     setAuthMessage("");
     setRequestError("");
 
@@ -464,12 +580,26 @@ export default function DashboardClient() {
         return;
       }
 
-      await Promise.all([fetchTrends(), fetchUsage()]);
+      await Promise.all([fetchTrends(), fetchUsage({ background: true })]);
       setLastUpdated(new Date().toLocaleTimeString());
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === "AUTH_INVALID") {
+        authInvalid = true;
+        return;
+      }
+
       setRequestError("Unable to fetch the latest dashboard data right now.");
     } finally {
-      setLoading(false);
+      if (authInvalid) {
+        return;
+      }
+
+      if (initial) {
+        setDashboardLoading(false);
+        setDashboardReady(true);
+      } else {
+        setRefreshing(false);
+      }
     }
   }, [fetchMetrics, fetchTrends, fetchUsage]);
 
@@ -481,7 +611,7 @@ export default function DashboardClient() {
         return;
       }
 
-      setLoading(true);
+      setAuthLoading(true);
       setAuthMessage("");
       setRequestError("");
 
@@ -501,12 +631,14 @@ export default function DashboardClient() {
         }
 
         localStorage.setItem(API_KEY_STORAGE_KEY, trimmedToken);
+        setDashboardLoading(true);
+        setDashboardReady(false);
         setAuthInput(trimmedToken);
         setAuthToken(trimmedToken);
       } catch {
         setRequestError("Dashboard API is unavailable right now.");
       } finally {
-        setLoading(false);
+        setAuthLoading(false);
       }
     },
     [getApiUrl]
@@ -516,6 +648,53 @@ export default function DashboardClient() {
     event.preventDefault();
     await validateAndSetToken(authInput);
   };
+
+  const handleExportCsv = useCallback(async () => {
+    let authInvalid = false;
+    setExporting(true);
+    setExportError("");
+
+    try {
+      const exportLimit = 100;
+      let nextOffset = 0;
+      let totalRecords = 0;
+      const allRecords: UsageRecord[] = [];
+
+      do {
+        const params = buildUsageParams(exportLimit, nextOffset);
+        const res = await fetch(getApiUrl(`/api/usage?${params}`), {
+          headers: buildAuthHeaders(),
+        });
+
+        if (res.status === 401 || res.status === 403) {
+          clearAuth("Invalid API Key");
+          authInvalid = true;
+          return;
+        }
+
+        if (!res.ok) {
+          throw new Error(`Export request failed with status ${res.status}`);
+        }
+
+        const data: UsageResponse = await res.json();
+        allRecords.push(...data.data);
+        totalRecords = data.total;
+        nextOffset += data.data.length;
+
+        if (data.data.length === 0) {
+          break;
+        }
+      } while (nextOffset < totalRecords);
+
+      downloadCsv(buildUsageCsv(allRecords));
+    } catch {
+      setExportError("Unable to export the current filtered usage records.");
+    } finally {
+      if (!authInvalid) {
+        setExporting(false);
+      }
+    }
+  }, [buildAuthHeaders, buildUsageCsv, buildUsageParams, clearAuth, downloadCsv, getApiUrl]);
 
   const updateFilter = (key: keyof typeof filters, value: string) => {
     const nextFilters = { ...filters, [key]: value as StatusFilter };
@@ -569,7 +748,7 @@ export default function DashboardClient() {
       return;
     }
 
-    document.getElementById("usage-records")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    document.getElementById("usage-records-table")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, []);
 
   const applyUsageDrilldown = useCallback(
@@ -671,24 +850,36 @@ export default function DashboardClient() {
       return;
     }
 
-    void loadDashboardData();
+    usageEffectInitialized.current = false;
+    trendsEffectInitialized.current = false;
+    void loadDashboardData({ initial: true });
   }, [authToken, loadDashboardData]);
 
   useEffect(() => {
-    if (!authToken || loading) {
+    if (!authToken || !dashboardReady) {
+      return;
+    }
+
+    if (!usageEffectInitialized.current) {
+      usageEffectInitialized.current = true;
       return;
     }
 
     void fetchUsage();
-  }, [authToken, fetchUsage, loading, pagination.offset, pagination.limit, filters]);
+  }, [authToken, dashboardReady, fetchUsage]);
 
   useEffect(() => {
-    if (!authToken || loading) {
+    if (!authToken || !dashboardReady) {
+      return;
+    }
+
+    if (!trendsEffectInitialized.current) {
+      trendsEffectInitialized.current = true;
       return;
     }
 
     void fetchTrends();
-  }, [authToken, customEndDate, customStartDate, fetchTrends, loading, timeRange]);
+  }, [authToken, dashboardReady, fetchTrends]);
 
   useEffect(() => {
     if (!authToken || !autoRefresh || timeRange === "custom") {
@@ -733,8 +924,8 @@ export default function DashboardClient() {
                   {requestError ? (
                     <p className="text-sm text-amber-700">{requestError}</p>
                   ) : null}
-                  <Button type="submit" className="w-full" disabled={loading}>
-                    {loading ? "Connecting..." : "Open Dashboard"}
+                  <Button type="submit" className="w-full" disabled={bootstrapping || authLoading}>
+                    {authLoading ? "Connecting..." : "Open Dashboard"}
                   </Button>
                 </form>
               </CardContent>
@@ -745,7 +936,7 @@ export default function DashboardClient() {
     );
   }
 
-  if (loading) {
+  if (dashboardLoading) {
     return (
       <div className="min-h-screen bg-slate-950 px-4 py-8 text-slate-50">
         <div className="mx-auto max-w-7xl space-y-6">
@@ -796,15 +987,24 @@ export default function DashboardClient() {
                 </span>
                 <span className="inline-flex items-center gap-2">
                   <Clock3 className="size-4 text-slate-400" />
-                  {lastUpdated ? `Last updated ${lastUpdated}` : "Waiting for first successful sync"}
+                  {refreshing
+                    ? "Refreshing dashboard data..."
+                    : lastUpdated
+                      ? `Last updated ${lastUpdated}`
+                      : "Waiting for first successful sync"}
                 </span>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" onClick={() => void loadDashboardData()} className="border-white/15 bg-white/5 text-slate-100 hover:bg-white/10">
-                <RefreshCw className="size-4" />
-                Refresh
+              <Button
+                variant="outline"
+                onClick={() => void loadDashboardData()}
+                disabled={refreshing}
+                className="border-white/15 bg-white/5 text-slate-100 hover:bg-white/10"
+              >
+                <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
+                {refreshing ? "Refreshing..." : "Refresh"}
               </Button>
               <Button variant="outline" onClick={handleDisconnect} className="border-white/15 bg-white/5 text-slate-100 hover:bg-white/10">
                 Disconnect
@@ -858,9 +1058,14 @@ export default function DashboardClient() {
                 />
                 Auto refresh {autoRefresh ? "On" : "Off"}
               </button>
-              <Button variant="outline" className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10">
+              <Button
+                variant="outline"
+                onClick={() => void handleExportCsv()}
+                disabled={exporting}
+                className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10"
+              >
                 <Download className="size-4" />
-                Export CSV
+                {exporting ? "Exporting..." : "Export CSV"}
               </Button>
             </div>
           </div>
@@ -883,6 +1088,12 @@ export default function DashboardClient() {
             </div>
           ) : null}
         </section>
+
+        {exportError ? (
+          <section className="rounded-2xl border border-amber-400/20 bg-amber-400/8 px-4 py-3 text-sm text-amber-100/90">
+            {exportError}
+          </section>
+        ) : null}
 
         {requestError ? (
           <section className="rounded-2xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-amber-50">
@@ -1060,7 +1271,7 @@ export default function DashboardClient() {
           </Card>
         </section>
 
-        <Card id="usage-records" className="border border-white/10 bg-white/[0.04]">
+        <Card id="usage-filters" className="border border-white/10 bg-white/[0.04]">
           <CardHeader className="gap-3">
             <div>
               <CardTitle className="text-white">Filters</CardTitle>
@@ -1152,7 +1363,7 @@ export default function DashboardClient() {
           </CardContent>
         </Card>
 
-        <Card id="usage-records" className="border border-white/10 bg-white/[0.04]">
+        <Card id="usage-records-table" className="border border-white/10 bg-white/[0.04]">
           <CardHeader>
             <CardTitle className="text-white">Usage Records</CardTitle>
             <CardDescription className="text-slate-400">
@@ -1204,7 +1415,15 @@ export default function DashboardClient() {
                               "cursor-pointer border-white/5",
                               selectedRecord?.id === record.id && "bg-white/10"
                             )}
+                            role="button"
+                            tabIndex={0}
                             onClick={() => setSelectedRecord(record)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                setSelectedRecord(record);
+                              }
+                            }}
                           >
                             <TableCell className="font-mono text-xs text-slate-300">
                               {record.timestamp}

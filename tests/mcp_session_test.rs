@@ -1,4 +1,5 @@
 use apex::config::{Config, Global, HotReload, Logging, Metrics, Retries, Timeouts};
+use apex::database::Database;
 use apex::mcp::protocol::JsonRpcMessage;
 use apex::mcp::server::McpServer;
 use std::sync::{Arc, RwLock};
@@ -43,7 +44,8 @@ async fn test_mcp_session_lifecycle() {
         compliance: None,
     };
     let config_arc = Arc::new(RwLock::new(config.clone()));
-    let server = McpServer::new(config_arc);
+    let database = Arc::new(Database::new(Some("/tmp".to_string())).unwrap());
+    let server = McpServer::new(config_arc, database);
 
     // 2. Add a session
     let (tx, mut rx) = mpsc::channel(100);

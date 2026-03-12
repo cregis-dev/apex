@@ -222,6 +222,114 @@ test.describe("Dashboard page", () => {
     await expect(page.getByRole("button", { name: "This Week" })).toBeVisible();
   });
 
+  test("refresh keeps the dashboard visible while syncing new data", async ({ page }) => {
+    let metricsCalls = 0;
+    let trendsCalls = 0;
+    let usageCalls = 0;
+
+    await page.route("**/api/metrics", async (route) => {
+      metricsCalls += 1;
+      if (metricsCalls > 1) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(metricsResponse),
+      });
+    });
+
+    await page.route("**/api/metrics/trends?**", async (route) => {
+      trendsCalls += 1;
+      if (trendsCalls > 1) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(trendsResponse),
+      });
+    });
+
+    await page.route("**/api/usage?**", async (route) => {
+      usageCalls += 1;
+      if (usageCalls > 1) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(usageResponse),
+      });
+    });
+
+    await page.goto("/dashboard?auth_token=test-key");
+
+    await expect(page.getByRole("heading", { name: "Apex Gateway Dashboard" })).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText("team-a")).toBeVisible();
+
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+    await expect(page.getByRole("heading", { name: "Apex Gateway Dashboard" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Refreshing...", exact: true })).toBeVisible();
+    await expect(page.getByText("Loading dashboard data...")).toHaveCount(0);
+    await expect(page.getByText("team-a")).toBeVisible();
+  });
+
+  test("refresh failure keeps existing dashboard data visible and surfaces an inline error", async ({ page }) => {
+    let trendsCalls = 0;
+
+    await page.route("**/api/metrics", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(metricsResponse),
+      });
+    });
+
+    await page.route("**/api/metrics/trends?**", async (route) => {
+      trendsCalls += 1;
+      await route.fulfill({
+        status: trendsCalls > 1 ? 500 : 200,
+        contentType: "application/json",
+        body: trendsCalls > 1 ? JSON.stringify({ error: "boom" }) : JSON.stringify(trendsResponse),
+      });
+    });
+
+    await page.route("**/api/usage?**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(usageResponse),
+      });
+    });
+
+    await page.goto("/dashboard?auth_token=test-key");
+
+    await expect(page.getByText("team-a")).toBeVisible();
+    await expect(page.getByText(/Last updated/)).toBeVisible();
+
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+    await expect(page.getByText("Dashboard sync issue")).toBeVisible();
+    await expect(page.getByText("Unable to fetch the latest dashboard data right now.")).toBeVisible();
+    await expect(page.getByText("team-a")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
+  });
+
+  test("removes an invalid auth_token from the URL after failed authentication", async ({ page }) => {
+    await mockDashboardApis(page);
+
+    await page.goto("/dashboard?auth_token=invalid-key");
+
+    await expect(page.getByText("Invalid API Key")).toBeVisible();
+    await expect(page.getByPlaceholder("Enter API Key")).toBeVisible();
+    await expect(page).toHaveURL(/\/dashboard\/?$/);
+  });
+
   test("shows a validation message for an invalid API key", async ({ page }) => {
     await mockDashboardApis(page);
     await page.goto("/dashboard");
@@ -261,6 +369,18 @@ test.describe("Dashboard page", () => {
     await expect(page).toHaveURL(/status=errors/);
   });
 
+  test("keyboard users can open the usage details drawer from the table", async ({ page }) => {
+    await mockDashboardApis(page);
+    await page.goto("/dashboard?auth_token=test-key");
+
+    const firstRow = page.locator("tbody tr").nth(0);
+    await firstRow.focus();
+    await page.keyboard.press("Enter");
+
+    await expect(page.getByText("Usage details")).toBeVisible();
+    await expect(page.getByText("req-123", { exact: true }).nth(1)).toBeVisible();
+  });
+
   test("clicking a trend point narrows the usage table to that exact day", async ({ page }) => {
     await mockDashboardApis(page);
     await page.goto("/dashboard?auth_token=test-key");
@@ -273,5 +393,50 @@ test.describe("Dashboard page", () => {
     await expect(page).toHaveURL(/range=custom/);
     await expect(page).toHaveURL(/start_date=2026-03-09/);
     await expect(page).toHaveURL(/end_date=2026-03-09/);
+  });
+
+  test("exports the current filtered usage dataset as CSV", async ({ page }) => {
+    let usageCalls = 0;
+
+    await page.route("**/api/metrics", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(metricsResponse),
+      });
+    });
+
+    await page.route("**/api/metrics/trends?**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(trendsResponse),
+      });
+    });
+
+    await page.route("**/api/usage?**", async (route) => {
+      usageCalls += 1;
+      if (usageCalls > 1) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(usageResponse),
+      });
+    });
+
+    await page.goto("/dashboard?auth_token=test-key");
+
+    await expect(page.getByText("team-a")).toBeVisible();
+
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export CSV", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Exporting...", exact: true })).toBeVisible();
+
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toMatch(/^apex-usage-report-.*\.csv$/);
+    expect(usageCalls).toBeGreaterThan(1);
   });
 });

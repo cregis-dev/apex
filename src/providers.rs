@@ -128,9 +128,9 @@ impl ProviderRegistry {
         adapters.insert(ProviderType::Deepseek, Box::new(DualProtocolAdapter::new()));
         adapters.insert(ProviderType::Moonshot, Box::new(DualProtocolAdapter::new()));
         adapters.insert(ProviderType::Minimax, Box::new(DualProtocolAdapter::new()));
-        adapters.insert(ProviderType::Ollama, Box::new(DefaultAdapter));
+        adapters.insert(ProviderType::Ollama, Box::new(OllamaAdapter));
         adapters.insert(ProviderType::Jina, Box::new(DefaultAdapter));
-        adapters.insert(ProviderType::Openrouter, Box::new(DefaultAdapter));
+        adapters.insert(ProviderType::Openrouter, Box::new(OpenRouterAdapter));
 
         Self {
             adapters,
@@ -527,6 +527,88 @@ impl ProviderAdapter for GeminiAdapter {
     }
 }
 
+/// Adapter for OpenRouter.
+///
+/// OpenRouter supports both OpenAI-compatible routes and Anthropic-compatible
+/// Messages routes. Unlike `DefaultAdapter`, Anthropic requests must remain in
+/// native Anthropic format instead of being rewritten into chat completions.
+struct OpenRouterAdapter;
+
+impl ProviderAdapter for OpenRouterAdapter {
+    fn map_path(&self, _route: RouteKind, _base_url: &str, path: &str) -> String {
+        path.to_string()
+    }
+
+    fn transform_body(
+        &self,
+        _route: RouteKind,
+        body: &Bytes,
+        model_map: &Option<HashMap<String, String>>,
+    ) -> Bytes {
+        apply_model_map(body, model_map)
+    }
+
+    fn apply_auth_headers(
+        &self,
+        route: RouteKind,
+        headers: &mut HeaderMap,
+        api_key: &str,
+        _base_url: &str,
+    ) {
+        apply_bearer_auth(headers, api_key, "authorization");
+        if matches!(route, RouteKind::Anthropic)
+            && !headers.contains_key("anthropic-version")
+            && let Ok(name) = HeaderName::from_bytes(b"anthropic-version")
+            && let Ok(value) = HeaderValue::from_str("2023-06-01")
+        {
+            headers.insert(name, value);
+        }
+    }
+}
+
+/// Adapter for Ollama.
+///
+/// Ollama natively supports both OpenAI-compatible and Anthropic-compatible
+/// endpoints on the same base URL, so requests should stay in the original
+/// protocol without path or payload conversion.
+struct OllamaAdapter;
+
+impl ProviderAdapter for OllamaAdapter {
+    fn map_path(&self, _route: RouteKind, _base_url: &str, path: &str) -> String {
+        path.to_string()
+    }
+
+    fn transform_body(
+        &self,
+        _route: RouteKind,
+        body: &Bytes,
+        model_map: &Option<HashMap<String, String>>,
+    ) -> Bytes {
+        apply_model_map(body, model_map)
+    }
+
+    fn apply_auth_headers(
+        &self,
+        route: RouteKind,
+        headers: &mut HeaderMap,
+        api_key: &str,
+        _base_url: &str,
+    ) {
+        match route {
+            RouteKind::Anthropic => {
+                apply_bearer_auth(headers, api_key, "x-api-key");
+                if !headers.contains_key("anthropic-version")
+                    && let Ok(name) = HeaderName::from_bytes(b"anthropic-version")
+                    && let Ok(value) = HeaderValue::from_str("2023-06-01")
+                {
+                    headers.insert(name, value);
+                }
+            }
+            RouteKind::Openai => apply_bearer_auth(headers, api_key, "authorization"),
+        }
+    }
+}
+
 /// Adapter that supports both OpenAI and Anthropic protocols natively.
 ///
 /// It routes requests to the appropriate endpoint based on the request protocol,
@@ -890,6 +972,163 @@ mod tests {
         )
         .unwrap();
         assert!(prepared.headers.get("x-goog-api-key").is_some());
+    }
+
+    #[test]
+    fn openrouter_anthropic_route_uses_native_messages_endpoint() {
+        let registry = ProviderRegistry::new();
+        let body = Bytes::from(
+            r#"{"model":"anthropic/claude-sonnet-4","messages":[{"role":"user","content":"Hi"}]}"#,
+        );
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::Openrouter,
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: Some("https://openrouter.ai/api".to_string()),
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Anthropic,
+            &channel.base_url,
+            "/v1/messages",
+            None,
+            &headers,
+            &body,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://openrouter.ai/api/v1/messages"
+        );
+        assert_eq!(prepared.body, body);
+        assert_eq!(prepared.headers.get("authorization").unwrap(), "Bearer key");
+        assert_eq!(
+            prepared
+                .headers
+                .get("anthropic-version")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "2023-06-01"
+        );
+    }
+
+    #[test]
+    fn openrouter_openai_route_keeps_openai_base_url() {
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::Openrouter,
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: Some("https://openrouter.ai/api".to_string()),
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Openai,
+            &channel.base_url,
+            "/v1/chat/completions",
+            None,
+            &headers,
+            &Bytes::from("{}"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn ollama_anthropic_route_uses_native_messages_endpoint() {
+        let registry = ProviderRegistry::new();
+        let body =
+            Bytes::from(r#"{"model":"llama3.2","messages":[{"role":"user","content":"Hi"}]}"#);
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::Ollama,
+            base_url: "http://localhost:11434".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: Some("http://localhost:11434".to_string()),
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Anthropic,
+            &channel.base_url,
+            "/v1/messages",
+            None,
+            &headers,
+            &body,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.url.as_str(), "http://localhost:11434/v1/messages");
+        assert_eq!(prepared.body, body);
+        assert_eq!(prepared.headers.get("x-api-key").unwrap(), "key");
+        assert_eq!(
+            prepared
+                .headers
+                .get("anthropic-version")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "2023-06-01"
+        );
+    }
+
+    #[test]
+    fn ollama_openai_route_keeps_native_chat_completions_endpoint() {
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::Ollama,
+            base_url: "http://localhost:11434".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: Some("http://localhost:11434".to_string()),
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Openai,
+            &channel.base_url,
+            "/v1/chat/completions",
+            None,
+            &headers,
+            &Bytes::from("{}"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url.as_str(),
+            "http://localhost:11434/v1/chat/completions"
+        );
+        assert_eq!(prepared.headers.get("authorization").unwrap(), "Bearer key");
     }
 
     #[test]

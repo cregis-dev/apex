@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::database::Database;
 use crate::mcp::analytics::AnalyticsEngine;
 use crate::mcp::capabilities::ServerCapabilities;
 use crate::mcp::protocol::{
@@ -73,15 +74,9 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    pub fn new(config: Arc<RwLock<Config>>) -> Self {
+    pub fn new(config: Arc<RwLock<Config>>, database: Arc<Database>) -> Self {
         let sessions = Arc::new(SessionManager::new());
-
-        // Initialize analytics engine with log directory from config
-        let log_dir = {
-            let cfg = config.read().unwrap();
-            cfg.logging.dir.clone()
-        };
-        let analytics = Arc::new(AnalyticsEngine::new(log_dir));
+        let analytics = Arc::new(AnalyticsEngine::new(database));
 
         Self {
             config,
@@ -409,6 +404,204 @@ impl McpServer {
         JsonRpcMessage::Response(Response::new(req.id, serde_json::to_value(result).unwrap()))
     }
 
+    fn build_usage_query(arguments: &serde_json::Value) -> crate::mcp::analytics::UsageQuery {
+        crate::mcp::analytics::UsageQuery {
+            team_id: arguments
+                .get("team_id")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            router: arguments
+                .get("router")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            channel: arguments
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            model: arguments
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            status: arguments
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            start_time: arguments
+                .get("start_time")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            end_time: arguments
+                .get("end_time")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        }
+    }
+
+    fn build_usage_filter_properties(include_team_id: bool) -> serde_json::Value {
+        let mut properties = serde_json::Map::from_iter([
+            (
+                "router".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "Filter by router name"
+                }),
+            ),
+            (
+                "channel".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "Filter by channel name"
+                }),
+            ),
+            (
+                "model".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "Filter by model name"
+                }),
+            ),
+            (
+                "status".to_string(),
+                json!({
+                    "type": "string",
+                    "enum": ["success", "fallback", "error", "fallback_error", "errors", "fallbacks"],
+                    "description": "Filter by status. Use 'errors' or 'fallbacks' for dashboard-style grouped filters"
+                }),
+            ),
+            (
+                "start_time".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "Start time in format YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"
+                }),
+            ),
+            (
+                "end_time".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "End time in format YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"
+                }),
+            ),
+        ]);
+
+        if include_team_id {
+            properties.insert(
+                "team_id".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "Filter by team ID"
+                }),
+            );
+        }
+
+        serde_json::Value::Object(properties)
+    }
+
+    fn build_usage_summary_properties() -> serde_json::Value {
+        let mut properties = match Self::build_usage_filter_properties(true) {
+            serde_json::Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+
+        properties.insert(
+            "group_by".to_string(),
+            json!({
+                "type": "string",
+                "enum": ["team", "router", "channel", "model"],
+                "description": "Optional grouping focus for the summary response"
+            }),
+        );
+        properties.insert(
+            "include_unknown_team".to_string(),
+            json!({
+                "type": "boolean",
+                "default": true,
+                "description": "When grouping by team, include records that cannot be mapped to a known team"
+            }),
+        );
+
+        serde_json::Value::Object(properties)
+    }
+
+    fn json_text(value: serde_json::Value) -> Vec<ToolContent> {
+        vec![ToolContent::Text {
+            text: serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+        }]
+    }
+
+    fn error_text(message: impl Into<String>) -> Vec<ToolContent> {
+        vec![ToolContent::Text {
+            text: json!({
+                "error": message.into()
+            })
+            .to_string(),
+        }]
+    }
+
+    fn summary_groups(
+        stats: &crate::mcp::analytics::UsageStats,
+        group_by: &str,
+    ) -> Option<serde_json::Value> {
+        match group_by {
+            "team" => stats
+                .by_team
+                .as_ref()
+                .map(|groups| serde_json::to_value(groups).unwrap_or_else(|_| json!({}))),
+            "router" => Some(serde_json::to_value(&stats.by_router).unwrap_or_else(|_| json!({}))),
+            "channel" => {
+                Some(serde_json::to_value(&stats.by_channel).unwrap_or_else(|_| json!({})))
+            }
+            "model" => Some(serde_json::to_value(&stats.by_model).unwrap_or_else(|_| json!({}))),
+            _ => None,
+        }
+    }
+
+    fn build_usage_summary_response(
+        &self,
+        query: &crate::mcp::analytics::UsageQuery,
+        group_by: Option<&str>,
+        include_unknown_team: bool,
+    ) -> Result<serde_json::Value, String> {
+        let config = self.config.read().unwrap();
+
+        let stats = if let Some(team_id) = query.team_id.as_deref() {
+            let team = config
+                .teams
+                .iter()
+                .find(|team| team.id == team_id)
+                .ok_or_else(|| format!("Team '{}' not found", team_id))?;
+            self.analytics
+                .query_team_usage(team_id, &team.policy.allowed_routers, query)
+                .map_err(|e| e.to_string())?
+        } else if group_by == Some("team") {
+            let teams: Vec<(&str, Vec<String>)> = config
+                .teams
+                .iter()
+                .map(|team| (team.id.as_str(), team.policy.allowed_routers.clone()))
+                .collect();
+            self.analytics
+                .query_all_teams_usage(&teams, query, include_unknown_team)
+                .map_err(|e| e.to_string())?
+        } else {
+            self.analytics.get_stats(query).map_err(|e| e.to_string())?
+        };
+
+        let mut response = json!({
+            "data_source": "sqlite",
+            "filters": query,
+            "summary": &stats
+        });
+
+        if let Some(group_by) = group_by {
+            response["group_by"] = json!(group_by);
+            if let Some(groups) = Self::summary_groups(&stats, group_by) {
+                response["groups"] = groups;
+            }
+        }
+
+        Ok(response)
+    }
+
     async fn handle_tools_list(&self, req: Request) -> JsonRpcMessage {
         let echo_schema = serde_json::json!({
             "type": "object",
@@ -423,46 +616,55 @@ impl McpServer {
             "properties": {},
         });
 
-        let query_team_usage_schema = serde_json::json!({
+        let query_usage_summary_schema = serde_json::json!({
+            "type": "object",
+            "properties": Self::build_usage_summary_properties(),
+        });
+
+        let query_usage_records_schema = serde_json::json!({
             "type": "object",
             "properties": {
                 "team_id": {
                     "type": "string",
-                    "description": "The team ID to query usage for"
+                    "description": "Filter by team ID"
                 },
                 "router": {
                     "type": "string",
                     "description": "Filter by router name"
                 },
+                "channel": {
+                    "type": "string",
+                    "description": "Filter by channel name"
+                },
                 "model": {
                     "type": "string",
                     "description": "Filter by model name"
                 },
-                "start_time": {
+                "status": {
                     "type": "string",
-                    "description": "Start time in format YYYY-MM-DD HH:MM:SS"
-                },
-                "end_time": {
-                    "type": "string",
-                    "description": "End time in format YYYY-MM-DD HH:MM:SS"
-                }
-            },
-        });
-
-        let query_all_teams_usage_schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "model": {
-                    "type": "string",
-                    "description": "Filter by model name"
+                    "enum": ["success", "fallback", "error", "fallback_error", "errors", "fallbacks"],
+                    "description": "Filter by status. Use 'errors' or 'fallbacks' for grouped filters"
                 },
                 "start_time": {
                     "type": "string",
-                    "description": "Start time in format YYYY-MM-DD HH:MM:SS"
+                    "description": "Start time in format YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"
                 },
                 "end_time": {
                     "type": "string",
-                    "description": "End time in format YYYY-MM-DD HH:MM:SS"
+                    "description": "End time in format YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
+                    "description": "Maximum number of records to return"
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Record offset for pagination"
                 }
             },
         });
@@ -478,17 +680,26 @@ impl McpServer {
                     "type": "string",
                     "description": "Filter by router name"
                 },
+                "channel": {
+                    "type": "string",
+                    "description": "Filter by channel name"
+                },
                 "model": {
                     "type": "string",
                     "description": "Filter by model name"
                 },
+                "status": {
+                    "type": "string",
+                    "enum": ["success", "fallback", "error", "fallback_error", "errors", "fallbacks"],
+                    "description": "Filter by status. Use 'errors' or 'fallbacks' for grouped filters"
+                },
                 "start_time": {
                     "type": "string",
-                    "description": "Start time in format YYYY-MM-DD HH:MM:SS"
+                    "description": "Start time in format YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"
                 },
                 "end_time": {
                     "type": "string",
-                    "description": "End time in format YYYY-MM-DD HH:MM:SS"
+                    "description": "End time in format YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"
                 },
                 "format": {
                     "type": "string",
@@ -514,23 +725,25 @@ impl McpServer {
                 input_schema: list_models_schema,
             },
             Tool {
-                name: "query_team_usage".to_string(),
+                name: "query_usage_summary".to_string(),
                 description: Some(
-                    "Query usage statistics for a team with optional filters (router, model, time range)".to_string(),
+                    "Query aggregate usage metrics from SQLite with dashboard-aligned filters"
+                        .to_string(),
                 ),
-                input_schema: query_team_usage_schema,
+                input_schema: query_usage_summary_schema,
             },
             Tool {
-                name: "query_all_teams_usage".to_string(),
+                name: "query_usage_records".to_string(),
                 description: Some(
-                    "Query usage statistics for all teams, returns aggregated stats grouped by team ID".to_string(),
+                    "Query paginated usage records from SQLite with dashboard-aligned filters"
+                        .to_string(),
                 ),
-                input_schema: query_all_teams_usage_schema,
+                input_schema: query_usage_records_schema,
             },
             Tool {
                 name: "export_usage_report".to_string(),
                 description: Some(
-                    "Export usage data as JSON or CSV with optional filters".to_string(),
+                    "Export filtered usage data from SQLite as JSON or CSV".to_string(),
                 ),
                 input_schema: export_usage_report_schema,
             },
@@ -573,126 +786,69 @@ impl McpServer {
             }
             "list_models" => {
                 let config = self.config.read().unwrap();
-                let mut output = String::new();
-                for channel in config.channels.iter() {
-                    output.push_str(&format!("Channel: {}\n", channel.name));
-                    if let Some(map) = &channel.model_map {
-                        for (k, v) in map {
-                            output.push_str(&format!("  {} -> {}\n", k, v));
-                        }
-                    } else {
-                        output.push_str("  No model map (pass-through)\n");
-                    }
-                    output.push('\n');
-                }
-                vec![ToolContent::Text { text: output }]
-            }
-            "query_team_usage" => {
-                // Parse query parameters
-                let team_id = arguments.get("team_id").and_then(|v| v.as_str());
-                let router = arguments.get("router").and_then(|v| v.as_str());
-                let model = arguments.get("model").and_then(|v| v.as_str());
-                let start_time = arguments.get("start_time").and_then(|v| v.as_str());
-                let end_time = arguments.get("end_time").and_then(|v| v.as_str());
-
-                let query = crate::mcp::analytics::UsageQuery {
-                    team_id: team_id.map(String::from),
-                    router: router.map(String::from),
-                    model: model.map(String::from),
-                    start_time: start_time.map(String::from),
-                    end_time: end_time.map(String::from),
-                };
-
-                // If team_id is provided, get team routers from config
-                if let Some(tid) = team_id {
-                    let config = self.config.read().unwrap();
-                    if let Some(team) = config.teams.iter().find(|t| t.id == tid) {
-                        let team_routers = team.policy.allowed_routers.clone();
-                        match self.analytics.query_team_usage(tid, &team_routers, &query) {
-                            Ok(stats) => {
-                                let json_str =
-                                    serde_json::to_string_pretty(&stats).unwrap_or_default();
-                                vec![ToolContent::Text { text: json_str }]
-                            }
-                            Err(e) => {
-                                vec![ToolContent::Text {
-                                    text: format!("Error: {}", e),
-                                }]
-                            }
-                        }
-                    } else {
-                        vec![ToolContent::Text {
-                            text: format!("Team '{}' not found", tid),
-                        }]
-                    }
-                } else {
-                    // Query without team filter
-                    match self.analytics.get_stats(&query) {
-                        Ok(stats) => {
-                            let json_str = serde_json::to_string_pretty(&stats).unwrap_or_default();
-                            vec![ToolContent::Text { text: json_str }]
-                        }
-                        Err(e) => {
-                            vec![ToolContent::Text {
-                                text: format!("Error: {}", e),
-                            }]
-                        }
-                    }
-                }
-            }
-            "query_all_teams_usage" => {
-                // Parse query parameters
-                let model = arguments.get("model").and_then(|v| v.as_str());
-                let start_time = arguments.get("start_time").and_then(|v| v.as_str());
-                let end_time = arguments.get("end_time").and_then(|v| v.as_str());
-
-                let query = crate::mcp::analytics::UsageQuery {
-                    team_id: None,
-                    router: None,
-                    model: model.map(String::from),
-                    start_time: start_time.map(String::from),
-                    end_time: end_time.map(String::from),
-                };
-
-                // Get all teams from config
-                let config = self.config.read().unwrap();
-                let teams: Vec<(&str, Vec<String>)> = config
-                    .teams
+                let channels = config
+                    .channels
                     .iter()
-                    .map(|t| (t.id.as_str(), t.policy.allowed_routers.clone()))
-                    .collect();
+                    .map(|channel| {
+                        json!({
+                            "name": channel.name,
+                            "provider_type": channel.provider_type,
+                            "model_map": channel.model_map,
+                            "base_url": channel.base_url,
+                        })
+                    })
+                    .collect::<Vec<_>>();
 
-                match self.analytics.query_all_teams_usage(&teams, &query) {
-                    Ok(stats) => {
-                        let json_str = serde_json::to_string_pretty(&stats).unwrap_or_default();
-                        vec![ToolContent::Text { text: json_str }]
-                    }
-                    Err(e) => {
-                        vec![ToolContent::Text {
-                            text: format!("Error: {}", e),
-                        }]
-                    }
+                Self::json_text(json!({
+                    "data_source": "config",
+                    "channels": channels
+                }))
+            }
+            "query_usage_summary" => {
+                let query = Self::build_usage_query(&arguments);
+                let group_by = arguments.get("group_by").and_then(|v| v.as_str());
+                let include_unknown_team = arguments
+                    .get("include_unknown_team")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+
+                match self.build_usage_summary_response(&query, group_by, include_unknown_team) {
+                    Ok(response) => Self::json_text(response),
+                    Err(e) => Self::error_text(format!("query_usage_summary failed: {}", e)),
+                }
+            }
+            "query_usage_records" => {
+                let query = Self::build_usage_query(&arguments);
+                let limit = arguments
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(50)
+                    .min(200) as usize;
+                let offset = arguments
+                    .get("offset")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+
+                match self.analytics.query_usage_page(&query, limit, offset) {
+                    Ok((records, total)) => Self::json_text(json!({
+                        "data_source": "sqlite",
+                        "filters": query,
+                        "records": records,
+                        "pagination": {
+                            "total": total,
+                            "limit": limit,
+                            "offset": offset
+                        }
+                    })),
+                    Err(e) => Self::error_text(format!("query_usage_records failed: {}", e)),
                 }
             }
             "export_usage_report" => {
-                // Parse query parameters
-                let team_id = arguments.get("team_id").and_then(|v| v.as_str());
-                let router = arguments.get("router").and_then(|v| v.as_str());
-                let model = arguments.get("model").and_then(|v| v.as_str());
-                let start_time = arguments.get("start_time").and_then(|v| v.as_str());
-                let end_time = arguments.get("end_time").and_then(|v| v.as_str());
                 let format = arguments
                     .get("format")
                     .and_then(|v| v.as_str())
                     .unwrap_or("json");
-
-                let query = crate::mcp::analytics::UsageQuery {
-                    team_id: team_id.map(String::from),
-                    router: router.map(String::from),
-                    model: model.map(String::from),
-                    start_time: start_time.map(String::from),
-                    end_time: end_time.map(String::from),
-                };
+                let query = Self::build_usage_query(&arguments);
 
                 let result = if format == "csv" {
                     self.analytics.export_csv(&query)
@@ -701,10 +857,19 @@ impl McpServer {
                 };
 
                 match result {
-                    Ok(data) => vec![ToolContent::Text { text: data }],
-                    Err(e) => vec![ToolContent::Text {
-                        text: format!("Error: {}", e),
-                    }],
+                    Ok(data) => {
+                        if format == "csv" {
+                            vec![ToolContent::Text { text: data }]
+                        } else {
+                            Self::json_text(json!({
+                                "data_source": "sqlite",
+                                "filters": query,
+                                "format": format,
+                                "data": serde_json::from_str::<serde_json::Value>(&data).unwrap_or_else(|_| json!(data))
+                            }))
+                        }
+                    }
+                    Err(e) => Self::error_text(format!("export_usage_report failed: {}", e)),
                 }
             }
             _ => {
@@ -1279,7 +1444,8 @@ mod tests {
     #[tokio::test]
     async fn initialize_echoes_negotiated_protocol_version() {
         let config = Arc::new(RwLock::new(test_config()));
-        let server = McpServer::new(config);
+        let database = Arc::new(Database::new(Some("/tmp".to_string())).unwrap());
+        let server = McpServer::new(config, database);
 
         let request = Request {
             jsonrpc: "2.0".to_string(),

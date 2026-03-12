@@ -160,7 +160,6 @@ Channels 定义上游 LLM 提供商的连接配置。
     "provider_type": "openai",
     "base_url": "https://api.openai.com/v1",
     "api_key": "${OPENAI_API_KEY}",
-    "anthropic_base_url": "https://api.anthropic.com",
     "headers": { "X-Custom": "value" },
     "model_map": { "gpt-4": "gpt-4-turbo" },
     "timeouts": { "connect_ms": 2000, "request_ms": 60000, "response_ms": 60000 }
@@ -171,10 +170,10 @@ Channels 定义上游 LLM 提供商的连接配置。
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `name` | string | 是 | 通道名称（供路由引用） |
-| `provider_type` | string | 是 | 提供商类型：`openai`, `anthropic`, `gemini`, `deepseek`, `moonshot`, `minimax`, `ollama` |
+| `provider_type` | string | 是 | 提供商类型：`openai`, `anthropic`, `gemini`, `deepseek`, `moonshot`, `minimax`, `ollama`, `jina`, `openrouter` |
 | `base_url` | string | 是 | API 基础 URL |
 | `api_key` | string | 是 | API Key，支持环境变量 `${VAR_NAME}` |
-| `anthropic_base_url` | string | 否 | Anthropic API 代理地址 |
+| `anthropic_base_url` | string | 否 | 该 provider 在 Anthropic 协议下使用的基础 URL。适用于同时支持 OpenAI / Anthropic 协议的 provider，如 `deepseek`, `moonshot`, `minimax`, `ollama`, `openrouter` |
 | `headers` | object | 否 | 自定义 HTTP 头 |
 | `model_map` | object | 否 | 模型映射：key = 请求模型名，value = 实际提供商模型 |
 | `timeouts` | object | 否 | 通道级别超时覆盖 |

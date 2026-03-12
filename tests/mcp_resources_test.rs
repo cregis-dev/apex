@@ -1,6 +1,7 @@
 use apex::config::{
     Channel, Config, Global, HotReload, Logging, Metrics, ProviderType, Retries, Team, Timeouts,
 };
+use apex::database::Database;
 use apex::mcp::protocol::{Id, JsonRpcMessage, ListResourcesResult, ReadResourceResult, Request};
 use apex::mcp::server::McpServer;
 use std::sync::{Arc, RwLock};
@@ -61,7 +62,8 @@ async fn test_mcp_resources() {
         compliance: None,
     };
 
-    let server = McpServer::new(Arc::new(RwLock::new(config)));
+    let database = Arc::new(Database::new(Some("/tmp".to_string())).unwrap());
+    let server = McpServer::new(Arc::new(RwLock::new(config)), database);
 
     // Test resources/list
     let req = Request::new(Id::Number(1), "resources/list".to_string(), None);

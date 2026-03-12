@@ -1,5 +1,7 @@
 # Web Dashboard 开发计划
 
+Status: done
+
 ## 概述
 
 本文档描述 Apex Gateway Web Dashboard 功能的开发计划，包括用户故事、技术方案和任务拆分。
@@ -27,6 +29,8 @@
 | src/database.rs | 新增 | 数据库模块，包含表结构和 CRUD 操作 |
 | docs/PRD.md | 修改 | 更新 PRD 文档 |
 | web/ | 新增 | Next.js + shadcn/ui 前端项目 |
+| web/src/components/dashboard/dashboard-client.tsx | 修改 | 修复刷新失败状态、URL token 清理、键盘可达性与 CSV 导出 |
+| web/tests/dashboard.spec.ts | 修改 | 增加刷新失败、导出、键盘交互与 auth_token 清理回归测试 |
 | install.sh | 新增 | 安装脚本，一键部署到指定路径 |
 | .gitignore | 修改 | 添加 test-config.json 等忽略规则 |
 
@@ -338,7 +342,32 @@ CREATE TABLE metrics_latency (
 2. **性能考虑**: 数据库写入使用异步方式，不阻塞请求处理
 3. **数据量**: 初期不做数据清理，后续可根据需要添加自动清理机制
 
+## Senior Developer Review (AI)
+
+### 2026-03-12
+
+- **Outcome**: Changes addressed
+- **Findings fixed**:
+  - 刷新期间若趋势图或 Usage API 失败，不再错误刷新 `Last updated`，并展示内联错误横幅
+  - 无效 `auth_token` 现会在认证失败后从 URL 中移除，避免刷新后重复注入坏 token
+  - Drilldown 滚动目标改为 Usage Records 表，而非 Filters 区
+  - Usage 表格行支持键盘 focus + Enter/Space 打开详情抽屉
+  - `Export CSV` 按钮改为导出当前筛选条件下的完整 Usage 数据集
+- **Verification**: `npx playwright test tests/dashboard.spec.ts`
+
 ## Change Log
+
+### 2026-03-12 - Dashboard review fixes
+- **修复刷新失败误报成功**: Dashboard 仅在 metrics、trends、usage 全部成功时更新 `Last updated`
+- **修复 URL 鉴权残留**: `auth_token` 在导入本地存储后立即从地址栏移除，失败场景不再重复污染 URL
+- **修复 Drilldown 锚点**: Usage drilldown 现在滚动到 Usage Records 表而非 Filters 卡片
+- **修复键盘可达性**: 表格行支持键盘打开详情抽屉
+- **新增 CSV 导出**: Dashboard 可按当前筛选条件拉取完整 Usage 数据并下载 CSV
+- **补充回归测试**:
+  - 刷新失败仍保留旧数据并显示错误横幅
+  - 无效 `auth_token` 从 URL 清理
+  - 键盘打开详情抽屉
+  - CSV 导出触发下载
 
 ### 2026-03-07 - 趋势图表与排行榜实现
 - **实现 Trends API**: `/api/metrics/trends` 支持 daily/weekly/monthly

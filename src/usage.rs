@@ -333,6 +333,7 @@ pub async fn wrap_response(
 mod tests {
     use super::*;
     use crate::database::Database;
+    use tempfile::tempdir;
 
     fn create_test_metrics() -> Arc<MetricsState> {
         Arc::new(MetricsState::new().unwrap())
@@ -478,5 +479,33 @@ mod tests {
         tracker.process_chunk(b"mpt_tokens\": 2}}\n\n", true);
 
         assert_eq!(tracker.input_tokens, 2);
+    }
+
+    #[test]
+    fn test_usage_logging_does_not_create_usage_csv() {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(Database::new(Some(dir.path().to_string_lossy().to_string())).unwrap());
+        let logger = UsageLogger::new(db);
+
+        logger.log(
+            Some("req-1"),
+            "team1",
+            "router1",
+            "channel1",
+            "gpt-4",
+            10,
+            20,
+            Some(12.0),
+            false,
+        );
+
+        assert!(
+            !dir.path().join("usage.csv").exists(),
+            "usage.csv should not be created anymore"
+        );
+        assert!(
+            dir.path().join("apex.db").exists(),
+            "usage should be persisted in SQLite"
+        );
     }
 }
