@@ -1,7 +1,17 @@
 "use client";
 
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
-import { Bar, CartesianGrid, ComposedChart, Line, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ResponsiveContainer,
+  Sankey,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChartContainer, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
@@ -11,6 +21,15 @@ const chartConfig: ChartConfig = {
   requests: { label: "Requests", color: "#8e3f1d" },
   total_tokens: { label: "Tokens", color: "#d39a2f" },
 };
+
+const TOPOLOGY_NODE_COLORS: Record<string, string> = {
+  team: "#facc15",
+  router: "#fb923c",
+  channel: "#f97316",
+  model: "#ea580c",
+};
+
+const TOPOLOGY_COLUMNS = ["Team", "Router", "Channel", "Model"];
 
 type OverviewTabProps = {
   analytics: DashboardAnalyticsResponse | null;
@@ -32,6 +51,115 @@ function DeltaPill({ value }: { value: number }) {
     >
       <Icon className="size-3.5" />
       {Math.abs(value).toFixed(1)}%
+    </div>
+  );
+}
+
+function formatTopologyValue(value: number) {
+  return `${value.toLocaleString()} requests`;
+}
+
+function TopologyNode(props: {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  payload?: { kind?: string };
+}) {
+  const { x = 0, y = 0, width = 0, height = 0, payload } = props;
+  const kind = payload?.kind ?? "team";
+  const fill = TOPOLOGY_NODE_COLORS[kind] ?? "#f97316";
+
+  return (
+    <g>
+      <rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        rx={2}
+        fill={fill}
+        fillOpacity={0.72}
+        stroke="#f97316"
+        strokeWidth={1.5}
+      />
+    </g>
+  );
+}
+
+function TopologyLink(props: {
+  sourceX?: number;
+  sourceY?: number;
+  sourceControlX?: number;
+  targetX?: number;
+  targetY?: number;
+  targetControlX?: number;
+  linkWidth?: number;
+}) {
+  const {
+    sourceX = 0,
+    sourceY = 0,
+    sourceControlX = 0,
+    targetX = 0,
+    targetY = 0,
+    targetControlX = 0,
+    linkWidth = 0,
+  } = props;
+
+  return (
+    <g>
+      <path
+        d={`M${sourceX},${sourceY} C${sourceControlX},${sourceY} ${targetControlX},${targetY} ${targetX},${targetY}`}
+        fill="none"
+        stroke="#f4d8b5"
+        strokeOpacity={0.92}
+        strokeWidth={linkWidth}
+        strokeLinecap="round"
+      />
+      <path
+        d={`M${sourceX},${sourceY} C${sourceControlX},${sourceY} ${targetControlX},${targetY} ${targetX},${targetY}`}
+        fill="none"
+        stroke="#efc89a"
+        strokeOpacity={0.55}
+        strokeWidth={Math.max(linkWidth - 2, 1)}
+        strokeLinecap="round"
+      />
+    </g>
+  );
+}
+
+function TopologyTooltip(props: {
+  active?: boolean;
+  payload?: Array<{
+    name?: string;
+    value?: number;
+    payload?: {
+      value?: number;
+      payload?: {
+        name?: string;
+        kind?: string;
+        source?: { name?: string };
+        target?: { name?: string };
+      };
+    };
+  }>;
+}) {
+  const item = props.payload?.[0];
+  if (!props.active || !item) {
+    return null;
+  }
+
+  const raw = item.payload?.payload;
+  const value = item.value ?? item.payload?.value ?? 0;
+  const sourceName = raw?.source?.name;
+  const targetName = raw?.target?.name;
+
+  return (
+    <div className="rounded-xl border border-[#d6dde8] bg-white px-3 py-2 shadow-[0_12px_24px_rgba(15,23,42,0.12)]">
+      <div className="text-sm font-semibold text-[#17233c]">
+        {sourceName && targetName ? `${sourceName} → ${targetName}` : item.name}
+      </div>
+      <div className="mt-1 text-xs text-[#64748b]">{formatTopologyValue(value)}</div>
     </div>
   );
 }
@@ -140,34 +268,43 @@ export function OverviewTab({ analytics }: OverviewTabProps) {
           <CardHeader>
             <CardTitle>Traffic Topology</CardTitle>
             <CardDescription>
-              Flow summary fallback for Team → Router → Channel → Model routing.
+              Team → Router → Channel → Model routing across the selected window.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
-            {analytics.topology.flows.length === 0 ? (
+          <CardContent>
+            {analytics.topology.nodes.length === 0 || analytics.topology.links.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-[#d5dce5] bg-[#f8fafc] px-4 py-8 text-sm text-[#64748b]">
                 No topology flows found for the current filters.
               </div>
             ) : (
-              analytics.topology.flows.slice(0, 6).map((flow) => (
-                <div
-                  key={`${flow.team_id}-${flow.router}-${flow.channel}-${flow.model}`}
-                  className="rounded-2xl border border-[#d8dee7] bg-[#f8fafc] px-4 py-3"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-medium text-[#17233c]">
-                      {flow.team_id} → {flow.router}
+              <div className="rounded-[24px] border border-[#e2e8f0] bg-white p-4">
+                <div className="grid grid-cols-4 gap-4 px-6 pb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#94a3b8]">
+                  {TOPOLOGY_COLUMNS.map((column) => (
+                    <div key={column} className="text-center">
+                      {column}
                     </div>
-                    <div className="text-xs text-[#64748b]">{flow.requests.toLocaleString()} req</div>
-                  </div>
-                  <div className="mt-2 text-sm text-[#475569]">
-                    {flow.channel} → {flow.model}
-                  </div>
-                  <div className="mt-2 text-xs text-[#64748b]">
-                    {flow.total_tokens.toLocaleString()} total tokens
-                  </div>
+                  ))}
                 </div>
-              ))
+                <div className="h-[332px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <Sankey
+                      data={{
+                        nodes: analytics.topology.nodes,
+                        links: analytics.topology.links,
+                      }}
+                      node={<TopologyNode />}
+                      link={<TopologyLink />}
+                      nodePadding={28}
+                      nodeWidth={14}
+                      linkCurvature={0.52}
+                      margin={{ top: 10, right: 34, bottom: 10, left: 34 }}
+                      sort={false}
+                    >
+                      <Tooltip content={<TopologyTooltip />} />
+                    </Sankey>
+                  </ResponsiveContainer>
+                </div>
+              </div>
             )}
           </CardContent>
         </Card>

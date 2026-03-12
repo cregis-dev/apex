@@ -1356,7 +1356,7 @@ fn build_topology_section(records: &[DashboardUsageRecord]) -> DashboardTopology
         nodes,
         links,
         flows,
-        render_mode: "flow-summary".to_string(),
+        render_mode: "sankey".to_string(),
     }
 }
 
