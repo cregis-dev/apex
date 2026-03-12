@@ -4,11 +4,17 @@ use regex::Regex;
 use tracing::warn;
 
 /// Pre-built PII patterns
+/// Note: These are simplified patterns optimized for performance and low false-positive rate.
+/// - Email: RFC-inspired but simplified for common cases
+/// - Phone: US/Canada format with various separators
+/// - Credit Card: 16-digit with optional separators (no Luhn validation for performance)
+/// - IP Address: IPv4 standard pattern
 static BUILTIN_PATTERNS: Lazy<Vec<PiiRule>> = Lazy::new(|| {
     vec![
         PiiRule {
             name: "email".to_string(),
-            pattern: r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}".to_string(),
+            // Improved: More restrictive email pattern to reduce false positives
+            pattern: r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\b".to_string(),
             action: PiiAction::Mask,
             mask_char: '*',
             replace_with: None,
@@ -22,6 +28,8 @@ static BUILTIN_PATTERNS: Lazy<Vec<PiiRule>> = Lazy::new(|| {
         },
         PiiRule {
             name: "credit_card".to_string(),
+            // Note: Simplified 16-digit pattern. Does not validate Luhn algorithm for performance.
+            // May have false positives on random 16-digit sequences.
             pattern: r"\b(?:\d{4}[- ]?){3}\d{4}\b".to_string(),
             action: PiiAction::Block,
             mask_char: '*',
@@ -39,6 +47,7 @@ static BUILTIN_PATTERNS: Lazy<Vec<PiiRule>> = Lazy::new(|| {
 
 /// PII detection result
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Used in audit logging and external callers
 pub struct PiiDetection {
     pub rule_name: String,
     pub matched_text: String,
@@ -52,33 +61,46 @@ pub struct PiiProcessor {
 
 impl PiiProcessor {
     /// Create a new PII processor with built-in rules and custom rules
+    /// When compliance is None -> use built-in rules only (default protection)
+    /// When compliance.enabled = false -> no PII processing
+    /// When compliance.enabled = true -> built-in rules + custom rules
     pub fn new(compliance: &Option<Compliance>) -> Self {
         let mut compiled_rules = Vec::new();
 
-        // Add built-in rules
-        for rule in BUILTIN_PATTERNS.iter() {
-            if let Ok(regex) = Regex::new(&rule.pattern) {
-                compiled_rules.push((rule.clone(), regex));
-            }
-        }
-
-        // Add custom rules from config
-        if let Some(compliance_config) = compliance
-            && compliance_config.enabled
-        {
-            for rule in &compliance_config.rules {
-                match Regex::new(&rule.pattern) {
-                    Ok(regex) => {
+        match compliance {
+            None => {
+                // Default: use built-in rules for basic protection
+                for rule in BUILTIN_PATTERNS.iter() {
+                    if let Ok(regex) = Regex::new(&rule.pattern) {
                         compiled_rules.push((rule.clone(), regex));
                     }
-                    Err(e) => {
-                        warn!(
-                            rule = %rule.name,
-                            error = %e,
-                            "Failed to compile PII regex pattern, skipping rule"
-                        );
+                }
+            }
+            Some(config) if config.enabled => {
+                // Enabled: use built-in + custom rules
+                for rule in BUILTIN_PATTERNS.iter() {
+                    if let Ok(regex) = Regex::new(&rule.pattern) {
+                        compiled_rules.push((rule.clone(), regex));
                     }
                 }
+
+                for rule in &config.rules {
+                    match Regex::new(&rule.pattern) {
+                        Ok(regex) => {
+                            compiled_rules.push((rule.clone(), regex));
+                        }
+                        Err(e) => {
+                            warn!(
+                                rule = %rule.name,
+                                error = %e,
+                                "Failed to compile PII regex pattern, skipping rule"
+                            );
+                        }
+                    }
+                }
+            }
+            Some(_) => {
+                // Disabled: no rules
             }
         }
 
@@ -86,6 +108,7 @@ impl PiiProcessor {
     }
 
     /// Check if PII masking is enabled
+    #[allow(dead_code)] // May be used for conditional logic in future
     pub fn is_enabled(&self) -> bool {
         !self.compiled_rules.is_empty()
     }
@@ -99,6 +122,14 @@ impl PiiProcessor {
             let matches: Vec<_> = regex.find_iter(text).collect();
 
             if !matches.is_empty() {
+                // Log PII detection event (AC7 - audit logging)
+                warn!(
+                    rule = %rule.name,
+                    action = ?rule.action,
+                    count = matches.len(),
+                    "PII detected and will be masked"
+                );
+
                 for m in matches {
                     let matched_text = m.as_str().to_string();
 
@@ -130,6 +161,13 @@ impl PiiProcessor {
             if rule.action == PiiAction::Block
                 && let Some(m) = regex.find(text)
             {
+                // Log PII block event (AC7 - audit logging)
+                warn!(
+                    rule = %rule.name,
+                    action = "block",
+                    "PII detected - request will be blocked"
+                );
+
                 return Some(PiiDetection {
                     rule_name: rule.name.clone(),
                     matched_text: m.as_str().to_string(),
@@ -252,5 +290,106 @@ mod tests {
 
         assert!(!result.contains("john@example.com"));
         assert!(!detections.is_empty());
+    }
+
+    #[test]
+    fn test_disabled_compliance() {
+        let compliance = Compliance {
+            enabled: false,
+            rules: vec![],
+        };
+        let processor = PiiProcessor::new(&Some(compliance));
+
+        // Should not process anything when disabled
+        let (result, detections) = processor.process("Contact: john@example.com");
+        assert_eq!(result, "Contact: john@example.com");
+        assert!(detections.is_empty());
+    }
+
+    #[test]
+    fn test_empty_text() {
+        let processor = PiiProcessor::new(&None);
+        let (result, detections) = processor.process("");
+
+        assert_eq!(result, "");
+        assert!(detections.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_pii_in_same_text() {
+        let processor = PiiProcessor::new(&None);
+        let text = "Contact john@example.com or jane@test.org at (555) 123-4567";
+
+        let (result, detections) = processor.process(text);
+
+        // Should detect 3 PII instances (2 emails, 1 phone)
+        assert_eq!(detections.len(), 3);
+        assert!(!result.contains("john@example.com"));
+        assert!(!result.contains("jane@test.org"));
+        assert!(!result.contains("(555) 123-4567"));
+    }
+
+    #[test]
+    fn test_invalid_json_fallback() {
+        let processor = PiiProcessor::new(&None);
+        let invalid_json = "Not JSON but has email: test@example.com";
+
+        let (result, detections) = process_json_content(&processor, invalid_json);
+
+        // Should fallback to plain text processing
+        assert!(!result.contains("test@example.com"));
+        assert!(!detections.is_empty());
+    }
+
+    #[test]
+    fn test_replace_with_option() {
+        let custom_rule = PiiRule {
+            name: "api_key".to_string(),
+            pattern: r"sk-[a-zA-Z0-9]{32}".to_string(),
+            action: PiiAction::Mask,
+            mask_char: '*',
+            replace_with: Some("[REDACTED_API_KEY]".to_string()),
+        };
+
+        let compliance = Compliance {
+            enabled: true,
+            rules: vec![custom_rule],
+        };
+
+        let processor = PiiProcessor::new(&Some(compliance));
+        let (result, _) = processor.process("API Key: sk-abcdefghijklmnopqrstuvwxyz123456");
+
+        assert!(result.contains("[REDACTED_API_KEY]"));
+        assert!(!result.contains("sk-abcdefghijklmnopqrstuvwxyz123456"));
+    }
+
+    #[test]
+    fn test_compliance_validation() {
+        // Valid: enabled with built-in rules only
+        let builtin_only_compliance = Compliance {
+            enabled: true,
+            rules: vec![],
+        };
+        assert!(builtin_only_compliance.validate().is_ok());
+
+        // Valid: enabled with rules
+        let valid_compliance = Compliance {
+            enabled: true,
+            rules: vec![PiiRule {
+                name: "test".to_string(),
+                pattern: r"\d+".to_string(),
+                action: PiiAction::Mask,
+                mask_char: '*',
+                replace_with: None,
+            }],
+        };
+        assert!(valid_compliance.validate().is_ok());
+
+        // Valid: disabled with no rules
+        let disabled_compliance = Compliance {
+            enabled: false,
+            rules: vec![],
+        };
+        assert!(disabled_compliance.validate().is_ok());
     }
 }

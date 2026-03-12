@@ -332,9 +332,39 @@ pub struct Compliance {
     pub rules: Vec<PiiRule>,
 }
 
+impl Compliance {
+    /// Validate compliance configuration
+    pub fn validate(&self) -> Result<(), String> {
+        use regex::Regex;
+        use std::collections::HashSet;
+
+        // Check for duplicate rule names
+        let mut seen_names = HashSet::new();
+        for rule in &self.rules {
+            if !seen_names.insert(&rule.name) {
+                return Err(format!("Duplicate rule name: {}", rule.name));
+            }
+
+            // Validate regex pattern
+            if let Err(e) = Regex::new(&rule.pattern) {
+                return Err(format!("Invalid regex in rule '{}': {}", rule.name, e));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 pub fn load_config(path: &Path) -> anyhow::Result<Config> {
     let content = fs::read_to_string(path)?;
     let mut config = serde_json::from_str::<Config>(&content)?;
+
+    // Validate compliance configuration if present
+    if let Some(ref compliance) = config.compliance {
+        compliance
+            .validate()
+            .map_err(|e| anyhow::anyhow!("Invalid compliance config: {}", e))?;
+    }
 
     // Migrate legacy configuration to rules
     for router in std::sync::Arc::make_mut(&mut config.routers) {

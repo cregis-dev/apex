@@ -60,6 +60,7 @@ impl Database {
                 request_id TEXT,
                 team_id TEXT NOT NULL,
                 router TEXT NOT NULL,
+                matched_rule TEXT,
                 channel TEXT NOT NULL,
                 model TEXT NOT NULL,
                 input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -117,6 +118,7 @@ impl Database {
         )?;
 
         let _ = conn.execute("ALTER TABLE usage_records ADD COLUMN request_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE usage_records ADD COLUMN matched_rule TEXT", []);
         let _ = conn.execute("ALTER TABLE usage_records ADD COLUMN latency_ms REAL", []);
         let _ = conn.execute(
             "ALTER TABLE usage_records ADD COLUMN fallback_triggered INTEGER NOT NULL DEFAULT 0",
@@ -154,6 +156,7 @@ impl Database {
         request_id: Option<&str>,
         team_id: &str,
         router: &str,
+        matched_rule: Option<&str>,
         channel: &str,
         model: &str,
         input_tokens: i64,
@@ -171,13 +174,14 @@ impl Database {
 
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
-                "INSERT INTO usage_records (timestamp, request_id, team_id, router, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT INTO usage_records (timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     timestamp,
                     request_id,
                     team_id,
                     router,
+                    matched_rule,
                     channel,
                     model_lower,
                     input_tokens,
@@ -277,7 +281,7 @@ impl Database {
 
         // Get records
         let mut sql = String::from(
-            "SELECT id, timestamp, request_id, team_id, router, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body FROM usage_records WHERE 1=1",
+            "SELECT id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body FROM usage_records WHERE 1=1",
         );
         sql.push_str(&where_clause);
         sql.push_str(" ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?");
@@ -291,23 +295,26 @@ impl Database {
         let mut stmt = conn.prepare(&sql)?;
         let records = stmt
             .query_map(params_refs.as_slice(), |row| {
+                let channel: String = row.get(6)?;
                 Ok(UsageRecord {
                     id: row.get(0)?,
                     timestamp: row.get(1)?,
                     request_id: row.get(2)?,
                     team_id: row.get(3)?,
                     router: row.get(4)?,
-                    channel: row.get(5)?,
-                    model: row.get(6)?,
-                    input_tokens: row.get(7)?,
-                    output_tokens: row.get(8)?,
-                    latency_ms: row.get(9)?,
-                    fallback_triggered: row.get::<_, i64>(10)? > 0,
-                    status: row.get(11)?,
-                    status_code: row.get(12)?,
-                    error_message: row.get(13)?,
-                    provider_trace_id: row.get(14)?,
-                    provider_error_body: row.get(15)?,
+                    matched_rule: row.get(5)?,
+                    final_channel: channel.clone(),
+                    channel,
+                    model: row.get(7)?,
+                    input_tokens: row.get(8)?,
+                    output_tokens: row.get(9)?,
+                    latency_ms: row.get(10)?,
+                    fallback_triggered: row.get::<_, i64>(11)? > 0,
+                    status: row.get(12)?,
+                    status_code: row.get(13)?,
+                    error_message: row.get(14)?,
+                    provider_trace_id: row.get(15)?,
+                    provider_error_body: row.get(16)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -323,11 +330,11 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
         let (where_clause, params_vec) = Self::build_usage_record_filters(query, false);
         let mut sql = String::from(
-            "SELECT id, timestamp, request_id, team_id, router, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body FROM usage_records WHERE 1=1",
+            "SELECT id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body FROM usage_records WHERE 1=1",
         );
         sql.push_str(&where_clause);
 
-        sql.push_str(" ORDER BY timestamp DESC");
+        sql.push_str(" ORDER BY timestamp DESC, id DESC");
 
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
@@ -335,23 +342,26 @@ impl Database {
         let mut stmt = conn.prepare(&sql)?;
         let records = stmt
             .query_map(params_refs.as_slice(), |row| {
+                let channel: String = row.get(6)?;
                 Ok(UsageRecord {
                     id: row.get(0)?,
                     timestamp: row.get(1)?,
                     request_id: row.get(2)?,
                     team_id: row.get(3)?,
                     router: row.get(4)?,
-                    channel: row.get(5)?,
-                    model: row.get(6)?,
-                    input_tokens: row.get(7)?,
-                    output_tokens: row.get(8)?,
-                    latency_ms: row.get(9)?,
-                    fallback_triggered: row.get::<_, i64>(10)? > 0,
-                    status: row.get(11)?,
-                    status_code: row.get(12)?,
-                    error_message: row.get(13)?,
-                    provider_trace_id: row.get(14)?,
-                    provider_error_body: row.get(15)?,
+                    matched_rule: row.get(5)?,
+                    final_channel: channel.clone(),
+                    channel,
+                    model: row.get(7)?,
+                    input_tokens: row.get(8)?,
+                    output_tokens: row.get(9)?,
+                    latency_ms: row.get(10)?,
+                    fallback_triggered: row.get::<_, i64>(11)? > 0,
+                    status: row.get(12)?,
+                    status_code: row.get(13)?,
+                    error_message: row.get(14)?,
+                    provider_trace_id: row.get(15)?,
+                    provider_error_body: row.get(16)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -747,6 +757,8 @@ pub struct UsageRecord {
     pub request_id: Option<String>,
     pub team_id: String,
     pub router: String,
+    pub matched_rule: Option<String>,
+    pub final_channel: String,
     pub channel: String,
     pub model: String,
     pub input_tokens: i64,
@@ -802,6 +814,7 @@ pub struct RankingItem {
 #[cfg(test)]
 mod tests {
     use super::Database;
+    use crate::database::UsageRecordQuery;
     use rusqlite::params;
     use tempfile::tempdir;
 
@@ -859,5 +872,60 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].request_id.as_deref(), Some("req-success"));
         assert_eq!(records[1].request_id.as_deref(), Some("req-error"));
+    }
+
+    #[test]
+    fn analytics_records_use_id_as_tie_breaker_for_same_timestamp() {
+        let dir = tempdir().expect("create temp dir");
+        let db = Database::new(Some(dir.path().to_string_lossy().into_owned())).expect("create db");
+
+        {
+            let conn = db.conn.lock().expect("lock db");
+            conn.execute(
+                "INSERT INTO usage_records (timestamp, request_id, team_id, router, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    "2026-03-11 09:00:00",
+                    "req-older-id",
+                    "team-a",
+                    "primary",
+                    "chat",
+                    "gpt-4o",
+                    10,
+                    20,
+                    100.0_f64,
+                    0,
+                    "success"
+                ],
+            )
+            .expect("insert first record");
+
+            conn.execute(
+                "INSERT INTO usage_records (timestamp, request_id, team_id, router, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    "2026-03-11 09:00:00",
+                    "req-newer-id",
+                    "team-a",
+                    "primary",
+                    "chat",
+                    "gpt-4o",
+                    10,
+                    20,
+                    100.0_f64,
+                    0,
+                    "success"
+                ],
+            )
+            .expect("insert second record");
+        }
+
+        let records = db
+            .get_usage_records_for_analytics(&UsageRecordQuery::default())
+            .expect("query analytics records");
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].request_id.as_deref(), Some("req-newer-id"));
+        assert_eq!(records[1].request_id.as_deref(), Some("req-older-id"));
     }
 }

@@ -76,6 +76,7 @@ async fn test_mcp_tools() {
         Some("req-1"),
         "team-a",
         "router-a",
+        Some("gpt-*"),
         "test-channel",
         "gpt-4",
         10,

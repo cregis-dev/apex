@@ -110,7 +110,7 @@ epics:
     stories:
       - id: S01
         name: PII Masking Engine
-        status: Review
+        status: Done
       - id: S02
         name: Compliance Middleware
         status: Pending
@@ -137,9 +137,9 @@ epics:
 
 summary:
   total_stories: 31
-  completed_stories: 28
+  completed_stories: 29
   in_progress_stories: 0
   review_stories: 0
   ready_for_dev_stories: 0
-  pending_stories: 3
-  progress: 90%
+  pending_stories: 2
+  progress: 94%

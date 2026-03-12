@@ -21,27 +21,36 @@ npm run test:headed
 npm run test:report
 ```
 
+真实后端 Dashboard smoke:
+
+```bash
+../scripts/dashboard/run_real_backend_smoke.sh
+```
+
+仅生成 fixture config + seed SQLite：
+
+```bash
+../scripts/dashboard/setup_real_backend_fixture.sh
+```
+
 ## 测试结构
 
 ```
 tests/
-├── dashboard.spec.ts    # Dashboard 页面测试 (20 tests)
-├── api.spec.ts         # API 测试 (5 tests, skip by default)
-└── README.md          # 本文件
+├── dashboard.spec.ts            # Dashboard mock API 回归
+├── dashboard.backend.spec.ts    # Dashboard 真实后端联调 smoke
+├── api.spec.ts                  # API 测试 (skip by default)
+└── README.md                    # 本文件
 ```
 
 ## 测试覆盖
 
-### Dashboard 测试 (20 tests)
+### Dashboard 测试
 
 | 类别 | 测试数 | 覆盖内容 |
 |------|--------|----------|
-| 首页测试 | 2 | 登录表单、空提交 |
-| 认证流程 | 2 | 无 auth 访问、存储 API Key |
-| 页面测试 | 2 | 页面标题、auth 状态 |
-| 组件测试 | 9 | 时间筛选、指标卡片、筛选器、表格、排行榜、图表、分页 |
-| 错误处理 | 2 | 无效 API Key、断开连接 |
-| 响应式测试 | 3 | 桌面、平板、手机 |
+| Mock UI 回归 | 10 | 认证、URL 状态、tabs、records 抽屉、刷新、导出 |
+| 真实后端 smoke | 2 | SQLite seeded 数据联调、真实 `/api/dashboard/*` 与页面渲染 |
 
 ### API 测试 (5 tests, 默认跳过)
 
@@ -56,6 +65,8 @@ tests/
 - 报告器: HTML
 - 超时: 30s
 
+真实后端联调使用 `playwright.real.config.ts`，该配置会禁用内置 `webServer`，直接连接已启动的 Apex 后端。
+
 ## CI 集成
 
 在 CI 环境中运行:
@@ -65,7 +76,8 @@ CI=true npm test
 
 ## 注意事项
 
-1. 测试需要 Next.js 开发服务器运行
-2. Playwright 会自动启动开发服务器
-3. 首次运行可能需要下载浏览器
-4. API 测试需要后端服务运行，默认跳过
+1. 默认 `dashboard.spec.ts` 仍使用 mock API 回归
+2. `dashboard.backend.spec.ts` 需要先启动真实 Apex 后端并准备 seeded SQLite 数据
+3. 默认配置会自动启动静态开发服务器；真实后端联调请使用 `playwright.real.config.ts`
+4. 首次运行可能需要下载浏览器
+5. API 测试需要后端服务运行，默认跳过

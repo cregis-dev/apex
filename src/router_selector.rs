@@ -4,6 +4,12 @@ use moka::sync::Cache;
 use rand::seq::SliceRandom;
 use std::time::Duration;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteSelection {
+    pub channel_name: String,
+    pub matched_rule: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct RouterSelector {
     // Cache key: "router_name:model_name" -> value: Option<usize> (index of matched rule)
@@ -35,6 +41,12 @@ impl RouterSelector {
     /// Find the target channel for a given router and model.
     /// Returns the channel name.
     pub fn select_channel(&self, router: &Router, model: &str) -> Option<String> {
+        self.select_channel_with_rule(router, model)
+            .map(|selection| selection.channel_name)
+    }
+
+    /// Find the target channel and matched rule descriptor for a given router/model pair.
+    pub fn select_channel_with_rule(&self, router: &Router, model: &str) -> Option<RouteSelection> {
         // Use unified rule-based selection
         // We cache the index of the matched rule, or None if no rule matches
         let cache_key = format!("{}:{}", router.name, model);
@@ -72,11 +84,24 @@ impl RouterSelector {
         };
 
         if let Some(rule) = rule_idx.and_then(|idx| router.rules.get(idx)) {
-            return self.apply_strategy(&rule.channels, &rule.strategy);
+            return self
+                .apply_strategy(&rule.channels, &rule.strategy)
+                .map(|channel_name| RouteSelection {
+                    channel_name,
+                    matched_rule: Some(Self::describe_rule(rule)),
+                });
         }
 
         // If no rules matched (shouldn't happen if we have a default * rule, but possible)
         None
+    }
+
+    fn describe_rule(rule: &crate::config::RouterRule) -> String {
+        if rule.match_spec.models.is_empty() {
+            return "*".to_string();
+        }
+
+        rule.match_spec.models.join(" | ")
     }
 
     fn apply_strategy(
