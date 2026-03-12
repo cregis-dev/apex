@@ -1,4 +1,4 @@
-use crate::database::{Database, UsageRecord as DbUsageRecord};
+use crate::database::{Database, UsageRecord as DbUsageRecord, UsageRecordQuery};
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
@@ -119,6 +119,26 @@ impl AnalyticsEngine {
                 .as_deref()
                 .and_then(|ts| self.normalize_time_bound(ts, true)),
         )
+    }
+
+    fn to_db_query(
+        &self,
+        query: &UsageQuery,
+        team_id_override: Option<Option<&str>>,
+    ) -> UsageRecordQuery {
+        let (start_time, end_time) = self.normalized_bounds(query);
+        UsageRecordQuery {
+            team_id: match team_id_override {
+                Some(team_id) => team_id.map(str::to_owned),
+                None => query.team_id.clone(),
+            },
+            router: query.router.clone(),
+            channel: query.channel.clone(),
+            model: query.model.clone(),
+            status: query.status.clone(),
+            start_time,
+            end_time,
+        }
     }
 
     fn to_export_record(record: &DbUsageRecord) -> UsageRecord {
@@ -254,16 +274,8 @@ impl AnalyticsEngine {
     }
 
     pub fn query_usage(&self, query: &UsageQuery) -> Result<Vec<UsageRecord>> {
-        let (start_time, end_time) = self.normalized_bounds(query);
-        let records = self.db.get_usage_records_for_analytics(
-            query.team_id.as_deref(),
-            query.router.as_deref(),
-            query.channel.as_deref(),
-            query.model.as_deref(),
-            query.status.as_deref(),
-            start_time.as_deref(),
-            end_time.as_deref(),
-        )?;
+        let db_query = self.to_db_query(query, None);
+        let records = self.db.get_usage_records_for_analytics(&db_query)?;
 
         Ok(records.iter().map(Self::to_export_record).collect())
     }
@@ -281,16 +293,8 @@ impl AnalyticsEngine {
     }
 
     pub fn get_stats(&self, query: &UsageQuery) -> Result<UsageStats> {
-        let (start_time, end_time) = self.normalized_bounds(query);
-        let records = self.db.get_usage_records_for_analytics(
-            query.team_id.as_deref(),
-            query.router.as_deref(),
-            query.channel.as_deref(),
-            query.model.as_deref(),
-            query.status.as_deref(),
-            start_time.as_deref(),
-            end_time.as_deref(),
-        )?;
+        let db_query = self.to_db_query(query, None);
+        let records = self.db.get_usage_records_for_analytics(&db_query)?;
 
         Ok(self.aggregate_records(&records, None))
     }
@@ -329,16 +333,8 @@ impl AnalyticsEngine {
             return Ok(Self::empty_stats(Some(by_team)));
         }
 
-        let (start_time, end_time) = self.normalized_bounds(query);
-        let records = self.db.get_usage_records_for_analytics(
-            None,
-            query.router.as_deref(),
-            query.channel.as_deref(),
-            query.model.as_deref(),
-            query.status.as_deref(),
-            start_time.as_deref(),
-            end_time.as_deref(),
-        )?;
+        let db_query = self.to_db_query(query, Some(None));
+        let records = self.db.get_usage_records_for_analytics(&db_query)?;
 
         let team_records = records
             .into_iter()
@@ -375,16 +371,8 @@ impl AnalyticsEngine {
         query: &UsageQuery,
         include_unknown_team: bool,
     ) -> Result<UsageStats> {
-        let (start_time, end_time) = self.normalized_bounds(query);
-        let records = self.db.get_usage_records_for_analytics(
-            None,
-            query.router.as_deref(),
-            query.channel.as_deref(),
-            query.model.as_deref(),
-            query.status.as_deref(),
-            start_time.as_deref(),
-            end_time.as_deref(),
-        )?;
+        let db_query = self.to_db_query(query, Some(None));
+        let records = self.db.get_usage_records_for_analytics(&db_query)?;
 
         if records.is_empty() {
             return Ok(Self::empty_stats(Some(HashMap::new())));
