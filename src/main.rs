@@ -1198,6 +1198,7 @@ fn get_default_anthropic_base_url(provider: &ProviderType) -> Option<&'static st
         ProviderType::Deepseek => Some("https://api.deepseek.com/anthropic"),
         ProviderType::Moonshot => Some("https://api.moonshot.cn/anthropic"),
         ProviderType::Minimax => Some("https://api.minimax.io/anthropic"),
+        ProviderType::Ollama => Some("http://localhost:11434"),
         ProviderType::Anthropic => Some("https://api.anthropic.com/v1"),
         _ => None,
     }

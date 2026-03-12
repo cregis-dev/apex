@@ -56,6 +56,7 @@
     {
       "provider_type": "ollama",
       "base_url": "http://localhost:11434",
+      "anthropic_base_url": "http://localhost:11434",
       "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "OLLAMA_API_KEY" },
       "headers": {},
       "model_map": {},
@@ -72,6 +73,7 @@
     {
       "provider_type": "openrouter",
       "base_url": "https://openrouter.ai/api/v1",
+      "anthropic_base_url": "https://openrouter.ai/api",
       "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "OPENROUTER_API_KEY" },
       "headers": {},
       "model_map": {},

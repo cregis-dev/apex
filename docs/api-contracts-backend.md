@@ -443,8 +443,8 @@ MCP-Session-Id: 1868a90c-...  (初始化后必须携带)
         "description": "Echo back the input"
       },
       {
-        "name": "query_team_usage",
-        "description": "Query usage statistics for a team"
+        "name": "query_usage_summary",
+        "description": "Query aggregate usage metrics with optional team and grouping filters"
       }
     ]
   }

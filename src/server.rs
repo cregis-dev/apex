@@ -188,7 +188,7 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
     let usage_logger = Arc::new(UsageLogger::new(database.clone()));
     let web_dir = config.web_dir.clone();
     let config_arc = Arc::new(RwLock::new(config));
-    let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
+    let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
 
     Ok(Arc::new(AppState {
         config: config_arc,
@@ -1517,10 +1517,10 @@ mod tests {
     async fn test_rate_limiter_blocks() {
         let config = create_test_config();
         let config_arc = Arc::new(RwLock::new(config));
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
         let database = Arc::new(Database::new(None).unwrap());
+        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -1554,10 +1554,10 @@ mod tests {
     async fn test_access_audit_logged() {
         let config = create_test_config();
         let config_arc = Arc::new(RwLock::new(config));
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
         let database = Arc::new(Database::new(None).unwrap());
+        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -1653,9 +1653,9 @@ mod tests {
 
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
         let config_arc = Arc::new(RwLock::new(config));
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
 
         let database = Arc::new(Database::new(None).unwrap());
+        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -1705,9 +1705,9 @@ mod tests {
         });
 
         let config_arc = Arc::new(RwLock::new(config));
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
 
         let database = Arc::new(Database::new(None).unwrap());
+        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),

@@ -45,8 +45,8 @@ so that 我可以分析各团队的资源使用情况并导出报表.
 ## Implementation Approach
 
 ### Option A: MCP Tools 方式 (Recommended)
-- 新增 MCP Tool: `query_team_usage`
-- 参数: team_id, start_time, end_time, router, model
+- 新增 MCP Tool: `query_usage_summary`
+- 参数: team_id, group_by, start_time, end_time, router, channel, model, status
 - 返回: JSON 格式统计结果
 - 新增 MCP Tool: `export_usage_report`
 - 参数: query filters, format (json/csv)
@@ -65,7 +65,7 @@ so that 我可以分析各团队的资源使用情况并导出报表.
   - [x] 实现多维度过滤 (Router, Model)
   - [x] 实现聚合统计计算
 - [x] Task 3: MCP Tool 定义 (AC: #1, #2, #3)
-  - [x] 定义 `query_team_usage` tool
+  - [x] 定义 `query_usage_summary` tool
   - [x] 实现参数解析与验证
 - [x] Task 4: 导出功能 (AC: #4)
   - [x] JSON 导出实现
@@ -74,9 +74,9 @@ so that 我可以分析各团队的资源使用情况并导出报表.
 
 ## Dev Notes
 
-- 数据源: `logs/usage.csv` + `MetricsState` (Prometheus)
+- 数据源: SQLite `usage_records` / `metrics_*` 表
 - 如需实时查询, 可从 Prometheus 拉取指标
-- 建议使用 `csv` crate 读取使用日志
+- CSV 仅保留为导出格式, 不再作为运行时数据源
 - Team ID 关联: 可通过 Router 配置中的 team 映射获取
 
 ### Project Structure Notes
@@ -107,7 +107,7 @@ Claude Sonnet 4.6
   - 支持 JSON/CSV 导出
 - ✅ 更新 `src/mcp/mod.rs` - 添加 analytics 模块
 - ✅ 更新 `src/mcp/server.rs` - 添加 MCP tools
-  - 新增 `query_team_usage` tool
+  - 新增 `query_usage_summary` tool
   - 新增 `export_usage_report` tool
 - ✅ 添加 6 个单元测试，全部通过
 

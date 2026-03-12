@@ -2,6 +2,7 @@ use apex::config::{
     Config, Global, HotReload, Logging, Metrics, Prompt, PromptArgument, PromptContent,
     PromptMessage, Retries, Timeouts,
 };
+use apex::database::Database;
 use apex::mcp::protocol::{
     GetPromptResult, Id, JsonRpcMessage, ListPromptsResult, PromptMessageContent, Request,
 };
@@ -61,7 +62,8 @@ async fn test_mcp_prompts() {
         compliance: None,
     };
 
-    let server = McpServer::new(Arc::new(RwLock::new(config)));
+    let database = Arc::new(Database::new(Some("/tmp".to_string())).unwrap());
+    let server = McpServer::new(Arc::new(RwLock::new(config)), database);
 
     // Test prompts/list
     let req = Request::new(Id::Number(1), "prompts/list".to_string(), None);
