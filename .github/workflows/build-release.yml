@@ -40,6 +40,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -48,18 +55,26 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Build dashboard assets
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --features embedded-web --target ${{ matrix.target }}
 
       - name: Prepare artifact
         shell: bash
         run: |
-          mkdir -p release
+          mkdir -p release/${{ matrix.artifact }}
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp target/${{ matrix.target }}/release/apex.exe release/${{ matrix.artifact }}
+            cp target/${{ matrix.target }}/release/apex.exe release/${{ matrix.artifact }}/apex.exe
           else
-            cp target/${{ matrix.target }}/release/apex release/${{ matrix.artifact }}
+            cp target/${{ matrix.target }}/release/apex release/${{ matrix.artifact }}/apex
           fi
+          cp config.example.json release/${{ matrix.artifact }}/config.example.json
+          cp install.sh release/${{ matrix.artifact }}/install.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

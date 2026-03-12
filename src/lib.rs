@@ -1,6 +1,7 @@
 pub mod compliance;
 pub mod config;
 pub mod converters;
+pub mod database;
 pub mod mcp;
 pub mod metrics;
 pub mod middleware;
@@ -9,3 +10,4 @@ pub mod router_selector;
 pub mod server;
 pub mod usage;
 pub mod utils;
+pub mod web_assets;

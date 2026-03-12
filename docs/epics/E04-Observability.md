@@ -16,3 +16,11 @@
   - Support log levels (INFO, DEBUG, ERROR).
   - Output logs to stdout/file (Daemon mode).
   - Include Request ID (UUID) in all logs.
+
+- [x] **S03: Web Dashboard**
+  - SQLite database for usage records and metrics storage.
+  - REST API endpoints: `/api/usage`, `/api/metrics`, `/api/metrics/trends`, `/api/metrics/rankings`.
+  - Next.js + shadcn/ui frontend.
+  - Display metrics cards, trend charts, rankings, and usage table.
+  - Time range filtering (today/week/month/custom).
+  - API key authentication with localStorage persistence.

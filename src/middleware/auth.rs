@@ -27,10 +27,10 @@ pub async fn team_auth(
     {
         for pair in query.split('&') {
             if let Some((key, value)) = pair.split_once('=')
-                && key == "api_key"
+                && (key == "api_key" || key == "auth_token")
             {
                 api_key_opt = Some(value.to_string());
-                source_opt = Some("Query Parameter (api_key)".to_string());
+                source_opt = Some("Query Parameter (auth_token)".to_string());
                 break;
             }
         }
@@ -84,7 +84,7 @@ pub async fn global_auth(State(state): State<Arc<AppState>>, req: Request, next:
     {
         for pair in query.split('&') {
             if let Some((key, value)) = pair.split_once('=')
-                && (key == "api_key" || key == "token")
+                && (key == "api_key" || key == "token" || key == "auth_token")
             {
                 api_key = Some(value.to_string());
                 break;

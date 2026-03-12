@@ -1,6 +1,6 @@
 use apex::config::{
-    Channel, Config, Global, HotReload, Logging, Metrics, Prompt, PromptArgument, PromptContent,
-    PromptMessage, Retries, Team, Timeouts,
+    Config, Global, HotReload, Logging, Metrics, Prompt, PromptArgument, PromptContent,
+    PromptMessage, Retries, Timeouts,
 };
 use apex::mcp::protocol::{
     GetPromptResult, Id, JsonRpcMessage, ListPromptsResult, PromptMessageContent, Request,
@@ -27,8 +27,11 @@ async fn test_mcp_prompts() {
                 retry_on_status: vec![],
             },
             enable_mcp: true,
+            cors_allowed_origins: vec![],
         },
         logging: Logging::default(),
+        data_dir: "/tmp".to_string(),
+        web_dir: "target/web".to_string(),
         channels: Arc::new(vec![]),
         routers: Arc::new(vec![]),
         metrics: Metrics {

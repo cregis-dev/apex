@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::converters::convert_openai_response_to_anthropic;
+use crate::database::Database;
 use crate::metrics::MetricsState;
 use crate::middleware::auth::{TeamContext, global_auth, team_auth};
 use crate::middleware::policy::team_policy;
@@ -10,11 +11,12 @@ use crate::providers::{
 };
 use crate::router_selector::RouterSelector;
 use crate::usage::UsageLogger;
+use crate::web_assets::{WebAssetError, load_web_asset};
 use axum::Router;
-use axum::body::Body;
-use axum::extract::State;
-use axum::http::{HeaderMap, Request, StatusCode};
-use axum::response::Response;
+use axum::body::{Body, Bytes};
+use axum::extract::{OriginalUri, State};
+use axum::http::{HeaderMap, HeaderValue, Request, Response as HttpResponse, StatusCode, Uri};
+use axum::response::{Redirect, Response};
 use axum::routing::{get, post};
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::json;
@@ -23,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tower_http::cors::CorsLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::{self, TraceLayer};
 use tracing::{Level, error, info};
@@ -39,9 +42,11 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub usage_logger: Arc<UsageLogger>,
     pub mcp_server: Arc<McpServer>,
+    pub database: Arc<Database>,
+    pub web_dir: String,
 }
 
-use crate::mcp::server::{McpServer, messages_handler, sse_handler};
+use crate::mcp::server::{McpServer, streamable_http_handler};
 
 // MCP is integrated into main server, controlled by global.enable_mcp config
 
@@ -179,7 +184,9 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
 
     let client = builder.build()?;
 
-    let usage_logger = Arc::new(UsageLogger::new(config.logging.dir.clone())?);
+    let database = Arc::new(Database::new(Some(config.data_dir.clone()))?);
+    let usage_logger = Arc::new(UsageLogger::new(database.clone()));
+    let web_dir = config.web_dir.clone();
     let config_arc = Arc::new(RwLock::new(config));
     let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
 
@@ -194,6 +201,8 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
         client,
         usage_logger,
         mcp_server,
+        database,
+        web_dir,
     }))
 }
 
@@ -201,6 +210,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     let config = state.config.read().unwrap();
     let mcp_enabled = config.global.enable_mcp;
     let metrics_enabled = config.metrics.enabled;
+    let cors_allowed_origins = config.global.cors_allowed_origins.clone();
     drop(config);
 
     // Model Routes (Protected by Team Auth)
@@ -227,12 +237,16 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             team_auth,
         ));
 
-    // MCP Routes (Protected by Global API Key) - separate to avoid team_auth
+    // MCP Routes (Protected by Global API Key) - Streamable HTTP Transport (MCP 2025-11-25)
     let mcp_routes = if mcp_enabled {
         Some(
             Router::new()
-                .route("/mcp/sse", get(sse_handler))
-                .route("/mcp/messages", post(messages_handler))
+                .route(
+                    "/mcp",
+                    get(streamable_http_handler)
+                        .post(streamable_http_handler)
+                        .delete(streamable_http_handler),
+                )
                 .layer(axum::middleware::from_fn_with_state(
                     state.mcp_server.as_ref().clone(),
                     crate::mcp::server::mcp_auth_guard,
@@ -250,9 +264,18 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 
     // Metrics (Protected by Global API Key)
     let metrics_routes = if metrics_enabled {
-        Some(Router::new().route("/metrics", get(metrics_handler)).layer(
-            axum::middleware::from_fn_with_state(state.clone(), global_auth),
-        ))
+        Some(
+            Router::new()
+                .route("/metrics", get(metrics_handler))
+                .route("/api/usage", get(usage_api_handler))
+                .route("/api/metrics", get(metrics_api_handler))
+                .route("/api/metrics/trends", get(trends_api_handler))
+                .route("/api/metrics/rankings", get(rankings_api_handler))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    global_auth,
+                )),
+        )
     } else {
         None
     };
@@ -267,6 +290,61 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     if let Some(metrics) = metrics_routes {
         app = app.merge(metrics);
     }
+
+    // Next.js static resources (shared across all pages)
+    let next_static_routes = Router::new().route(
+        "/_next/static/*path",
+        get(
+            move |State(state): State<Arc<AppState>>,
+                  axum::extract::Path(path): axum::extract::Path<String>| async move {
+                serve_web_asset(&state.web_dir, &format!("_next/static/{path}"), "Not found")
+            },
+        ),
+    );
+
+    // Dashboard static files (Next.js static export)
+    // Serve from web directory configured in config.json, default to "web"
+    let dashboard_routes = Router::new()
+        .route(
+            "/dashboard",
+            get(|OriginalUri(uri): OriginalUri| async move {
+                Redirect::permanent(&dashboard_redirect_target(&uri))
+            }),
+        )
+        .route(
+            "/dashboard/",
+            get(move |State(state): State<Arc<AppState>>| async move {
+                serve_web_asset(
+                    &state.web_dir,
+                    "dashboard/index.html",
+                    "Dashboard not found",
+                )
+            }),
+        )
+        .route(
+            "/dashboard/*path",
+            get(
+                move |State(state): State<Arc<AppState>>,
+                      axum::extract::Path(path): axum::extract::Path<String>| async move {
+                    serve_web_asset(&state.web_dir, &format!("dashboard/{path}"), "Not found")
+                },
+            ),
+        )
+        .route(
+            "/",
+            get(move |State(state): State<Arc<AppState>>| async move {
+                serve_index(State(state)).await
+            }),
+        )
+        .route(
+            "/index",
+            get(move |State(state): State<Arc<AppState>>| async move {
+                serve_index(State(state)).await
+            }),
+        );
+
+    app = app.merge(next_static_routes);
+    app = app.merge(dashboard_routes);
 
     app.layer(
         tower::ServiceBuilder::new()
@@ -300,7 +378,116 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                     .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
             ),
     )
+    // CORS layer for dashboard frontend
+    .layer(
+        CorsLayer::new()
+            .allow_origin(build_cors_allow_origin(&cors_allowed_origins))
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any),
+    )
     .with_state(state)
+}
+
+fn build_cors_allow_origin(cors_allowed_origins: &[String]) -> tower_http::cors::AllowOrigin {
+    if cors_allowed_origins.is_empty() {
+        return tower_http::cors::Any.into();
+    }
+
+    let origins = cors_allowed_origins
+        .iter()
+        .filter_map(|origin| match origin.parse::<HeaderValue>() {
+            Ok(value) => Some(value),
+            Err(err) => {
+                tracing::warn!("Ignoring invalid CORS origin '{}': {}", origin, err);
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if origins.is_empty() {
+        tracing::warn!(
+            "No valid CORS origins configured; browser cross-origin requests will be denied"
+        );
+    }
+
+    origins.into()
+}
+
+fn dashboard_redirect_target(uri: &Uri) -> String {
+    match uri.query() {
+        Some(query) if !query.is_empty() => format!("/dashboard/?{query}"),
+        _ => "/dashboard/".to_string(),
+    }
+}
+
+async fn serve_index(state: State<Arc<AppState>>) -> Response<Body> {
+    match load_web_asset(&state.web_dir, "index.html") {
+        Ok(asset) => build_asset_response(StatusCode::OK, asset),
+        Err(err) => {
+            tracing::error!(
+                "Failed to load index.html from {}: {:?}",
+                state.web_dir,
+                err
+            );
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/html")
+                .body(Body::from(
+                    r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Apex Gateway</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5; }
+        .container { text-align: center; }
+        h1 { color: #333; }
+        a { color: #0066cc; text-decoration: none; font-size: 18px; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Apex Gateway</h1>
+        <p><a href="/dashboard/">Go to Dashboard</a></p>
+    </div>
+</body>
+</html>"#,
+                ))
+                .unwrap()
+        }
+    }
+}
+
+fn serve_web_asset(web_dir: &str, relative_path: &str, not_found_body: &'static str) -> Response {
+    match load_web_asset(web_dir, relative_path) {
+        Ok(asset) => build_asset_response(StatusCode::OK, asset),
+        Err(WebAssetError::Forbidden) => Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::from("Forbidden"))
+            .unwrap(),
+        Err(WebAssetError::NotFound) => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from(not_found_body))
+            .unwrap(),
+        Err(WebAssetError::Internal) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from("Internal error"))
+            .unwrap(),
+    }
+}
+
+fn build_asset_response(status: StatusCode, asset: crate::web_assets::WebAsset) -> Response {
+    let mut builder = Response::builder()
+        .status(status)
+        .header("content-type", asset.content_type);
+
+    if let Some(cache_control) = asset.cache_control {
+        builder = builder.header("cache-control", cache_control);
+    }
+
+    builder.body(Body::from(asset.bytes.into_owned())).unwrap()
 }
 
 async fn metrics_handler(state: State<Arc<AppState>>) -> Response<Body> {
@@ -310,6 +497,122 @@ async fn metrics_handler(state: State<Arc<AppState>>) -> Response<Body> {
             .header("content-type", "text/plain; version=0.0.4")
             .body(Body::from(body))
             .unwrap(),
+        Err(err) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(err.to_string()))
+            .unwrap(),
+    }
+}
+
+async fn usage_api_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response<Body> {
+    let team_id = params.get("team_id").map(|s| s.as_str());
+    let router = params.get("router").map(|s| s.as_str());
+    let channel = params.get("channel").map(|s| s.as_str());
+    let model = params.get("model").map(|s| s.as_str());
+    let status = params.get("status").map(|s| s.as_str());
+    let start_date = params.get("start_date").map(|s| s.as_str());
+    let end_date = params.get("end_date").map(|s| s.as_str());
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(50)
+        .min(100);
+    let offset = params
+        .get("offset")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+
+    match state.database.get_usage_records(
+        team_id, router, channel, model, status, start_date, end_date, limit, offset,
+    ) {
+        Ok((records, total)) => {
+            let json = serde_json::json!({
+                "data": records,
+                "total": total,
+                "limit": limit,
+                "offset": offset
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(json.to_string()))
+                .unwrap()
+        }
+        Err(err) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(err.to_string()))
+            .unwrap(),
+    }
+}
+
+async fn metrics_api_handler(state: State<Arc<AppState>>) -> Response<Body> {
+    match state.database.get_metrics_summary() {
+        Ok(summary) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_string(&summary).unwrap_or_default(),
+            ))
+            .unwrap(),
+        Err(err) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(err.to_string()))
+            .unwrap(),
+    }
+}
+
+async fn trends_api_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response<Body> {
+    let period = params.get("period").map(|s| s.as_str()).unwrap_or("daily");
+    let start_date = params.get("start_date").map(|s| s.as_str());
+    let end_date = params.get("end_date").map(|s| s.as_str());
+
+    match state.database.get_trends(period, start_date, end_date) {
+        Ok(trends) => {
+            let json = serde_json::json!({
+                "period": period,
+                "data": trends
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(json.to_string()))
+                .unwrap()
+        }
+        Err(err) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(err.to_string()))
+            .unwrap(),
+    }
+}
+
+async fn rankings_api_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response<Body> {
+    let by = params.get("by").map(|s| s.as_str()).unwrap_or("team_id");
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(10);
+
+    match state.database.get_rankings(by, limit) {
+        Ok(rankings) => {
+            let json = serde_json::json!({
+                "by": by,
+                "data": rankings
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(json.to_string()))
+                .unwrap()
+        }
         Err(err) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .body(Body::from(err.to_string()))
@@ -524,6 +827,52 @@ fn error_response(status: StatusCode, message: &str) -> Response<Body> {
         .unwrap()
 }
 
+fn request_id_from_parts(parts: &axum::http::request::Parts) -> Option<String> {
+    parts
+        .extensions
+        .get::<tower_http::request_id::RequestId>()
+        .and_then(|id| id.header_value().to_str().ok())
+        .map(|id| id.to_string())
+}
+
+fn provider_trace_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    const TRACE_HEADERS: [&str; 5] = [
+        "x-request-id",
+        "request-id",
+        "x-trace-id",
+        "trace-id",
+        "cf-ray",
+    ];
+
+    TRACE_HEADERS.iter().find_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_string())
+    })
+}
+
+fn response_from_upstream_bytes(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let mut builder = HttpResponse::builder().status(status);
+    for (name, value) in headers {
+        if crate::providers::should_forward_response_header(name) {
+            builder = builder.header(name, value);
+        }
+    }
+
+    builder
+        .body(Body::from(body))
+        .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "invalid upstream response"))
+}
+
+fn truncate_for_storage(input: &str, limit: usize) -> String {
+    input.chars().take(limit).collect()
+}
+
 async fn process_request(
     state: Arc<AppState>,
     req: Request<Body>,
@@ -577,6 +926,7 @@ async fn process_request(
         auth_info
     );
 
+    let request_id = request_id_from_parts(&parts);
     let headers = parts.headers;
 
     // Extract team_id for usage logging
@@ -739,6 +1089,19 @@ async fn process_request(
             "Channel Resolution Failed: No channels configured or matched for router: {}",
             router_name
         );
+        state.usage_logger.log_failure(
+            request_id.as_deref(),
+            &team_id,
+            &router_name,
+            "unresolved",
+            model_name_str,
+            None,
+            false,
+            StatusCode::BAD_GATEWAY.as_u16() as i64,
+            "no channels configured or matched",
+            None,
+            None,
+        );
         return error_response(StatusCode::BAD_GATEWAY, "no channels configured or matched");
     }
 
@@ -751,6 +1114,9 @@ async fn process_request(
         .request_total
         .with_label_values(&[route_label, &router_name])
         .inc();
+
+    // Log request to database
+    state.database.log_request(route_label, &router_name);
 
     // 4. Loop channels
     let retry_on = &config.global.retries.retry_on_status;
@@ -777,6 +1143,9 @@ async fn process_request(
                 .fallback_total
                 .with_label_values(&[&router_name, &channel.name])
                 .inc();
+
+            // Log fallback to database
+            state.database.log_fallback(&router_name, &channel.name);
         }
 
         if !state.rate_limiter.check(&channel.provider_type) {
@@ -842,6 +1211,11 @@ async fn process_request(
                         .with_label_values(&[route_label, &router_name, &channel.name])
                         .observe(elapsed);
 
+                    // Log latency to database
+                    state
+                        .database
+                        .log_latency(route_label, &router_name, &channel.name, elapsed);
+
                     let status = resp.status();
                     if status.is_success() {
                         tracing::info!("Upstream Success: {} ({}ms)", status, elapsed);
@@ -855,12 +1229,15 @@ async fn process_request(
                         );
                         return crate::usage::wrap_response(
                             response,
+                            request_id.clone(),
                             team_id.clone(),
                             router_name.clone(),
                             channel.name.clone(),
                             model_name_str.to_string(),
                             state.usage_logger.clone(),
                             state.metrics.clone(),
+                            Some(elapsed),
+                            fallback_triggered,
                         )
                         .await;
                     }
@@ -916,19 +1293,42 @@ async fn process_request(
                             .error_total
                             .with_label_values(&[route_label, &router_name])
                             .inc();
+
+                        // Log error to database
+                        state.database.log_error(route_label, &router_name);
+                        let provider_trace_id = provider_trace_id_from_headers(resp.headers());
+                        let response_headers = resp.headers().clone();
+                        let error_body_bytes = resp.bytes().await.unwrap_or_default();
+                        let provider_error_body = String::from_utf8_lossy(&error_body_bytes);
+                        let stored_error_body = truncate_for_storage(&provider_error_body, 4000);
+                        state.usage_logger.log_failure(
+                            request_id.as_deref(),
+                            &team_id,
+                            &router_name,
+                            &channel.name,
+                            model_name_str,
+                            Some(elapsed),
+                            fallback_triggered,
+                            status.as_u16() as i64,
+                            status
+                                .canonical_reason()
+                                .unwrap_or("upstream request failed"),
+                            provider_trace_id.as_deref(),
+                            Some(stored_error_body.as_str()),
+                        );
+
                         // Convert error if needed (e.g. for Anthropic)
                         if matches!(route, RouteKind::Anthropic) {
-                            let bytes = resp.bytes().await.unwrap_or_default();
-                            let body = convert_openai_response_to_anthropic(bytes);
+                            let body = convert_openai_response_to_anthropic(error_body_bytes);
                             return Response::builder()
                                 .status(status)
                                 .body(Body::from(body))
                                 .unwrap();
                         }
-                        return adapter.handle_response(
-                            route,
-                            resp,
-                            Duration::from_millis(config.global.timeouts.response_ms),
+                        return response_from_upstream_bytes(
+                            status,
+                            &response_headers,
+                            error_body_bytes,
                         );
                     }
                 }
@@ -981,6 +1381,27 @@ async fn process_request(
         .error_total
         .with_label_values(&[route_label, &router_name])
         .inc();
+
+    // Log error to database
+    state.database.log_error(route_label, &router_name);
+    let last_channel = channels
+        .last()
+        .map(|channel| channel.name.as_str())
+        .unwrap_or("unresolved");
+    state.usage_logger.log_failure(
+        request_id.as_deref(),
+        &team_id,
+        &router_name,
+        last_channel,
+        model_name_str,
+        None,
+        fallback_triggered,
+        StatusCode::BAD_GATEWAY.as_u16() as i64,
+        "all channels failed",
+        None,
+        None,
+    );
+
     error_response(StatusCode::BAD_GATEWAY, "all channels failed")
 }
 
@@ -1028,7 +1449,10 @@ mod tests {
                     retry_on_status: vec![],
                 },
                 enable_mcp: true,
+                cors_allowed_origins: vec![],
             },
+            data_dir: "/tmp".to_string(),
+            web_dir: "target/web".to_string(),
             metrics: crate::config::Metrics {
                 enabled: false,
                 path: "/metrics".to_string(),
@@ -1096,6 +1520,7 @@ mod tests {
         let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
+        let database = Arc::new(Database::new(None).unwrap());
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -1103,12 +1528,14 @@ mod tests {
             access_audit: Arc::new(MockAccessAudit {
                 calls: audit_calls.clone(),
             }),
-            rate_limiter: Arc::new(MockRateLimiter { allow: false }), // Block everything
+            rate_limiter: Arc::new(MockRateLimiter { allow: false }),
             team_rate_limiter: Arc::new(TeamRateLimiter::new()),
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
-            usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
+            usage_logger: Arc::new(UsageLogger::new(database.clone())),
             mcp_server,
+            database,
+            web_dir: "target/web".to_string(),
         });
 
         let req = Request::builder()
@@ -1130,6 +1557,7 @@ mod tests {
         let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
+        let database = Arc::new(Database::new(None).unwrap());
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -1141,8 +1569,10 @@ mod tests {
             team_rate_limiter: Arc::new(TeamRateLimiter::new()),
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
-            usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
+            usage_logger: Arc::new(UsageLogger::new(database.clone())),
             mcp_server,
+            database,
+            web_dir: "target/web".to_string(),
         });
 
         let req = Request::builder()
@@ -1175,6 +1605,18 @@ mod tests {
             read_auth_token(&headers, "authorization"),
             Some("token".to_string())
         );
+    }
+
+    #[test]
+    fn test_dashboard_redirect_target_preserves_query() {
+        let uri: Uri = "/dashboard?auth_token=goodluck".parse().unwrap();
+        assert_eq!(
+            dashboard_redirect_target(&uri),
+            "/dashboard/?auth_token=goodluck"
+        );
+
+        let uri: Uri = "/dashboard".parse().unwrap();
+        assert_eq!(dashboard_redirect_target(&uri), "/dashboard/");
     }
 
     #[tokio::test]
@@ -1213,6 +1655,7 @@ mod tests {
         let config_arc = Arc::new(RwLock::new(config));
         let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
 
+        let database = Arc::new(Database::new(None).unwrap());
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -1224,8 +1667,10 @@ mod tests {
             team_rate_limiter: Arc::new(TeamRateLimiter::new()),
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
-            usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
+            usage_logger: Arc::new(UsageLogger::new(database.clone())),
             mcp_server,
+            database,
+            web_dir: "target/web".to_string(),
         });
 
         // Request with model "gpt-4" -> should go to ch2 (Anthropic)
@@ -1262,6 +1707,7 @@ mod tests {
         let config_arc = Arc::new(RwLock::new(config));
         let mcp_server = Arc::new(McpServer::new(config_arc.clone()));
 
+        let database = Arc::new(Database::new(None).unwrap());
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -1273,8 +1719,10 @@ mod tests {
             team_rate_limiter: Arc::new(TeamRateLimiter::new()),
             selector: Arc::new(RouterSelector::new()),
             client: reqwest::Client::new(),
-            usage_logger: Arc::new(UsageLogger::new(None).unwrap()),
+            usage_logger: Arc::new(UsageLogger::new(database.clone())),
             mcp_server,
+            database,
+            web_dir: "target/web".to_string(),
         });
 
         // 1. Valid Request (Correct Key, Allowed Model)

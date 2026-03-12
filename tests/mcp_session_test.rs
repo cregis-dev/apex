@@ -2,9 +2,7 @@ use apex::config::{Config, Global, HotReload, Logging, Metrics, Retries, Timeout
 use apex::mcp::protocol::JsonRpcMessage;
 use apex::mcp::server::McpServer;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
 
 #[tokio::test]
 async fn test_mcp_session_lifecycle() {
@@ -25,8 +23,11 @@ async fn test_mcp_session_lifecycle() {
                 retry_on_status: vec![],
             },
             enable_mcp: true,
+            cors_allowed_origins: vec![],
         },
         logging: Logging::default(),
+        data_dir: "/tmp".to_string(),
+        web_dir: "target/web".to_string(),
         channels: Arc::new(vec![]),
         routers: Arc::new(vec![]),
         metrics: Metrics {

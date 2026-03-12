@@ -47,23 +47,23 @@ fn mask_json_secrets(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 use axum::{
-    Json,
     body::Body,
     extract::{Query, Request as AxumRequest, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{
         IntoResponse, Response as AxumResponse,
         sse::{Event, KeepAlive, Sse},
     },
 };
-use futures::{Stream, StreamExt};
-use rand::{Rng, distributions::Alphanumeric};
 use serde::Deserialize;
 use serde_json::json;
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -104,7 +104,7 @@ impl McpServer {
         tokio::spawn(transport.run(tx_to_server, rx_from_server));
 
         let session_id = "stdio".to_string();
-        let session = crate::mcp::session::Session::new(session_id.clone(), tx_to_client);
+        let session = crate::mcp::session::Session::from_sender(session_id.clone(), tx_to_client);
         self.sessions.add(session).await;
 
         while let Some(msg) = rx_from_client.recv().await {
@@ -156,8 +156,23 @@ impl McpServer {
     pub async fn handle_request(&self, req: Request) -> JsonRpcMessage {
         match req.method.as_str() {
             "initialize" => {
+                let requested_protocol = req
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("protocolVersion"))
+                    .and_then(|value| value.as_str());
+                let protocol_version = match negotiate_protocol_version(requested_protocol) {
+                    Ok(version) => version,
+                    Err(message) => {
+                        return JsonRpcMessage::Error(ErrorResponse::invalid_params(
+                            Some(req.id),
+                            Some(json!(message)),
+                        ));
+                    }
+                };
+
                 let result = json!({
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": protocol_version,
                     "capabilities": ServerCapabilities::default(),
                     "serverInfo": {
                         "name": "apex-mcp-server",
@@ -709,63 +724,422 @@ impl McpServer {
     }
 }
 
-#[derive(Deserialize)]
-pub struct SseQuery {
+// ============================================================================
+// Streamable HTTP Transport (MCP Protocol 2025-11-25)
+// ============================================================================
+
+/// Query parameters for MCP endpoint (legacy session_id support for migration)
+#[derive(Deserialize, Default)]
+pub struct McpQuery {
     #[serde(default)]
-    session_id: Option<String>,
+    pub session_id: Option<String>,
 }
 
 use crate::server::AppState;
 
-pub async fn sse_handler(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<SseQuery>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let session_id = query.session_id.unwrap_or_else(|| {
-        rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(32)
-            .map(char::from)
-            .collect()
-    });
+/// MCP Protocol Version header name
+const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
+/// MCP Session ID header name
+const MCP_SESSION_ID_HEADER: &str = "MCP-Session-Id";
+/// Supported protocol versions, oldest to newest.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-11-25"];
+const DEFAULT_PROTOCOL_VERSION: &str = "2025-11-25";
 
-    let (tx, rx) = mpsc::channel(100);
-    let session = crate::mcp::session::Session::new(session_id.clone(), tx);
-    state.mcp_server.sessions.add(session).await;
-
-    let endpoint_url = format!("/mcp/messages?session_id={}", session_id);
-    let endpoint_event = Event::default().event("endpoint").data(endpoint_url);
-
-    let initial_stream = tokio_stream::iter(vec![Ok(endpoint_event)]);
-
-    let message_stream = tokio_stream::wrappers::ReceiverStream::new(rx)
-        .map(|msg| Ok(Event::default().data(serde_json::to_string(&msg).unwrap())));
-
-    let stream = initial_stream.chain(message_stream);
-
-    Sse::new(stream).keep_alive(KeepAlive::default())
+fn is_supported_protocol_version(version: &str) -> bool {
+    SUPPORTED_PROTOCOL_VERSIONS.contains(&version)
 }
 
-pub async fn messages_handler(
+fn negotiate_protocol_version(version: Option<&str>) -> Result<&'static str, String> {
+    match version {
+        Some(version) if is_supported_protocol_version(version) => Ok(SUPPORTED_PROTOCOL_VERSIONS
+            .iter()
+            .find(|supported| **supported == version)
+            .copied()
+            .unwrap_or(DEFAULT_PROTOCOL_VERSION)),
+        Some(version) => Err(format!(
+            "Unsupported protocol version: {}. Supported: {}",
+            version,
+            SUPPORTED_PROTOCOL_VERSIONS.join(", ")
+        )),
+        None => Ok(DEFAULT_PROTOCOL_VERSION),
+    }
+}
+
+/// Handle both GET and POST requests for Streamable HTTP transport
+///
+/// According to MCP spec:
+/// - POST: Client sends JSON-RPC messages, server returns JSON or SSE stream
+/// - GET: Client listens for server-initiated messages (optional)
+pub async fn streamable_http_handler(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<SseQuery>,
-    Json(message): Json<JsonRpcMessage>,
+    headers: HeaderMap,
+    Query(query): Query<McpQuery>,
+    req: AxumRequest,
 ) -> impl IntoResponse {
-    let session_id = match query.session_id {
-        Some(id) => id,
-        None => return (StatusCode::BAD_REQUEST, "Missing session_id").into_response(),
+    use axum::http::Method;
+
+    // Validate protocol version header if present
+    if let Some(version) = headers.get(MCP_PROTOCOL_VERSION_HEADER)
+        && let Ok(version_str) = version.to_str()
+        && let Err(error) = negotiate_protocol_version(Some(version_str))
+    {
+        return AxumResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "error": error }).to_string()))
+            .unwrap();
+    }
+
+    // Validate Origin header for security (skip for local requests)
+    if let Some(origin) = headers.get("Origin")
+        && let Ok(origin_str) = origin.to_str()
+    {
+        // Check if origin is from localhost or same origin
+        let is_local = origin_str.contains("localhost")
+            || origin_str.contains("127.0.0.1")
+            || origin_str.is_empty();
+
+        if !is_local {
+            // TODO: Implement proper origin validation against allowed origins
+            // For now, log warning but allow (can be configured strictly in production)
+            tracing::warn!("MCP request from external origin: {}", origin_str);
+        }
+    }
+
+    match *req.method() {
+        Method::POST => handle_post_request(&state, &headers, &query, req)
+            .await
+            .into_response(),
+        Method::GET => handle_get_request(&state, &headers, &query)
+            .await
+            .into_response(),
+        Method::DELETE => handle_delete_request(&state, &headers, &query)
+            .await
+            .into_response(),
+        _ => AxumResponse::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"error": "Method not allowed"}"#))
+            .unwrap(),
+    }
+}
+
+/// Handle POST requests - main message handling
+async fn handle_post_request(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    query: &McpQuery,
+    req: AxumRequest,
+) -> AxumResponse {
+    let protocol_version = headers
+        .get(MCP_PROTOCOL_VERSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|version| negotiate_protocol_version(Some(version)).ok())
+        .unwrap_or(DEFAULT_PROTOCOL_VERSION);
+
+    // Extract session ID from header (preferred) or query param (legacy)
+    let session_id = headers
+        .get(MCP_SESSION_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or(query.session_id.clone());
+
+    // Read and parse the JSON-RPC message body
+    let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return AxumResponse::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"error": format!("Failed to read body: {}", e)}).to_string(),
+                ))
+                .unwrap();
+        }
     };
 
-    if let Some(session) = state.mcp_server.sessions.get(&session_id).await {
-        let mcp_server = state.mcp_server.clone();
-        tokio::spawn(async move {
-            if let Some(response) = mcp_server.handle_message(message).await {
-                let _ = session.send(response).await;
+    // Parse as generic JSON first to determine message type
+    let json_value: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return AxumResponse::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"error": format!("Invalid JSON: {}", e)}).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+
+    // Determine if this is a response/notification (no id) or request (has id)
+    let is_request = json_value.get("id").is_some();
+
+    // Try to parse as different message types
+    let message: JsonRpcMessage = if is_request {
+        match serde_json::from_value::<Request>(json_value.clone()) {
+            Ok(req) => JsonRpcMessage::Request(req),
+            Err(_) => {
+                return AxumResponse::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"error": "Invalid JSON-RPC request"}).to_string(),
+                    ))
+                    .unwrap();
             }
-        });
-        (StatusCode::OK, "Accepted").into_response()
+        }
     } else {
-        (StatusCode::NOT_FOUND, "Session not found").into_response()
+        // Could be response, notification, or error
+        match serde_json::from_value::<Request>(json_value.clone()) {
+            Ok(req) => JsonRpcMessage::Request(req),
+            Err(_) => match serde_json::from_value::<crate::mcp::protocol::Notification>(
+                json_value.clone(),
+            ) {
+                Ok(notif) => JsonRpcMessage::Notification(notif),
+                Err(_) => {
+                    // Treat as generic accepted (for responses/acknowledgments)
+                    return AxumResponse::builder()
+                        .status(StatusCode::ACCEPTED)
+                        .body(Body::empty())
+                        .unwrap();
+                }
+            },
+        }
+    };
+
+    // Handle session management for Initialize requests
+    let mut session_id = session_id;
+    let mut new_session_id: Option<String> = None;
+
+    // Check if this is an initialize request to create a new session
+    if let JsonRpcMessage::Request(ref req) = message
+        && req.method == "initialize"
+        && session_id.is_none()
+    {
+        // Create new session
+        session_id = Some(Uuid::new_v4().to_string());
+        new_session_id = session_id.clone();
+    }
+
+    // Get or create session
+    let session_id = match session_id {
+        Some(id) => id,
+        None => {
+            // For non-initialize requests without session, create temporary session
+            Uuid::new_v4().to_string()
+        }
+    };
+
+    let session_exists = state.mcp_server.sessions.get(&session_id).await.is_some();
+
+    if !session_exists {
+        // Create new session
+        let session = crate::mcp::session::Session::with_channel(session_id.clone(), 100);
+        state.mcp_server.sessions.add(session).await;
+    }
+
+    // Clone for async handling
+    let _session = match state.mcp_server.sessions.get(&session_id).await {
+        Some(s) => s,
+        None => {
+            return AxumResponse::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"error": "Session not found"}"#))
+                .unwrap();
+        }
+    };
+
+    let mcp_server = state.mcp_server.clone();
+
+    // Process the message
+    let response = mcp_server.handle_message(message).await;
+
+    // Build response with session ID header if it's a new session
+    let mut response_builder =
+        AxumResponse::builder().header(MCP_PROTOCOL_VERSION_HEADER, protocol_version);
+    if let Some(ref sid) = new_session_id {
+        response_builder = response_builder.header(MCP_SESSION_ID_HEADER, sid);
+    }
+
+    // Return response based on message type
+    match (is_request, response) {
+        (false, _) => {
+            // Notification or response from client - just acknowledge
+            AxumResponse::builder()
+                .status(StatusCode::ACCEPTED)
+                .body(Body::empty())
+                .unwrap()
+        }
+        (true, Some(resp_msg)) => {
+            // Check Accept header to determine response format
+            let accept_json = headers
+                .get("Accept")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.contains("application/json"))
+                .unwrap_or(true);
+
+            if accept_json {
+                // Return JSON response
+                let json_resp = match resp_msg {
+                    JsonRpcMessage::Response(r) => serde_json::to_string(&r),
+                    JsonRpcMessage::Error(e) => serde_json::to_string(&e),
+                    _ => Ok(r#"{"error": "Unexpected response type"}"#.to_string()),
+                };
+
+                match json_resp {
+                    Ok(json_str) => response_builder
+                        .header("content-type", "application/json")
+                        .body(Body::from(json_str))
+                        .unwrap(),
+                    Err(e) => AxumResponse::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"error": format!("Serialization error: {}", e)}).to_string(),
+                        ))
+                        .unwrap(),
+                }
+            } else {
+                // Return SSE stream (for long-running operations)
+                // For simplicity, we still return JSON for single responses
+                // Full SSE streaming could be implemented for tools that need it
+                let json_resp = match resp_msg {
+                    JsonRpcMessage::Response(r) => serde_json::to_string(&r),
+                    JsonRpcMessage::Error(e) => serde_json::to_string(&e),
+                    _ => Ok(r#"{"error": "Unexpected response type"}"#.to_string()),
+                };
+
+                match json_resp {
+                    Ok(json_str) => response_builder
+                        .header("content-type", "application/json")
+                        .body(Body::from(json_str))
+                        .unwrap(),
+                    Err(_) => AxumResponse::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::empty())
+                        .unwrap(),
+                }
+            }
+        }
+        (true, None) => {
+            // No response (shouldn't happen for requests)
+            AxumResponse::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"error": "No response generated"}"#))
+                .unwrap()
+        }
+    }
+}
+
+/// Handle GET requests - server-initiated messages (SSE stream)
+async fn handle_get_request(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    query: &McpQuery,
+) -> AxumResponse {
+    // Check if client accepts SSE
+    let accept_header = headers
+        .get("Accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !accept_header.contains("text/event-stream") {
+        return AxumResponse::builder()
+            .status(StatusCode::NOT_ACCEPTABLE)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"error": "Client must accept text/event-stream"}"#,
+            ))
+            .unwrap();
+    }
+
+    let session_id = match &query.session_id {
+        Some(id) => id.clone(),
+        None => {
+            // Generate new session for listening-only mode
+            Uuid::new_v4().to_string()
+        }
+    };
+
+    // Get or create session
+    let _session = if let Some(s) = state.mcp_server.sessions.get(&session_id).await {
+        s
+    } else {
+        // Create new session for listening
+        let session = crate::mcp::session::Session::with_channel(session_id.clone(), 100);
+        state.mcp_server.sessions.add(session).await;
+        state.mcp_server.sessions.get(&session_id).await.unwrap()
+    };
+
+    let Some(rx) = _session.take_receiver().await else {
+        return AxumResponse::builder()
+            .status(StatusCode::CONFLICT)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"error": "Session stream is already attached"}"#,
+            ))
+            .unwrap();
+    };
+
+    // For GET requests, we return an SSE stream that the client can use
+    // to receive server-initiated notifications
+    // Note: Full implementation would wire up the session to broadcast notifications
+
+    // Create a simple SSE stream that sends keepalive events
+    let initial_stream = tokio_stream::iter(vec![Ok::<Event, Infallible>(
+        Event::default().event("connected").data("MCP stream ready"),
+    )]);
+    let message_stream = ReceiverStream::new(rx).map(|msg| {
+        Ok::<Event, Infallible>(
+            Event::default().data(serde_json::to_string(&msg).unwrap_or_else(|_| "{}".to_string())),
+        )
+    });
+    let stream = initial_stream.chain(message_stream);
+
+    let sse = Sse::new(stream).keep_alive(KeepAlive::default());
+
+    // Convert Sse to AxumResponse
+    sse.into_response()
+}
+
+/// Handle DELETE requests - session termination
+async fn handle_delete_request(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    query: &McpQuery,
+) -> AxumResponse {
+    let session_id = headers
+        .get(MCP_SESSION_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or(query.session_id.clone());
+
+    match session_id {
+        Some(id) => {
+            match state.mcp_server.sessions.get(&id).await {
+                Some(_) => {
+                    // Remove session
+                    state.mcp_server.sessions.remove(&id).await;
+                    AxumResponse::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::empty())
+                        .unwrap()
+                }
+                None => AxumResponse::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"error": "Session not found"}"#))
+                    .unwrap(),
+            }
+        }
+        None => AxumResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"error": "Missing session_id"}"#))
+            .unwrap(),
     }
 }
 
@@ -828,5 +1202,104 @@ pub async fn mcp_auth_guard(
             .header("content-type", "application/json")
             .body(Body::from(r#"{"error": "Unauthorized"}"#))
             .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, Global, HotReload, Metrics, Retries, Router, Timeouts};
+    use crate::mcp::protocol::Id;
+
+    fn test_config() -> Config {
+        Config {
+            version: "1.0".to_string(),
+            global: Global {
+                listen: "127.0.0.1:0".to_string(),
+                auth_keys: vec![],
+                timeouts: Timeouts {
+                    connect_ms: 1000,
+                    request_ms: 1000,
+                    response_ms: 1000,
+                },
+                retries: Retries {
+                    max_attempts: 1,
+                    backoff_ms: 10,
+                    retry_on_status: vec![500],
+                },
+                enable_mcp: true,
+                cors_allowed_origins: vec![],
+            },
+            logging: crate::config::Logging::default(),
+            data_dir: "/tmp".to_string(),
+            web_dir: "target/web".to_string(),
+            channels: Arc::new(vec![]),
+            routers: Arc::new(vec![Router {
+                name: "default".to_string(),
+                rules: vec![],
+                channels: vec![],
+                strategy: "round_robin".to_string(),
+                metadata: None,
+                fallback_channels: vec![],
+            }]),
+            metrics: Metrics {
+                enabled: true,
+                path: "/metrics".to_string(),
+            },
+            hot_reload: HotReload {
+                config_path: "test-config.json".to_string(),
+                watch: false,
+            },
+            teams: Arc::new(vec![]),
+            prompts: Arc::new(vec![]),
+            compliance: None,
+        }
+    }
+
+    #[test]
+    fn protocol_version_negotiation_accepts_inspector_version() {
+        assert_eq!(
+            negotiate_protocol_version(Some("2024-11-05")).unwrap(),
+            "2024-11-05"
+        );
+        assert_eq!(
+            negotiate_protocol_version(Some("2025-11-25")).unwrap(),
+            "2025-11-25"
+        );
+    }
+
+    #[test]
+    fn protocol_version_negotiation_rejects_unknown_version() {
+        let error = negotiate_protocol_version(Some("2099-01-01")).unwrap_err();
+        assert!(error.contains("Unsupported protocol version"));
+        assert!(error.contains("2024-11-05"));
+        assert!(error.contains("2025-11-25"));
+    }
+
+    #[tokio::test]
+    async fn initialize_echoes_negotiated_protocol_version() {
+        let config = Arc::new(RwLock::new(test_config()));
+        let server = McpServer::new(config);
+
+        let request = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Id::Number(1),
+            method: "initialize".to_string(),
+            params: Some(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "inspector",
+                    "version": "test"
+                }
+            })),
+        };
+
+        let response = server.handle_request(request).await;
+        let JsonRpcMessage::Response(response) = response else {
+            panic!("expected initialize response");
+        };
+
+        assert_eq!(response.result["protocolVersion"], "2024-11-05");
     }
 }

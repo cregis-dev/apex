@@ -11,6 +11,10 @@ pub struct Config {
     pub global: Global,
     #[serde(default)]
     pub logging: Logging,
+    #[serde(default = "default_data_dir")]
+    pub data_dir: String,
+    #[serde(default = "default_web_dir")]
+    pub web_dir: String,
     #[serde(default)]
     pub channels: Arc<Vec<Channel>>,
     #[serde(default)]
@@ -23,6 +27,16 @@ pub struct Config {
     pub prompts: Arc<Vec<Prompt>>,
     #[serde(default)]
     pub compliance: Option<Compliance>,
+}
+
+fn default_data_dir() -> String {
+    dirs::home_dir()
+        .map(|p| p.join(".apex/data").to_string_lossy().to_string())
+        .unwrap_or_else(|| "~/.apex/data".to_string())
+}
+
+fn default_web_dir() -> String {
+    "target/web".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +157,8 @@ pub struct Global {
     pub retries: Retries,
     #[serde(default = "default_true")]
     pub enable_mcp: bool,
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
 }
 
 fn default_true() -> bool {

@@ -18,6 +18,7 @@ pub enum SessionState {
 pub struct Session {
     pub id: String,
     pub tx: mpsc::Sender<JsonRpcMessage>,
+    pub rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<JsonRpcMessage>>>>,
     #[allow(dead_code)]
     pub state: Arc<RwLock<SessionState>>,
     #[allow(dead_code)]
@@ -25,13 +26,32 @@ pub struct Session {
 }
 
 impl Session {
+    #[allow(dead_code)]
     pub fn new(id: String, tx: mpsc::Sender<JsonRpcMessage>) -> Self {
+        Self::from_parts(id, tx, None)
+    }
+
+    pub fn from_parts(
+        id: String,
+        tx: mpsc::Sender<JsonRpcMessage>,
+        rx: Option<mpsc::Receiver<JsonRpcMessage>>,
+    ) -> Self {
         Self {
             id,
             tx,
+            rx: Arc::new(tokio::sync::Mutex::new(rx)),
             state: Arc::new(RwLock::new(SessionState::Connected)),
             created_at: std::time::Instant::now(),
         }
+    }
+
+    pub fn with_channel(id: String, buffer: usize) -> Self {
+        let (tx, rx) = mpsc::channel(buffer);
+        Self::from_parts(id, tx, Some(rx))
+    }
+
+    pub fn from_sender(id: String, tx: mpsc::Sender<JsonRpcMessage>) -> Self {
+        Self::from_parts(id, tx, None)
     }
 
     #[allow(dead_code)]
@@ -54,6 +74,10 @@ impl Session {
             .send(msg)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to send message: {}", e))
+    }
+
+    pub async fn take_receiver(&self) -> Option<mpsc::Receiver<JsonRpcMessage>> {
+        self.rx.lock().await.take()
     }
 }
 

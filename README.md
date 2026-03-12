@@ -18,9 +18,11 @@ Unlike personal AI gateways, Apex is built for **Teams**:
 | **Unified API** | OpenAI & Anthropic Compatible | Usually OpenAI only |
 | **Multi-Model Routing** | Round-Robin, Priority, Weighted | Basic fallback |
 | **Provider Agnostic** | OpenAI, Anthropic, DeepSeek, Ollama, etc. | Limited support |
-| **Observability** | Prometheus Metrics & Grafana Ready | Basic logs |
+| **Observability** | Prometheus Metrics, SQLite Dashboard & Grafana Ready | Basic logs |
 | **Performance** | Rust-based, sub-millisecond overhead | Often Python/Node.js |
 | **Resilience** | Automatic Retries & Fallbacks | Basic |
+| **Multi-Tenancy** | Team-based API Keys, Rate Limiting, Model Restrictions | Single tenant |
+| **MCP Protocol** | Built-in Model Context Protocol for AI Agents | Not available |
 
 ## 🏗 Architecture
 
@@ -97,14 +99,41 @@ To use real providers (OpenAI, Anthropic, etc.):
 If you prefer to run the binary directly:
 
 ```bash
-cargo install --path .
-apex gateway start
+cd web
+npm install
+npm run build
+
+cd ..
+cargo build --release --features embedded-web
+./target/release/apex gateway start --config config.json
 ```
+
+For packaged installation, use [`install.sh`](/Users/shawn/workspace/code/apex/install.sh). Release binaries built with `embedded-web` do not require shipping a separate `web/` directory.
+
+## 📊 Web Dashboard
+
+Apex includes a built-in Web Dashboard for observability and usage analytics:
+
+- **Usage Records**: View team-by-team API call history with token consumption
+- **Metrics Overview**: Real-time request counts, error rates, fallbacks, and latency
+- **Trend Analysis**: Daily/weekly/monthly usage patterns with interactive charts
+- **Rankings**: Top teams, models, and channels by usage
+- **Filtering**: Query by team, router, channel, model, and date range
+
+### Access the Dashboard
+
+1. Start the gateway: `apex gateway start`
+2. Open your browser: `http://localhost:12356/dashboard`
+3. Enter your Team API key when prompted
+
+See [Web Dashboard Documentation](docs/STORY-web-dashboard.md) for details.
 
 ## 📚 Documentation
 
 - [Operation Guide](docs/operations.md): detailed configuration and routing strategies.
+- [Current Release Model](docs/current-release-model.md): canonical web asset build and release behavior.
 - [Architecture](docs/architecture.md): design principles.
+- [Web Dashboard](docs/STORY-web-dashboard.md): built-in observability dashboard with usage records and metrics.
 - [中文文档](README_zh-CN.md): Chinese documentation.
 
 ## 🤝 Community & Governance

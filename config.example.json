@@ -18,6 +18,7 @@
     "level": "info",
     "dir": "logs"
   },
+  "data_dir": "~/.apex/data",
   "channels": [
     {
       "name": "openai-coding",
