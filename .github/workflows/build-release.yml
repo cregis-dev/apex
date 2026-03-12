@@ -7,7 +7,7 @@ on:
     inputs:
       tag:
         description: 'Release tag (e.g., v0.1.0)'
-        required: false
+        required: true
         type: string
 
 env:
@@ -75,19 +75,21 @@ jobs:
       - name: Prepare artifact
         shell: bash
         run: |
-          mkdir -p release/${{ matrix.artifact }}
-          cp target/${{ matrix.target }}/release/apex release/${{ matrix.artifact }}/apex
-          cp config.example.json release/${{ matrix.artifact }}/config.example.json
-          cp install.sh release/${{ matrix.artifact }}/install.sh
+          mkdir -p package/${{ matrix.artifact }} release
+          cp target/${{ matrix.target }}/release/apex package/${{ matrix.artifact }}/apex
+          cp config.example.json package/${{ matrix.artifact }}/config.example.json
+          cp install.sh package/${{ matrix.artifact }}/install.sh
+          tar -C package -czf release/${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}-${{ matrix.target }}
-          path: release/${{ matrix.artifact }}
+          path: release/${{ matrix.artifact }}.tar.gz
           retention-days: 5
 
   create-release:
+    if: github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -99,11 +101,17 @@ jobs:
         with:
           path: artifacts
 
+      - name: Inspect release payload
+        run: find artifacts -maxdepth 3 -type f | sort
+
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: ${{ github.event.inputs.tag }}
           draft: true
-          files: artifacts/**/*
+          fail_on_unmatched_files: true
+          files: artifacts/**/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
