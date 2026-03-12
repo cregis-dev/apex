@@ -78,7 +78,6 @@ jobs:
           mkdir -p package/${{ matrix.artifact }} release
           cp target/${{ matrix.target }}/release/apex package/${{ matrix.artifact }}/apex
           cp config.example.json package/${{ matrix.artifact }}/config.example.json
-          cp install.sh package/${{ matrix.artifact }}/install.sh
           tar -C package -czf release/${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
 
       - name: Upload artifact
