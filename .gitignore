@@ -3,9 +3,10 @@ logs/
 *.log
 apex.json
 
-# Ignore test artifacts
+# Test artifacts
 test-data/
 *.tmp
+test-config.json
 
 # Rust artifacts
 target/
@@ -28,3 +29,15 @@ __pycache__/
 .idea/
 .trae/
 _bmad/
+
+# Local test runtime directory
+.run/
+
+# Web local artifacts
+web/.env.local
+web/.next/
+web/node_modules/
+web/out/
+web/test-results/
+web/*.tsbuildinfo
+web/next-env.d.ts

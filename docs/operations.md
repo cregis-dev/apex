@@ -107,7 +107,7 @@ apex team add --id demo-team --routers default-openai
 输出示例：
 ```
 Team 'demo-team' added successfully.
-API Key: sk-ant-XyZ123...
+API Key: sk-ap-XyZ123...
 ```
 请妥善保存生成的 API Key。
 
@@ -208,7 +208,7 @@ apex team add \
     {
       "//": "示例1：基础接入",
       "id": "frontend-app",
-      "api_key": "sk-ant-generated-key-1",
+      "api_key": "sk-ap-generated-key-1",
       "policy": {
         "allowed_routers": ["default-router"]
       }
@@ -216,7 +216,7 @@ apex team add \
     {
       "//": "示例2：多路由与模型限制",
       "id": "internal-testing",
-      "api_key": "sk-ant-generated-key-2",
+      "api_key": "sk-ap-generated-key-2",
       "policy": {
         "allowed_routers": ["openai-router", "anthropic-router"],
         "allowed_models": ["gpt-3.5-*", "claude-instant-*"]
@@ -225,7 +225,7 @@ apex team add \
     {
       "//": "示例3：高优先级与限流",
       "id": "core-service",
-      "api_key": "sk-ant-generated-key-3",
+      "api_key": "sk-ap-generated-key-3",
       "policy": {
         "allowed_routers": ["main-router"],
         "rate_limit": {
@@ -311,64 +311,57 @@ apex channel add \
 
 Apex 内置了 Model Context Protocol (MCP) Server，支持通过 MCP 协议向客户端（如 Claude Desktop, Cursor, AI IDEs）暴露配置、提示词 (Prompts) 和工具 (Tools)。
 
-### 1. 运行模式
+### 1. 启用 MCP
 
-Apex 支持两种 MCP 运行模式：
+MCP 服务在 `config.json` 中通过 `global.enable_mcp` 配置项控制，默认为 `true`。
 
-#### A. 本地 Stdio 模式 (Local Stdio)
-适用于本地运行的 Claude Desktop 或 IDE。
-使用命令：
-```bash
-apex mcp start
+```json
+{
+  "global": {
+    "enable_mcp": true
+  }
+}
 ```
-这将启动一个通过标准输入输出 (stdio) 通信的 MCP Server 进程。
 
-#### B. 远程 SSE 模式 (Remote SSE)
-适用于远程连接。SSE 服务集成在 Apex 主服务中，与常规 API 共用端口（默认 3000）。
+启动网关后，MCP Server 会自动在以下端点可用：
+
+- **MCP 端点**: `/mcp` (与网关共用端口，默认 12356)
+- **支持方法**: GET, POST, DELETE
+
+### 2. 运行模式
+
+Apex 的 MCP 现在支持 **Streamable HTTP** 传输模式（MCP 协议版本 2025-11-25）。
 
 **启动主服务**:
 ```bash
 apex gateway start
 ```
-此时 MCP Server 已在 `/mcp/sse` 路径下可用。
 
-### 2. 远程连接指南 (Remote Connection)
+### 3. 连接指南
 
-如果您的 Apex 部署在 `https://gateway.cregis.ai`，远程 MCP Client 连接配置如下：
+如果您的 Apex 部署在 `https://gateway.cregis.ai`，MCP Client 连接配置如下：
 
-- **SSE URL**: `https://gateway.cregis.ai/mcp/sse`
-- **Auth**: 需要提供 API Key（与 OpenAI/Anthropic 接口共用 Team/Global Key）。
+- **MCP URL**: `https://gateway.cregis.ai/mcp`
+- **Auth**: 需要提供 API Key（与 OpenAI/Anthropic 接口共用 Team/Global Key）
 
 **认证方式**:
-由于 MCP Client 可能不支持自定义 Header，支持通过 Query Param 传递 Key：
-`https://gateway.cregis.ai/mcp/sse?api_key=sk-your-team-key`
+- `Authorization: Bearer sk-your-team-key` (推荐)
+- `x-api-key: sk-your-team-key` (推荐)
+- Query Param: `?api_key=sk-your-team-key` (遗留支持)
+
+**协议头**:
+- `MCP-Protocol-Version: 2025-11-25` (可选)
+- `MCP-Session-Id: <uuid>` (初始化后必须携带)
 
 **注意**:
+- 初始化请求会返回 `MCP-Session-Id` 头，后续请求必须携带此头
+- 所有的 MCP 交互（List Tools, Call Tool 等）都受相同的 Team Policy 控制
+- POST 请求默认返回 JSON 响应，也可通过 `Accept: text/event-stream` 请求流式响应
 - 确保您的 API Key 具有访问权限。
 - 客户端会自动接收 `endpoint` 事件，指向 `/mcp/messages?session_id=...`（客户端需处理相对路径或追加到 Base URL）。
 - 所有的 MCP 交互（List Tools, Call Tool 等）都受相同的 Team Policy 控制。
 
-### 3. 客户端配置示例
-
-#### Claude Desktop (Stdio)
-编辑 `~/Library/Application Support/Claude/claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "apex-local": {
-      "command": "/path/to/apex",
-      "args": ["mcp", "start"]
-    }
-  }
-}
-```
-
-#### Cursor / VS Code (Stdio)
-在 MCP 插件配置中添加：
-*   **Type**: `command`
-*   **Command**: `apex mcp start`
-
-### 4. 功能特性 (Features)
+### 5. 功能特性 (Features)
 
 #### 资源 (Resources)
 Apex 通过 `resources` 暴露配置文件的只读访问，支持 `config://` 协议。
@@ -417,9 +410,8 @@ Apex 提供内置工具供 Agent 调用进行诊断或查询。
 **使用示例**:
 Agent 可以调用 `list_models` 来查询当前网关可用的模型列表，以便智能选择模型。
 
-### 5. 热重载 (Hot Reload)
+### 6. 热重载 (Hot Reload)
 修改 `config.json` 后，Apex 会自动检测变更并通过 MCP 协议通知客户端刷新 Resources, Prompts 和 Tools 列表，无需重启服务或客户端。
 
-### 6. 故障排查
-*   **Stdio 模式**: 日志默认输出到 stderr，可以在 Claude Desktop 的日志文件中查看。
-*   **连接失败**: 检查 `apex` 二进制文件是否在 PATH 中，或在配置中使用绝对路径。
+### 7. 故障排查
+*   **连接失败**: 检查 MCP 是否在配置中启用 (`global.enable_mcp: true`)，确认 API Key 是否正确。

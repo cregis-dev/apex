@@ -1,5 +1,5 @@
 use apex::config::{
-    Channel, Config, Global, HotReload, Logging, Metrics, ProviderType, Retries, Team, Timeouts,
+    Channel, Config, Global, HotReload, Logging, Metrics, ProviderType, Retries, Timeouts,
 };
 use apex::mcp::protocol::{
     CallToolResult, Id, JsonRpcMessage, ListToolsResult, Request, ToolContent,
@@ -27,8 +27,11 @@ async fn test_mcp_tools() {
                 retry_on_status: vec![],
             },
             enable_mcp: true,
+            cors_allowed_origins: vec![],
         },
         logging: Logging::default(),
+        data_dir: "/tmp".to_string(),
+        web_dir: "target/web".to_string(),
         channels: Arc::new(vec![Channel {
             name: "test-channel".to_string(),
             provider_type: ProviderType::Openai,

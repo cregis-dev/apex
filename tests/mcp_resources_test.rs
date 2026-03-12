@@ -24,8 +24,11 @@ async fn test_mcp_resources() {
                 retry_on_status: vec![],
             },
             enable_mcp: true,
+            cors_allowed_origins: vec![],
         },
         logging: Logging::default(),
+        data_dir: "/tmp".to_string(),
+        web_dir: "target/web".to_string(),
         channels: Arc::new(vec![Channel {
             name: "test-channel".to_string(),
             provider_type: ProviderType::Openai,

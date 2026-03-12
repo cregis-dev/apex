@@ -23,6 +23,8 @@
   "version": "1.0",
   "global": { ... },
   "logging": { ... },
+  "data_dir": "...",
+  "web_dir": "...",
   "channels": [ ... ],
   "routers": [ ... ],
   "teams": [ ... ],
@@ -37,12 +39,32 @@
 | `version` | string | 是 | 配置文件版本，当前为 "1.0" |
 | `global` | object | 是 | 全局服务器设置 |
 | `logging` | object | 否 | 日志配置，默认为 info 级别 |
+| `data_dir` | string | 否 | 运行数据目录，默认 `~/.apex/data` |
+| `web_dir` | string | 否 | Web 静态目录覆盖项，默认 `target/web`，仅文件系统模式使用 |
 | `channels` | array | 否 | 通道列表，默认为空 |
 | `routers` | array | 否 | 路由规则列表，默认为空 |
 | `teams` | array | 否 | 团队列表，默认为空 |
 | `prompts` | array | 否 | MCP 提示词模板 |
 | `metrics` | object | 是 | 指标配置 |
 | `hot_reload` | object | 是 | 热重载配置 |
+
+---
+
+## Web 静态资源目录
+
+`web_dir` 是可选字段。
+
+使用规则：
+
+- 未启用 `embedded-web` 时，后端从该目录读取静态导出资源
+- 启用 `embedded-web` 时，发布二进制从内嵌资源读取 Dashboard，`web_dir` 不再是发布必需项
+- 开发态如果需要从文件系统读取静态资源，建议使用默认值 `target/web`
+
+示例：
+
+```json
+"web_dir": "target/web"
+```
 
 ---
 

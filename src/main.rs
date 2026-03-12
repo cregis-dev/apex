@@ -9,6 +9,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
 mod converters;
+mod database;
 mod logs;
 mod mcp;
 mod metrics;
@@ -18,6 +19,7 @@ mod router_selector;
 mod server;
 mod usage;
 mod utils;
+mod web_assets;
 
 use config::{
     Channel, Config, Global, HotReload, Metrics, ProviderType, Retries, Router, TargetChannel,
@@ -626,6 +628,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
                 retry_on_status: vec![429, 500, 502, 503, 504],
             },
             enable_mcp: true,
+            cors_allowed_origins: vec![],
         },
         channels: std::sync::Arc::new(Vec::new()),
         routers: std::sync::Arc::new(Vec::new()),
@@ -641,6 +644,10 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
             level: "info".to_string(),
             dir: None,
         },
+        data_dir: dirs::home_dir()
+            .map(|p| p.join(".apex/data").to_string_lossy().to_string())
+            .unwrap_or_else(|| "~/.apex/data".to_string()),
+        web_dir: "web".to_string(),
         teams: std::sync::Arc::new(Vec::new()),
         prompts: std::sync::Arc::new(Vec::new()),
         compliance: None,

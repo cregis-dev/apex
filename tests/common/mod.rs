@@ -30,6 +30,7 @@ pub fn base_config() -> Config {
                 retry_on_status: vec![500, 502, 503, 504],
             },
             enable_mcp: true,
+            cors_allowed_origins: vec![],
         },
         metrics: Metrics {
             enabled: true,
@@ -43,6 +44,8 @@ pub fn base_config() -> Config {
             level: "info".to_string(),
             dir: None,
         },
+        data_dir: "/tmp".to_string(),
+        web_dir: "target/web".to_string(),
         teams: std::sync::Arc::new(vec![]),
         channels: std::sync::Arc::new(vec![]),
         routers: std::sync::Arc::new(vec![]),

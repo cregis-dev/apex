@@ -1,0 +1,42 @@
+{
+  "version": "1.0",
+  "global": {
+    "listen": "0.0.0.0:12356",
+    "auth": {
+      "keys": ["test-key"]
+    },
+    "timeouts": {
+      "connect_ms": 10000,
+      "request_ms": 120000,
+      "response_ms": 300000
+    },
+    "retries": {
+      "max_attempts": 3,
+      "backoff_ms": 100,
+      "retry_on_status": [429, 500, 502, 503, 504]
+    }
+  },
+  "metrics": {
+    "enabled": true,
+    "path": "/metrics"
+  },
+  "hot_reload": {
+    "config_path": "config.json",
+    "watch": false
+  },
+  "channels": [
+    {
+      "name": "openai",
+      "provider_type": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "sk-test"
+    }
+  ],
+  "routers": [
+    {
+      "name": "default",
+      "models": ["*"],
+      "channel": "openai"
+    }
+  ]
+}

@@ -1,109 +1,98 @@
+use crate::database::Database;
 use crate::metrics::MetricsState;
 use anyhow::Result;
 use axum::body::{Body, Bytes};
 use axum::response::Response;
-use chrono::Local;
 use futures::Stream;
 use serde_json::Value;
-use std::fs::OpenOptions;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use tracing::{info, warn};
-
-fn expand_path(path_str: &str) -> PathBuf {
-    if path_str.starts_with("~")
-        && let Some(home) = dirs::home_dir()
-    {
-        if path_str == "~" {
-            return home;
-        }
-        if let Some(stripped) = path_str.strip_prefix("~/") {
-            return home.join(stripped);
-        }
-    }
-    PathBuf::from(path_str)
-}
 
 pub struct UsageLogger {
-    writer: Mutex<csv::Writer<std::fs::File>>,
+    db: Arc<Database>,
 }
 
 impl UsageLogger {
-    pub fn new(log_dir: Option<String>) -> Result<Self> {
-        let dir = if let Some(d) = log_dir {
-            expand_path(&d)
-        } else {
-            PathBuf::from("logs")
-        };
-
-        if !dir.exists() {
-            std::fs::create_dir_all(&dir)?;
-        }
-
-        let file_path = dir.join("usage.csv");
-        let abs_path = std::fs::canonicalize(&dir)?.join("usage.csv");
-        info!("Usage logger initialized. Writing to: {:?}", abs_path);
-
-        let file_exists = file_path.exists();
-
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file_path)?;
-
-        let mut writer = csv::WriterBuilder::new()
-            .has_headers(false)
-            .from_writer(file);
-
-        if !file_exists {
-            writer.write_record([
-                "timestamp",
-                "team_id",
-                "router",
-                "channel",
-                "model",
-                "input_tokens",
-                "output_tokens",
-            ])?;
-            writer.flush()?;
-        }
-
-        Ok(Self {
-            writer: Mutex::new(writer),
-        })
+    pub fn new(db: Arc<Database>) -> Self {
+        Self { db }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn log(
         &self,
+        request_id: Option<&str>,
         team_id: &str,
         router: &str,
         channel: &str,
         model: &str,
         input_tokens: u64,
         output_tokens: u64,
+        latency_ms: Option<f64>,
+        fallback_triggered: bool,
     ) {
-        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        let model_lower = model.to_lowercase();
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = w.write_record([
-                &timestamp,
-                team_id,
-                router,
-                channel,
-                &model_lower,
-                &input_tokens.to_string(),
-                &output_tokens.to_string(),
-            ]);
-            if let Err(e) = w.flush() {
-                warn!("Failed to flush usage log: {}", e);
-            }
-        }
+        self.db.log_usage(
+            request_id,
+            team_id,
+            router,
+            channel,
+            model,
+            input_tokens as i64,
+            output_tokens as i64,
+            latency_ms,
+            fallback_triggered,
+            if fallback_triggered {
+                "fallback"
+            } else {
+                "success"
+            },
+            Some(200),
+            None,
+            None,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_failure(
+        &self,
+        request_id: Option<&str>,
+        team_id: &str,
+        router: &str,
+        channel: &str,
+        model: &str,
+        latency_ms: Option<f64>,
+        fallback_triggered: bool,
+        status_code: i64,
+        error_message: &str,
+        provider_trace_id: Option<&str>,
+        provider_error_body: Option<&str>,
+    ) {
+        self.db.log_usage(
+            request_id,
+            team_id,
+            router,
+            channel,
+            model,
+            0,
+            0,
+            latency_ms,
+            fallback_triggered,
+            if fallback_triggered {
+                "fallback_error"
+            } else {
+                "error"
+            },
+            Some(status_code),
+            Some(error_message),
+            provider_trace_id,
+            provider_error_body,
+        );
     }
 }
 
 struct UsageTrackerState {
+    request_id: Option<String>,
     team_id: String,
     router: String,
     channel: String,
@@ -112,19 +101,26 @@ struct UsageTrackerState {
     metrics: Arc<MetricsState>,
     input_tokens: u64,
     output_tokens: u64,
+    latency_ms: Option<f64>,
+    fallback_triggered: bool,
     accumulated_data: String,
 }
 
 impl UsageTrackerState {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         team_id: String,
+        request_id: Option<String>,
         router: String,
         channel: String,
         model: String,
         logger: Arc<UsageLogger>,
         metrics: Arc<MetricsState>,
+        latency_ms: Option<f64>,
+        fallback_triggered: bool,
     ) -> Self {
         Self {
+            request_id,
             team_id,
             router,
             channel,
@@ -133,6 +129,8 @@ impl UsageTrackerState {
             metrics,
             input_tokens: 0,
             output_tokens: 0,
+            latency_ms,
+            fallback_triggered,
             accumulated_data: String::new(),
         }
     }
@@ -216,12 +214,15 @@ impl UsageTrackerState {
                 .inc_by(self.output_tokens);
 
             self.logger.log(
+                self.request_id.as_deref(),
                 &self.team_id,
                 &self.router,
                 &self.channel,
                 &self.model,
                 self.input_tokens,
                 self.output_tokens,
+                self.latency_ms,
+                self.fallback_triggered,
             );
         }
     }
@@ -259,14 +260,18 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn wrap_response(
     response: Response<Body>,
+    request_id: Option<String>,
     team_id: String,
     router: String,
     channel: String,
     model: String,
     logger: Arc<UsageLogger>,
     metrics: Arc<MetricsState>,
+    latency_ms: Option<f64>,
+    fallback_triggered: bool,
 ) -> Response<Body> {
     let is_sse = response
         .headers()
@@ -279,7 +284,15 @@ pub async fn wrap_response(
 
     if is_sse {
         let state = Arc::new(Mutex::new(UsageTrackerState::new(
-            team_id, router, channel, model, logger, metrics,
+            team_id,
+            request_id,
+            router,
+            channel,
+            model,
+            logger,
+            metrics,
+            latency_ms,
+            fallback_triggered,
         )));
         let stream = body.into_data_stream();
         let usage_stream = UsageStream {
@@ -295,7 +308,17 @@ pub async fn wrap_response(
         };
 
         // Process usage
-        let mut state = UsageTrackerState::new(team_id, router, channel, model, logger, metrics);
+        let mut state = UsageTrackerState::new(
+            team_id,
+            request_id,
+            router,
+            channel,
+            model,
+            logger,
+            metrics,
+            latency_ms,
+            fallback_triggered,
+        );
 
         if let Ok(json) = serde_json::from_slice::<Value>(&bytes) {
             state.extract_usage(&json);
@@ -309,73 +332,28 @@ pub async fn wrap_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
+    use crate::database::Database;
 
     fn create_test_metrics() -> Arc<MetricsState> {
         Arc::new(MetricsState::new().unwrap())
     }
 
     #[test]
-    fn test_expand_path() {
-        // This test relies on HOME being set, which is standard.
-        let home = dirs::home_dir().expect("Home dir not found");
-        let path_str = "~/test_logs";
-        let expanded = expand_path(path_str);
-
-        assert_eq!(expanded, home.join("test_logs"));
-
-        let path_str_no_tilde = "/tmp/logs";
-        let expanded_no_tilde = expand_path(path_str_no_tilde);
-        assert_eq!(expanded_no_tilde, PathBuf::from("/tmp/logs"));
-    }
-
-    #[test]
-    fn test_logger_initialization() {
-        let dir = tempdir().unwrap();
-        let dir_path = dir.path().to_str().unwrap().to_string();
-
-        let _logger = UsageLogger::new(Some(dir_path.clone())).unwrap();
-        let file_path = dir.path().join("usage.csv");
-
-        assert!(file_path.exists());
-        let content = fs::read_to_string(file_path).unwrap();
-        assert_eq!(
-            content.trim(),
-            "timestamp,team_id,router,channel,model,input_tokens,output_tokens"
-        );
-    }
-
-    #[test]
-    fn test_logger_writing() {
-        let dir = tempdir().unwrap();
-        let dir_path = dir.path().to_str().unwrap().to_string();
-
-        let logger = UsageLogger::new(Some(dir_path.clone())).unwrap();
-        logger.log("team1", "r1", "c1", "m1", 10, 20);
-
-        let file_path = dir.path().join("usage.csv");
-        let content = fs::read_to_string(file_path).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
-
-        assert_eq!(lines.len(), 2);
-        assert!(lines[1].contains("team1,r1,c1,m1,10,20"));
-    }
-
-    #[test]
     fn test_extract_usage_openai() {
-        let dir = tempdir().unwrap();
-        let logger =
-            Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
+        let db = Arc::new(Database::new(None).unwrap());
+        let logger = Arc::new(UsageLogger::new(db));
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
             "team1".to_string(),
+            Some("req-1".to_string()),
             "r1".to_string(),
             "c1".to_string(),
             "m1".to_string(),
             logger,
             metrics,
+            Some(42.0),
+            false,
         );
 
         let json = serde_json::json!({
@@ -392,18 +370,20 @@ mod tests {
 
     #[test]
     fn test_extract_usage_anthropic_message_start() {
-        let dir = tempdir().unwrap();
-        let logger =
-            Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
+        let db = Arc::new(Database::new(None).unwrap());
+        let logger = Arc::new(UsageLogger::new(db));
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
             "team1".to_string(),
+            Some("req-1".to_string()),
             "r1".to_string(),
             "c1".to_string(),
             "m1".to_string(),
             logger,
             metrics,
+            Some(42.0),
+            false,
         );
 
         let json = serde_json::json!({
@@ -423,18 +403,20 @@ mod tests {
 
     #[test]
     fn test_extract_usage_anthropic_message_delta() {
-        let dir = tempdir().unwrap();
-        let logger =
-            Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
+        let db = Arc::new(Database::new(None).unwrap());
+        let logger = Arc::new(UsageLogger::new(db));
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
             "team1".to_string(),
+            Some("req-1".to_string()),
             "r1".to_string(),
             "c1".to_string(),
             "m1".to_string(),
             logger,
             metrics,
+            Some(42.0),
+            false,
         );
 
         let json = serde_json::json!({
@@ -451,18 +433,20 @@ mod tests {
 
     #[test]
     fn test_process_sse_line() {
-        let dir = tempdir().unwrap();
-        let logger =
-            Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
+        let db = Arc::new(Database::new(None).unwrap());
+        let logger = Arc::new(UsageLogger::new(db));
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
             "team1".to_string(),
+            Some("req-1".to_string()),
             "r1".to_string(),
             "c1".to_string(),
             "m1".to_string(),
             logger,
             metrics,
+            Some(42.0),
+            false,
         );
 
         let line = r#"data: {"usage": {"prompt_tokens": 3, "completion_tokens": 4}}"#;
@@ -474,18 +458,20 @@ mod tests {
 
     #[test]
     fn test_process_chunk_sse_partial() {
-        let dir = tempdir().unwrap();
-        let logger =
-            Arc::new(UsageLogger::new(Some(dir.path().to_str().unwrap().to_string())).unwrap());
+        let db = Arc::new(Database::new(None).unwrap());
+        let logger = Arc::new(UsageLogger::new(db));
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
             "team1".to_string(),
+            Some("req-1".to_string()),
             "r1".to_string(),
             "c1".to_string(),
             "m1".to_string(),
             logger,
             metrics,
+            Some(42.0),
+            false,
         );
 
         tracker.process_chunk(b"data: {\"usage\": {\"pro", true);

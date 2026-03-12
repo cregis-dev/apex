@@ -1,0 +1,45 @@
+{
+  "generated_at": "2026-03-10",
+  "project_name": "Apex Gateway",
+  "version": "0.1.0",
+  "parts": [
+    {
+      "id": "backend",
+      "name": "Apex Backend",
+      "type": "backend",
+      "path": "/",
+      "language": "Rust",
+      "entry_point": "src/main.rs",
+      "tech_stack": ["Rust", "Axum", "Tokio", "SQLite", "Prometheus"],
+      "has_api": true,
+      "has_data_models": true,
+      "has_components": false
+    },
+    {
+      "id": "web",
+      "name": "Web Dashboard",
+      "type": "web",
+      "path": "/web",
+      "language": "TypeScript",
+      "entry_point": "web/src/app/page.tsx",
+      "tech_stack": ["Next.js", "React", "shadcn/ui", "Tailwind CSS", "Recharts"],
+      "has_api": false,
+      "has_data_models": false,
+      "has_components": true
+    }
+  ],
+  "integration": {
+    "type": "static_file_serving",
+    "description": "Backend serves static files from target/web directory"
+  },
+  "documentation_parts": [
+    "architecture-backend.md",
+    "api-contracts-backend.md",
+    "data-models-backend.md",
+    "development-guide-backend.md",
+    "architecture-web.md",
+    "component-inventory-web.md",
+    "development-guide-web.md",
+    "integration-architecture.md"
+  ]
+}
