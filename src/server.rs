@@ -1349,12 +1349,14 @@ fn build_topology_section(records: &[DashboardUsageRecord]) -> DashboardTopology
 
     let links = link_values
         .into_iter()
-        .map(|((source, target), (value, total_tokens))| DashboardTopologyLink {
-            source,
-            target,
-            value,
-            total_tokens,
-        })
+        .map(
+            |((source, target), (value, total_tokens))| DashboardTopologyLink {
+                source,
+                target,
+                value,
+                total_tokens,
+            },
+        )
         .collect::<Vec<_>>();
 
     DashboardTopologySection {
