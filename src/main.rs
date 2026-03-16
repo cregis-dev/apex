@@ -1135,6 +1135,7 @@ fn parse_provider_type(value: &str) -> anyhow::Result<ProviderType> {
         "openai" => Ok(ProviderType::Openai),
         "anthropic" => Ok(ProviderType::Anthropic),
         "gemini" => Ok(ProviderType::Gemini),
+        "custom_dual" => Ok(ProviderType::CustomDual),
         "deepseek" => Ok(ProviderType::Deepseek),
         "moonshot" => Ok(ProviderType::Moonshot),
         "minimax" => Ok(ProviderType::Minimax),
@@ -1150,6 +1151,7 @@ fn provider_choices() -> Vec<&'static str> {
         "openai",
         "anthropic",
         "gemini",
+        "custom_dual",
         "deepseek",
         "moonshot",
         "minimax",
@@ -1185,6 +1187,7 @@ fn get_default_base_url(provider: &ProviderType) -> &'static str {
         ProviderType::Openai => "https://api.openai.com/v1",
         ProviderType::Anthropic => "https://api.anthropic.com/v1",
         ProviderType::Gemini => "https://generativelanguage.googleapis.com/v1beta/openai/",
+        ProviderType::CustomDual => "https://api.example.com/v1",
         ProviderType::Deepseek => "https://api.deepseek.com",
         ProviderType::Moonshot => "https://api.moonshot.cn/v1",
         ProviderType::Minimax => "https://api.minimax.io/v1",
@@ -1196,6 +1199,7 @@ fn get_default_base_url(provider: &ProviderType) -> &'static str {
 
 fn get_default_anthropic_base_url(provider: &ProviderType) -> Option<&'static str> {
     match provider {
+        ProviderType::CustomDual => Some("https://api.example.com/anthropic"),
         ProviderType::Deepseek => Some("https://api.deepseek.com/anthropic"),
         ProviderType::Moonshot => Some("https://api.moonshot.cn/anthropic"),
         ProviderType::Minimax => Some("https://api.minimax.io/anthropic"),
@@ -1336,13 +1340,15 @@ mod tests {
     #[test]
     fn provider_choices_count() {
         let choices = provider_choices();
-        assert_eq!(choices.len(), 9);
+        assert_eq!(choices.len(), 10);
     }
 
     #[test]
     fn parse_provider_type_ok() {
         let provider = parse_provider_type("openai").unwrap();
         assert_eq!(provider, ProviderType::Openai);
+        let provider = parse_provider_type("custom_dual").unwrap();
+        assert_eq!(provider, ProviderType::CustomDual);
     }
 
     #[test]

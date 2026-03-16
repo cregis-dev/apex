@@ -197,6 +197,7 @@ pub enum ProviderType {
     Openai,
     Anthropic,
     Gemini,
+    CustomDual,
     Deepseek,
     Moonshot,
     Minimax,

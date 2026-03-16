@@ -172,6 +172,45 @@ fn test_channel_lifecycle() {
 }
 
 #[test]
+fn test_custom_dual_channel_add() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+
+    apex_cmd(config_str)
+        .arg("channel")
+        .arg("add")
+        .arg("--name")
+        .arg("dual-agg")
+        .arg("--provider")
+        .arg("custom_dual")
+        .arg("--base-url")
+        .arg("https://api.example.com/v1")
+        .arg("--anthropic-base-url")
+        .arg("https://api.example.com/anthropic")
+        .arg("--api-key")
+        .arg("sk-dual")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已添加 channel: dual-agg"));
+
+    let content = fs::read_to_string(&config_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let channels = json["channels"].as_array().unwrap();
+
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0]["name"], "dual-agg");
+    assert_eq!(channels[0]["provider_type"], "custom_dual");
+    assert_eq!(channels[0]["base_url"], "https://api.example.com/v1");
+    assert_eq!(
+        channels[0]["anthropic_base_url"],
+        "https://api.example.com/anthropic"
+    );
+}
+
+#[test]
 fn test_router_lifecycle() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("apex.json");
