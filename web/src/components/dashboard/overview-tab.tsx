@@ -1,6 +1,7 @@
 "use client";
 
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
+import { useState } from "react";
 import {
   Bar,
   CartesianGrid,
@@ -35,8 +36,71 @@ type OverviewTabProps = {
   analytics: DashboardAnalyticsResponse | null;
 };
 
+type TopologyNodePayload = DashboardAnalyticsResponse["topology"]["nodes"][number] & {
+  depth?: number;
+  value?: number;
+};
+
+type TopologyLinkPayload = DashboardAnalyticsResponse["topology"]["links"][number] & {
+  source?: TopologyNodePayload;
+  target?: TopologyNodePayload;
+};
+
+type TopologyMetrics = {
+  requests: number;
+  total_tokens: number;
+};
+
+type TopologyNodeRendererProps = {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  payload?: TopologyNodePayload;
+};
+
+type TopologyLinkRendererProps = {
+  sourceX?: number;
+  sourceY?: number;
+  sourceControlX?: number;
+  targetX?: number;
+  targetY?: number;
+  targetControlX?: number;
+  linkWidth?: number;
+  payload?: TopologyLinkPayload;
+};
+
+type TopologyHoverOverlay =
+  | {
+      type: "node";
+      title: string;
+      kind: string;
+      requests: number;
+      total_tokens: number;
+      x: number;
+      y: number;
+      revision: string;
+    }
+  | {
+      type: "link";
+      title: string;
+      requests: number;
+      total_tokens: number;
+      x: number;
+      y: number;
+      revision: string;
+    };
+
+function topologySelectorValue(value: string) {
+  return encodeURIComponent(value);
+}
+
 function formatCompact(value: number) {
   return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function formatInteger(value: number) {
+  return value.toLocaleString("en");
 }
 
 function DeltaPill({ value }: { value: number }) {
@@ -56,22 +120,128 @@ function DeltaPill({ value }: { value: number }) {
 }
 
 function formatTopologyValue(value: number) {
-  return `${value.toLocaleString()} requests`;
+  return `${formatInteger(value)} requests`;
 }
 
-function TopologyNode(props: {
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  payload?: { kind?: string };
+function topologyMetricKey(kind: string, name: string) {
+  return `${kind}::${name}`;
+}
+
+function buildTopologyNodeMetrics(
+  flows: DashboardAnalyticsResponse["topology"]["flows"]
+): Map<string, TopologyMetrics> {
+  const metrics = new Map<string, TopologyMetrics>();
+
+  for (const flow of flows) {
+    for (const [kind, name] of [
+      ["team", flow.team_id],
+      ["router", flow.router],
+      ["channel", flow.channel],
+      ["model", flow.model],
+    ] as const) {
+      const key = topologyMetricKey(kind, name);
+      const current = metrics.get(key) ?? { requests: 0, total_tokens: 0 };
+      current.requests += flow.requests;
+      current.total_tokens += flow.total_tokens;
+      metrics.set(key, current);
+    }
+  }
+
+  return metrics;
+}
+
+function truncateLabel(value: string, maxChars: number) {
+  if (maxChars <= 0) {
+    return { text: "", truncated: value.length > 0 };
+  }
+
+  if (value.length <= maxChars) {
+    return { text: value, truncated: false };
+  }
+
+  if (maxChars <= 1) {
+    return { text: "…", truncated: true };
+  }
+
+  return { text: `${value.slice(0, maxChars - 1)}…`, truncated: true };
+}
+
+function formatTopologyKind(kind: string) {
+  return kind.charAt(0).toUpperCase() + kind.slice(1);
+}
+
+function getNodeLabelCapacity(depth: number, height: number) {
+  if (height < 16) {
+    return 0;
+  }
+
+  const availableWidth = depth === 0 || depth === 3 ? 128 : 88;
+  return Math.floor(availableWidth / 7);
+}
+
+function buildTopologyLinkPath(props: {
+  sourceX: number;
+  sourceY: number;
+  sourceControlX: number;
+  targetX: number;
+  targetY: number;
+  targetControlX: number;
 }) {
-  const { x = 0, y = 0, width = 0, height = 0, payload } = props;
+  const { sourceX, sourceY, sourceControlX, targetX, targetY, targetControlX } = props;
+  return `M${sourceX},${sourceY} C${sourceControlX},${sourceY} ${targetControlX},${targetY} ${targetX},${targetY}`;
+}
+
+function TopologyNode(props: TopologyNodeRendererProps & {
+  metrics?: TopologyMetrics;
+  revision: string;
+  onHoverChange?: (tooltip: TopologyHoverOverlay | null) => void;
+}) {
+  const { x = 0, y = 0, width = 0, height = 0, payload, metrics, revision, onHoverChange } = props;
   const kind = payload?.kind ?? "team";
+  const depth = payload?.depth ?? 0;
   const fill = TOPOLOGY_NODE_COLORS[kind] ?? "#f97316";
+  const labelSource = payload?.name ?? "";
+  const canShowLabel = labelSource.length > 0 && height >= 16;
+  const maxChars = getNodeLabelCapacity(depth, height);
+  const { text: nodeLabel } = truncateLabel(labelSource, maxChars);
+  const labelX =
+    depth === 0 ? x + width + 8 : depth === 3 ? x - 8 : x + width / 2;
+  const labelAnchor = depth === 0 ? "start" : depth === 3 ? "end" : "middle";
+  const metricSummary =
+    metrics && height >= 34 ? `${formatInteger(metrics.requests)} req` : "";
+  const requests = metrics?.requests ?? payload?.value ?? 0;
+  const totalTokens = metrics?.total_tokens ?? 0;
+
+  const handleMouseEnter = () => {
+    if (!payload?.name) {
+      return;
+    }
+
+    onHoverChange?.({
+      type: "node",
+      title: payload.name,
+      kind,
+      requests,
+      total_tokens: totalTokens,
+      x: x + width / 2,
+      y: y + height / 2,
+      revision,
+    });
+  };
 
   return (
-    <g>
+    <g
+      className="recharts-sankey-node"
+      data-topology-node={topologySelectorValue(payload?.name ?? "")}
+      data-topology-kind={kind}
+      onMouseEnter={handleMouseEnter}
+      onFocus={handleMouseEnter}
+      onClick={handleMouseEnter}
+      onMouseLeave={() => onHoverChange?.(null)}
+      onBlur={() => onHoverChange?.(null)}
+      tabIndex={0}
+      role="button"
+    >
       <rect
         x={x}
         y={y}
@@ -83,18 +253,40 @@ function TopologyNode(props: {
         stroke="#f97316"
         strokeWidth={1.5}
       />
+      {canShowLabel && nodeLabel ? (
+        <text
+          x={labelX}
+          y={y + height / 2 - (metricSummary ? 7 : 0)}
+          fill="#17233c"
+          fontSize={12}
+          fontWeight={600}
+          textAnchor={labelAnchor}
+          dominantBaseline="middle"
+          pointerEvents="none"
+        >
+          {nodeLabel}
+        </text>
+      ) : null}
+      {metricSummary ? (
+        <text
+          x={labelX}
+          y={y + height / 2 + 9}
+          fill="#64748b"
+          fontSize={10}
+          textAnchor={labelAnchor}
+          dominantBaseline="middle"
+          pointerEvents="none"
+        >
+          {metricSummary}
+        </text>
+      ) : null}
     </g>
   );
 }
 
-function TopologyLink(props: {
-  sourceX?: number;
-  sourceY?: number;
-  sourceControlX?: number;
-  targetX?: number;
-  targetY?: number;
-  targetControlX?: number;
-  linkWidth?: number;
+function TopologyLink(props: TopologyLinkRendererProps & {
+  revision: string;
+  onHoverChange?: (tooltip: TopologyHoverOverlay | null) => void;
 }) {
   const {
     sourceX = 0,
@@ -104,12 +296,58 @@ function TopologyLink(props: {
     targetY = 0,
     targetControlX = 0,
     linkWidth = 0,
+    payload,
+    revision,
+    onHoverChange,
   } = props;
+  const path = buildTopologyLinkPath({
+    sourceX,
+    sourceY,
+    sourceControlX,
+    targetX,
+    targetY,
+    targetControlX,
+  });
+  const sourceName = payload?.source?.name ?? "";
+  const targetName = payload?.target?.name ?? "";
+  const labelSource = sourceName && targetName ? `${sourceName} → ${targetName}` : "";
+  const span = Math.max(targetX - sourceX, 0);
+  const approxChars = Math.floor((span - 24) / 7);
+  const { text: fullPathLabel, truncated } = truncateLabel(labelSource, approxChars);
+  const summaryLabel = `${formatInteger(payload?.value ?? 0)} req`;
+  const canShowPathLabel = labelSource.length > 0 && linkWidth >= 14 && span >= 220 && approxChars >= 14;
+  const canShowSummary = !canShowPathLabel && linkWidth >= 12 && span >= 132;
+  const label = canShowPathLabel ? fullPathLabel : canShowSummary ? summaryLabel : "";
+  const labelOpacity = truncated ? 0.92 : 1;
+  const handleMouseEnter = () => {
+    if (!labelSource) {
+      return;
+    }
+
+    onHoverChange?.({
+      type: "link",
+      title: labelSource,
+      requests: payload?.value ?? 0,
+      total_tokens: payload?.total_tokens ?? 0,
+      x: (sourceX + targetX) / 2,
+      y: (sourceY + targetY) / 2,
+      revision,
+    });
+  };
 
   return (
-    <g>
+    <g
+      data-topology-link={topologySelectorValue(labelSource)}
+      onMouseEnter={handleMouseEnter}
+      onFocus={handleMouseEnter}
+      onClick={handleMouseEnter}
+      onMouseLeave={() => onHoverChange?.(null)}
+      onBlur={() => onHoverChange?.(null)}
+      tabIndex={0}
+      role="button"
+    >
       <path
-        d={`M${sourceX},${sourceY} C${sourceControlX},${sourceY} ${targetControlX},${targetY} ${targetX},${targetY}`}
+        d={path}
         fill="none"
         stroke="#f4d8b5"
         strokeOpacity={0.92}
@@ -117,54 +355,35 @@ function TopologyLink(props: {
         strokeLinecap="round"
       />
       <path
-        d={`M${sourceX},${sourceY} C${sourceControlX},${sourceY} ${targetControlX},${targetY} ${targetX},${targetY}`}
+        d={path}
         fill="none"
         stroke="#efc89a"
         strokeOpacity={0.55}
         strokeWidth={Math.max(linkWidth - 2, 1)}
         strokeLinecap="round"
       />
+      {label ? (
+        <text
+          x={(sourceX + targetX) / 2}
+          y={(sourceY + targetY) / 2}
+          fill="#8e3f1d"
+          fontSize={11}
+          fontWeight={600}
+          textAnchor="middle"
+          dominantBaseline="middle"
+          opacity={labelOpacity}
+          pointerEvents="none"
+        >
+          {label}
+        </text>
+      ) : null}
     </g>
   );
 }
 
-function TopologyTooltip(props: {
-  active?: boolean;
-  payload?: Array<{
-    name?: string;
-    value?: number;
-    payload?: {
-      value?: number;
-      payload?: {
-        name?: string;
-        kind?: string;
-        source?: { name?: string };
-        target?: { name?: string };
-      };
-    };
-  }>;
-}) {
-  const item = props.payload?.[0];
-  if (!props.active || !item) {
-    return null;
-  }
-
-  const raw = item.payload?.payload;
-  const value = item.value ?? item.payload?.value ?? 0;
-  const sourceName = raw?.source?.name;
-  const targetName = raw?.target?.name;
-
-  return (
-    <div className="rounded-xl border border-[#d6dde8] bg-white px-3 py-2 shadow-[0_12px_24px_rgba(15,23,42,0.12)]">
-      <div className="text-sm font-semibold text-[#17233c]">
-        {sourceName && targetName ? `${sourceName} → ${targetName}` : item.name}
-      </div>
-      <div className="mt-1 text-xs text-[#64748b]">{formatTopologyValue(value)}</div>
-    </div>
-  );
-}
-
 export function OverviewTab({ analytics }: OverviewTabProps) {
+  const [topologyTooltip, setTopologyTooltip] = useState<TopologyHoverOverlay | null>(null);
+
   if (!analytics) {
     return (
       <Card>
@@ -174,6 +393,9 @@ export function OverviewTab({ analytics }: OverviewTabProps) {
       </Card>
     );
   }
+
+  const topologyNodeMetrics = buildTopologyNodeMetrics(analytics.topology.flows);
+  const topologyRevision = `${analytics.generated_at}:${analytics.topology.nodes.length}:${analytics.topology.links.length}`;
 
   const kpis = [
     {
@@ -286,23 +508,76 @@ export function OverviewTab({ analytics }: OverviewTabProps) {
                   ))}
                 </div>
                 <div className="h-[332px] w-full">
+                  <div className="relative h-full w-full" onMouseLeave={() => setTopologyTooltip(null)}>
+                    {topologyTooltip && topologyTooltip.revision === topologyRevision ? (
+                      <div
+                        className="pointer-events-none absolute z-10 rounded-xl border border-[#d6dde8] bg-white px-3 py-2 shadow-[0_12px_24px_rgba(15,23,42,0.12)]"
+                        data-topology-tooltip={topologyTooltip.type}
+                        style={{
+                          left: `clamp(16px, ${topologyTooltip.x}px, calc(100% - 16px))`,
+                          top: topologyTooltip.y < 72 ? topologyTooltip.y + 16 : topologyTooltip.y,
+                          transform:
+                            topologyTooltip.y < 72
+                              ? "translate(-50%, 0)"
+                              : "translate(-50%, calc(-100% - 12px))",
+                          maxWidth: "min(320px, calc(100% - 32px))",
+                        }}
+                      >
+                        <div className="text-sm font-semibold text-[#17233c]" data-topology-tooltip-title>
+                          {topologyTooltip.title}
+                        </div>
+                        {topologyTooltip.type === "node" ? (
+                          <div
+                            className="mt-1 text-xs uppercase tracking-[0.18em] text-[#94a3b8]"
+                            data-topology-tooltip-kind
+                          >
+                            {formatTopologyKind(topologyTooltip.kind)}
+                          </div>
+                        ) : null}
+                        <div className="mt-2 grid gap-1 text-xs text-[#64748b]">
+                          <div>{formatTopologyValue(topologyTooltip.requests)}</div>
+                          <div>{`${formatInteger(topologyTooltip.total_tokens)} total tokens`}</div>
+                        </div>
+                      </div>
+                    ) : null}
                   <ResponsiveContainer width="100%" height="100%">
                     <Sankey
                       data={{
                         nodes: analytics.topology.nodes,
                         links: analytics.topology.links,
                       }}
-                      node={<TopologyNode />}
-                      link={<TopologyLink />}
+                      node={(nodeProps: TopologyNodeRendererProps) => (
+                        <TopologyNode
+                          {...nodeProps}
+                          metrics={
+                            nodeProps.payload
+                              ? topologyNodeMetrics.get(
+                                  topologyMetricKey(
+                                    nodeProps.payload.kind ?? "team",
+                                    nodeProps.payload.name ?? ""
+                                  )
+                                )
+                              : undefined
+                          }
+                          revision={topologyRevision}
+                          onHoverChange={setTopologyTooltip}
+                        />
+                      )}
+                      link={(linkProps: TopologyLinkRendererProps) => (
+                        <TopologyLink
+                          {...linkProps}
+                          revision={topologyRevision}
+                          onHoverChange={setTopologyTooltip}
+                        />
+                      )}
                       nodePadding={28}
                       nodeWidth={14}
                       linkCurvature={0.52}
                       margin={{ top: 10, right: 34, bottom: 10, left: 34 }}
                       sort={false}
-                    >
-                      <Tooltip content={<TopologyTooltip />} />
-                    </Sankey>
+                    />
                   </ResponsiveContainer>
+                  </div>
                 </div>
               </div>
             )}
