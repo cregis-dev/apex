@@ -757,6 +757,7 @@ struct DashboardTopologyLink {
     source: usize,
     target: usize,
     value: i64,
+    total_tokens: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1324,7 +1325,7 @@ fn build_topology_section(records: &[DashboardUsageRecord]) -> DashboardTopology
         index
     };
 
-    let mut link_values: HashMap<(usize, usize), i64> = HashMap::new();
+    let mut link_values: HashMap<(usize, usize), (i64, i64)> = HashMap::new();
     for flow in &flows {
         let team_idx = ensure_node(&flow.team_id, "team");
         let router_idx = ensure_node(&flow.router, "router");
@@ -1338,18 +1339,24 @@ fn build_topology_section(records: &[DashboardUsageRecord]) -> DashboardTopology
         ] {
             link_values
                 .entry(pair)
-                .and_modify(|value| *value += flow.requests)
-                .or_insert(flow.requests);
+                .and_modify(|value| {
+                    value.0 += flow.requests;
+                    value.1 += flow.total_tokens;
+                })
+                .or_insert((flow.requests, flow.total_tokens));
         }
     }
 
     let links = link_values
         .into_iter()
-        .map(|((source, target), value)| DashboardTopologyLink {
-            source,
-            target,
-            value,
-        })
+        .map(
+            |((source, target), (value, total_tokens))| DashboardTopologyLink {
+                source,
+                target,
+                value,
+                total_tokens,
+            },
+        )
         .collect::<Vec<_>>();
 
     DashboardTopologySection {
@@ -2355,6 +2362,7 @@ mod tests {
     use crate::config::{Channel, Global, ProviderType, Retries, Timeouts};
     use crate::providers::{AccessAudit, RateLimiter, RouteKind};
     use std::sync::Mutex;
+    use tempfile::{TempDir, tempdir};
 
     struct MockAccessAudit {
         calls: Arc<Mutex<Vec<(ProviderType, bool)>>>,
@@ -2457,13 +2465,19 @@ mod tests {
         }
     }
 
+    fn create_test_database() -> (TempDir, Arc<Database>) {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(Database::new(Some(dir.path().to_string_lossy().to_string())).unwrap());
+        (dir, db)
+    }
+
     #[tokio::test]
     async fn test_rate_limiter_blocks() {
         let config = create_test_config();
         let config_arc = Arc::new(RwLock::new(config));
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
-        let database = Arc::new(Database::new(None).unwrap());
+        let (_dir, database) = create_test_database();
         let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
@@ -2500,7 +2514,7 @@ mod tests {
         let config_arc = Arc::new(RwLock::new(config));
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
-        let database = Arc::new(Database::new(None).unwrap());
+        let (_dir, database) = create_test_database();
         let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
@@ -2598,6 +2612,65 @@ mod tests {
         assert!(default_nodes.iter().any(|node| node.kind == "router"));
     }
 
+    #[test]
+    fn topology_links_include_aggregated_total_tokens() {
+        let records = vec![
+            DashboardUsageRecord {
+                id: 1,
+                timestamp: "2026-03-12 12:00:00".to_string(),
+                request_id: Some("req-1".to_string()),
+                team_id: "team-alpha".to_string(),
+                router: "default".to_string(),
+                matched_rule: Some("*".to_string()),
+                final_channel: "openai".to_string(),
+                channel: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                input_tokens: 10,
+                output_tokens: 20,
+                latency_ms: Some(100.0),
+                fallback_triggered: false,
+                status: "success".to_string(),
+                status_code: Some(200),
+                error_message: None,
+                provider_trace_id: None,
+                provider_error_body: None,
+            },
+            DashboardUsageRecord {
+                id: 2,
+                timestamp: "2026-03-12 12:01:00".to_string(),
+                request_id: Some("req-2".to_string()),
+                team_id: "team-alpha".to_string(),
+                router: "default".to_string(),
+                matched_rule: Some("*".to_string()),
+                final_channel: "openai".to_string(),
+                channel: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                input_tokens: 15,
+                output_tokens: 25,
+                latency_ms: Some(120.0),
+                fallback_triggered: false,
+                status: "success".to_string(),
+                status_code: Some(200),
+                error_message: None,
+                provider_trace_id: None,
+                provider_error_body: None,
+            },
+        ];
+
+        let topology = build_topology_section(&records);
+        let team_link = topology
+            .links
+            .iter()
+            .find(|link| {
+                topology.nodes[link.source].name == "team-alpha"
+                    && topology.nodes[link.target].name == "default"
+            })
+            .expect("team -> router link should exist");
+
+        assert_eq!(team_link.value, 2);
+        assert_eq!(team_link.total_tokens, 70);
+    }
+
     #[tokio::test]
     async fn test_routing_logic() {
         let mut config = create_test_config();
@@ -2633,7 +2706,7 @@ mod tests {
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
         let config_arc = Arc::new(RwLock::new(config));
 
-        let database = Arc::new(Database::new(None).unwrap());
+        let (_dir, database) = create_test_database();
         let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
@@ -2685,7 +2758,7 @@ mod tests {
 
         let config_arc = Arc::new(RwLock::new(config));
 
-        let database = Arc::new(Database::new(None).unwrap());
+        let (_dir, database) = create_test_database();
         let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,

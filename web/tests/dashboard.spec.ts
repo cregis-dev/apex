@@ -51,19 +51,43 @@ const analyticsResponse = {
     ],
   },
   topology: {
-    nodes: [],
-    links: [],
+    nodes: [
+      { name: "team-a", kind: "team" },
+      { name: "default-router", kind: "router" },
+      { name: "openai-primary-gateway", kind: "channel" },
+      { name: "gpt-4o", kind: "model" },
+      { name: "team-observability-platform", kind: "team" },
+      { name: "fallback-router-with-extended-name", kind: "router" },
+      { name: "bedrock-cross-region-channel", kind: "channel" },
+      { name: "claude-3-7-sonnet", kind: "model" },
+    ],
+    links: [
+      { source: 0, target: 1, value: 680, total_tokens: 280000 },
+      { source: 1, target: 2, value: 680, total_tokens: 280000 },
+      { source: 2, target: 3, value: 680, total_tokens: 280000 },
+      { source: 4, target: 5, value: 220, total_tokens: 91000 },
+      { source: 5, target: 6, value: 220, total_tokens: 91000 },
+      { source: 6, target: 7, value: 220, total_tokens: 91000 },
+    ],
     flows: [
       {
         team_id: "team-a",
-        router: "default",
-        channel: "openai",
+        router: "default-router",
+        channel: "openai-primary-gateway",
         model: "gpt-4o",
         requests: 680,
         total_tokens: 280000,
       },
+      {
+        team_id: "team-observability-platform",
+        router: "fallback-router-with-extended-name",
+        channel: "bedrock-cross-region-channel",
+        model: "claude-3-7-sonnet",
+        requests: 220,
+        total_tokens: 91000,
+      },
     ],
-    render_mode: "flow-summary",
+    render_mode: "sankey",
   },
   team_usage: {
     leaderboard: [
@@ -109,6 +133,16 @@ const analyticsResponse = {
   records_meta: {
     total: 25,
     latest_cursor: { id: 101, timestamp: "2026-03-12 22:29:00" },
+  },
+};
+
+const emptyTopologyAnalyticsResponse = {
+  ...analyticsResponse,
+  topology: {
+    nodes: [],
+    links: [],
+    flows: [],
+    render_mode: "sankey",
   },
 };
 
@@ -457,6 +491,51 @@ test.describe("Dashboard page", () => {
 
     await page.getByRole("tab", { name: "Records" }).click();
     await expect(page.getByText("Raw Usage Records")).toBeVisible();
+  });
+
+  test("renders topology labels and shows full tooltip details on focus", async ({ page }) => {
+    await mockDashboardApis(page);
+    await primeStoredToken(page);
+
+    await page.goto("/dashboard?tab=overview");
+
+    await expect(page.getByText("Traffic Topology")).toBeVisible({ timeout: 15000 });
+    await expect(page.locator("svg text").filter({ hasText: "team-a" }).first()).toBeVisible();
+    await expect(page.locator("svg text").filter({ hasText: "680 req" }).first()).toBeVisible();
+
+    await page.locator('[data-topology-node="team-observability-platform"]').focus();
+    const nodeTooltip = page.locator('[data-topology-tooltip="node"]');
+    await expect(nodeTooltip.locator("[data-topology-tooltip-title]")).toHaveText(
+      "team-observability-platform"
+    );
+    await expect(nodeTooltip.locator("[data-topology-tooltip-kind]")).toHaveText("Team");
+    await expect(nodeTooltip.getByText("220 requests")).toBeVisible();
+    await expect(nodeTooltip.getByText("91,000 total tokens")).toBeVisible();
+
+    await page
+      .locator(
+        '[data-topology-link="fallback-router-with-extended-name%20%E2%86%92%20bedrock-cross-region-channel"]'
+      )
+      .focus();
+    const linkTooltip = page.locator('[data-topology-tooltip="link"]');
+    await expect(linkTooltip.locator("[data-topology-tooltip-title]")).toHaveText(
+      "fallback-router-with-extended-name → bedrock-cross-region-channel"
+    );
+    await expect(linkTooltip.getByText("220 requests")).toBeVisible();
+    await expect(linkTooltip.getByText("91,000 total tokens")).toBeVisible();
+  });
+
+  test("keeps the empty topology state without rendering tooltip overlays", async ({ page }) => {
+    await mockDashboardApis(page, { analytics: emptyTopologyAnalyticsResponse });
+    await primeStoredToken(page);
+
+    await page.goto("/dashboard?tab=overview");
+
+    await expect(page.getByText("No topology flows found for the current filters.")).toBeVisible({
+      timeout: 15000,
+    });
+    await expect(page.locator('[data-topology-tooltip="node"]')).toHaveCount(0);
+    await expect(page.locator('[data-topology-tooltip="link"]')).toHaveCount(0);
   });
 
   test("supports record copy feedback and details drawer interactions", async ({ page }) => {

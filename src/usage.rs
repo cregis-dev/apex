@@ -344,16 +344,21 @@ pub async fn wrap_response(
 mod tests {
     use super::*;
     use crate::database::Database;
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
     fn create_test_metrics() -> Arc<MetricsState> {
         Arc::new(MetricsState::new().unwrap())
     }
 
+    fn create_test_logger() -> (TempDir, Arc<UsageLogger>) {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(Database::new(Some(dir.path().to_string_lossy().to_string())).unwrap());
+        (dir, Arc::new(UsageLogger::new(db)))
+    }
+
     #[test]
     fn test_extract_usage_openai() {
-        let db = Arc::new(Database::new(None).unwrap());
-        let logger = Arc::new(UsageLogger::new(db));
+        let (_dir, logger) = create_test_logger();
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
@@ -383,8 +388,7 @@ mod tests {
 
     #[test]
     fn test_extract_usage_anthropic_message_start() {
-        let db = Arc::new(Database::new(None).unwrap());
-        let logger = Arc::new(UsageLogger::new(db));
+        let (_dir, logger) = create_test_logger();
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
@@ -417,8 +421,7 @@ mod tests {
 
     #[test]
     fn test_extract_usage_anthropic_message_delta() {
-        let db = Arc::new(Database::new(None).unwrap());
-        let logger = Arc::new(UsageLogger::new(db));
+        let (_dir, logger) = create_test_logger();
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
@@ -448,8 +451,7 @@ mod tests {
 
     #[test]
     fn test_process_sse_line() {
-        let db = Arc::new(Database::new(None).unwrap());
-        let logger = Arc::new(UsageLogger::new(db));
+        let (_dir, logger) = create_test_logger();
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(
@@ -474,8 +476,7 @@ mod tests {
 
     #[test]
     fn test_process_chunk_sse_partial() {
-        let db = Arc::new(Database::new(None).unwrap());
-        let logger = Arc::new(UsageLogger::new(db));
+        let (_dir, logger) = create_test_logger();
         let metrics = create_test_metrics();
 
         let mut tracker = UsageTrackerState::new(

@@ -279,7 +279,7 @@ Apex 支持强大的路由规则链。建议直接编辑 `config.json` 的 `rout
 
 ### 双协议支持 (Dual Protocol)
 
-对于同时支持 OpenAI 和 Anthropic 协议的 Provider（如 MiniMax, DeepSeek, Ollama, OpenRouter），配置 `anthropic_base_url`：
+对于同时支持 OpenAI 和 Anthropic 协议的 Provider（如 `custom_dual`, MiniMax, DeepSeek, Ollama, OpenRouter），配置 `anthropic_base_url`：
 
 ```bash
 apex channel add \

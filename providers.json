@@ -27,6 +27,15 @@
       "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
     },
     {
+      "provider_type": "custom_dual",
+      "base_url": "https://api.example.com/v1",
+      "anthropic_base_url": "https://api.example.com/anthropic",
+      "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "CUSTOM_DUAL_API_KEY" },
+      "headers": {},
+      "model_map": {},
+      "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
+    },
+    {
       "provider_type": "deepseek",
       "base_url": "https://api.deepseek.com",
       "anthropic_base_url": "https://api.deepseek.com/anthropic",

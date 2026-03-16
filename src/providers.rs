@@ -123,6 +123,7 @@ impl ProviderRegistry {
         adapters.insert(ProviderType::Openai, Box::new(OpenAiAdapter));
         adapters.insert(ProviderType::Anthropic, Box::new(AnthropicAdapter));
         adapters.insert(ProviderType::Gemini, Box::new(GeminiAdapter));
+        adapters.insert(ProviderType::CustomDual, Box::new(CustomDualAdapter));
 
         // Providers that support both protocols
         adapters.insert(ProviderType::Deepseek, Box::new(DualProtocolAdapter::new()));
@@ -303,6 +304,89 @@ fn apply_bearer_auth(headers: &mut HeaderMap, api_key: &str, header_name: &str) 
     }
 }
 
+fn openai_compatible_path(route: RouteKind, path: &str) -> String {
+    if matches!(route, RouteKind::Anthropic) {
+        "chat/completions".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn openai_compatible_body(
+    route: RouteKind,
+    body: &Bytes,
+    model_map: &Option<HashMap<String, String>>,
+) -> Bytes {
+    if matches!(route, RouteKind::Anthropic) {
+        let body = convert_anthropic_to_openai(body);
+        apply_model_map(&body, model_map)
+    } else {
+        apply_model_map(body, model_map)
+    }
+}
+
+fn handle_openai_compatible_response(
+    route: RouteKind,
+    resp: reqwest::Response,
+    timeout: Duration,
+) -> Response<Body> {
+    if matches!(route, RouteKind::Anthropic) {
+        let is_stream = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("text/event-stream"))
+            .unwrap_or(false);
+
+        if is_stream {
+            let stream = resp.bytes_stream();
+            let converted_stream = convert_openai_stream_to_anthropic(stream);
+
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .header("cache-control", "no-cache")
+                .header("connection", "keep-alive")
+                .body(Body::from_stream(converted_stream))
+                .unwrap();
+        }
+
+        let status = resp.status();
+        let mut builder = Response::builder().status(status);
+        for (name, value) in resp.headers().iter() {
+            if should_forward_response_header(name) {
+                builder = builder.header(name, value);
+            }
+        }
+
+        let stream = resp.bytes_stream().timeout(timeout);
+        let stream = stream.map(|item| match item {
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(err)) => Err(io::Error::other(err)),
+            Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
+        });
+
+        let future = stream
+            .fold(Vec::new(), |mut acc, item| {
+                if let Ok(bytes) = item {
+                    acc.extend_from_slice(&bytes);
+                }
+                acc
+            })
+            .map(|bytes| {
+                let b = Bytes::from(bytes);
+                let converted = convert_openai_response_to_anthropic(b);
+                Ok::<_, io::Error>(converted)
+            });
+
+        builder
+            .body(Body::from_stream(stream::once(future)))
+            .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "invalid response"))
+    } else {
+        convert_response(resp, timeout)
+    }
+}
+
 // --- Adapters ---
 
 /// Default adapter for OpenAI-compatible providers (Deepseek, Moonshot, etc.).
@@ -310,11 +394,7 @@ struct DefaultAdapter;
 
 impl ProviderAdapter for DefaultAdapter {
     fn map_path(&self, route: RouteKind, _base_url: &str, path: &str) -> String {
-        if matches!(route, RouteKind::Anthropic) {
-            "chat/completions".to_string()
-        } else {
-            path.to_string()
-        }
+        openai_compatible_path(route, path)
     }
 
     fn transform_body(
@@ -323,12 +403,7 @@ impl ProviderAdapter for DefaultAdapter {
         body: &Bytes,
         model_map: &Option<HashMap<String, String>>,
     ) -> Bytes {
-        if matches!(route, RouteKind::Anthropic) {
-            let body = convert_anthropic_to_openai(body);
-            apply_model_map(&body, model_map)
-        } else {
-            apply_model_map(body, model_map)
-        }
+        openai_compatible_body(route, body, model_map)
     }
 
     fn apply_auth_headers(
@@ -347,63 +422,7 @@ impl ProviderAdapter for DefaultAdapter {
         resp: reqwest::Response,
         timeout: Duration,
     ) -> Response<Body> {
-        // If client expects Anthropic format, but provider is OpenAI-compatible (DefaultAdapter),
-        // we need to convert the response.
-        if matches!(route, RouteKind::Anthropic) {
-            let is_stream = resp
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.contains("text/event-stream"))
-                .unwrap_or(false);
-
-            if is_stream {
-                let stream = resp.bytes_stream();
-                let converted_stream = convert_openai_stream_to_anthropic(stream);
-
-                return Response::builder()
-                    .status(StatusCode::OK)
-                    .header("content-type", "text/event-stream")
-                    .header("cache-control", "no-cache")
-                    .header("connection", "keep-alive")
-                    .body(Body::from_stream(converted_stream))
-                    .unwrap();
-            }
-
-            let status = resp.status();
-            let mut builder = Response::builder().status(status);
-            for (name, value) in resp.headers().iter() {
-                if should_forward_response_header(name) {
-                    builder = builder.header(name, value);
-                }
-            }
-
-            let stream = resp.bytes_stream().timeout(timeout);
-            let stream = stream.map(|item| match item {
-                Ok(Ok(bytes)) => Ok(bytes),
-                Ok(Err(err)) => Err(io::Error::other(err)),
-                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
-            });
-
-            let future = stream
-                .fold(Vec::new(), |mut acc, item| {
-                    if let Ok(bytes) = item {
-                        acc.extend_from_slice(&bytes);
-                    }
-                    acc
-                })
-                .map(|bytes| {
-                    let b = Bytes::from(bytes);
-                    let converted = convert_openai_response_to_anthropic(b);
-                    Ok::<_, io::Error>(converted)
-                });
-
-            builder
-                .body(Body::from_stream(stream::once(future)))
-                .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "invalid response"))
-        } else {
-            convert_response(resp, timeout)
-        }
+        handle_openai_compatible_response(route, resp, timeout)
     }
 }
 
@@ -411,6 +430,46 @@ impl ProviderAdapter for DefaultAdapter {
 struct OpenAiAdapter;
 
 impl ProviderAdapter for OpenAiAdapter {
+    fn map_path(&self, route: RouteKind, _base_url: &str, path: &str) -> String {
+        openai_compatible_path(route, path)
+    }
+
+    fn transform_body(
+        &self,
+        route: RouteKind,
+        body: &Bytes,
+        model_map: &Option<HashMap<String, String>>,
+    ) -> Bytes {
+        openai_compatible_body(route, body, model_map)
+    }
+
+    fn apply_auth_headers(
+        &self,
+        _route: RouteKind,
+        headers: &mut HeaderMap,
+        api_key: &str,
+        _base_url: &str,
+    ) {
+        apply_bearer_auth(headers, api_key, "authorization");
+    }
+
+    fn handle_response(
+        &self,
+        route: RouteKind,
+        resp: reqwest::Response,
+        timeout: Duration,
+    ) -> Response<Body> {
+        handle_openai_compatible_response(route, resp, timeout)
+    }
+}
+
+/// Adapter for custom upstreams that natively support both OpenAI and Anthropic protocols.
+///
+/// This is intended for aggregator or proxy platforms where callers provide the
+/// OpenAI and Anthropic base URLs explicitly in channel config.
+struct CustomDualAdapter;
+
+impl ProviderAdapter for CustomDualAdapter {
     fn map_path(&self, _route: RouteKind, _base_url: &str, path: &str) -> String {
         path.to_string()
     }
@@ -426,12 +485,23 @@ impl ProviderAdapter for OpenAiAdapter {
 
     fn apply_auth_headers(
         &self,
-        _route: RouteKind,
+        route: RouteKind,
         headers: &mut HeaderMap,
         api_key: &str,
         _base_url: &str,
     ) {
-        apply_bearer_auth(headers, api_key, "authorization");
+        match route {
+            RouteKind::Anthropic => {
+                apply_bearer_auth(headers, api_key, "x-api-key");
+                if !headers.contains_key("anthropic-version")
+                    && let Ok(name) = HeaderName::from_bytes(b"anthropic-version")
+                    && let Ok(value) = HeaderValue::from_str("2023-06-01")
+                {
+                    headers.insert(name, value);
+                }
+            }
+            RouteKind::Openai => apply_bearer_auth(headers, api_key, "authorization"),
+        }
     }
 }
 
@@ -810,6 +880,135 @@ mod tests {
         )
         .unwrap();
         assert!(prepared.headers.get("authorization").is_some());
+    }
+
+    #[test]
+    fn openai_anthropic_route_bridges_to_chat_completions() {
+        let registry = ProviderRegistry::new();
+        let body = Bytes::from(
+            r#"{"model":"gpt-4o","system":"Be terse","max_tokens":64,"messages":[{"role":"user","content":"Hi"}],"stream":true}"#,
+        );
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::Openai,
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Anthropic,
+            &channel.base_url,
+            "/v1/messages",
+            None,
+            &headers,
+            &body,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(prepared.headers.get("authorization").unwrap(), "Bearer key");
+        assert!(prepared.headers.get("x-api-key").is_none());
+
+        let value: serde_json::Value = serde_json::from_slice(&prepared.body).unwrap();
+        assert_eq!(value["model"], "gpt-4o");
+        assert_eq!(value["messages"][0]["role"], "system");
+        assert_eq!(value["messages"][0]["content"], "Be terse");
+        assert_eq!(value["messages"][1]["role"], "user");
+        assert_eq!(value["max_tokens"], 64);
+        assert_eq!(value["stream"], true);
+    }
+
+    #[test]
+    fn custom_dual_anthropic_route_uses_native_messages_endpoint() {
+        let registry = ProviderRegistry::new();
+        let body = Bytes::from(
+            r#"{"model":"claude-sonnet-4","messages":[{"role":"user","content":"Hi"}]}"#,
+        );
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::CustomDual,
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: Some("https://api.example.com/anthropic".to_string()),
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Anthropic,
+            &channel.base_url,
+            "/v1/messages",
+            None,
+            &headers,
+            &body,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://api.example.com/anthropic/v1/messages"
+        );
+        assert_eq!(prepared.body, body);
+        assert_eq!(prepared.headers.get("x-api-key").unwrap(), "key");
+        assert_eq!(
+            prepared
+                .headers
+                .get("anthropic-version")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "2023-06-01"
+        );
+        assert!(prepared.headers.get("authorization").is_none());
+    }
+
+    #[test]
+    fn custom_dual_openai_route_uses_openai_auth_header() {
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::CustomDual,
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: Some("https://api.example.com/anthropic".to_string()),
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Openai,
+            &channel.base_url,
+            "/v1/chat/completions",
+            None,
+            &headers,
+            &Bytes::from("{}"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(prepared.headers.get("authorization").unwrap(), "Bearer key");
+        assert!(prepared.headers.get("x-api-key").is_none());
     }
 
     #[test]

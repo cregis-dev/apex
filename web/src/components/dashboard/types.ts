@@ -77,6 +77,7 @@ export interface DashboardTopologyLink {
   source: number;
   target: number;
   value: number;
+  total_tokens: number;
 }
 
 export interface DashboardFlowSummary {

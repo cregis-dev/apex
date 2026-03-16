@@ -36,6 +36,13 @@
       }
     },
     {
+      "name": "aggregator-dual",
+      "provider_type": "custom_dual",
+      "base_url": "https://api.example.com/v1",
+      "anthropic_base_url": "https://api.example.com/anthropic",
+      "api_key": "${CUSTOM_DUAL_API_KEY}"
+    },
+    {
       "name": "minimax-coding",
       "provider_type": "minimax",
       "base_url": "https://api.minimax.chat/v1",
