@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="100%" height="100%">
+  <defs>
+    <!-- 全局 3D 投影滤镜 -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+
+    <!-- 齿轮中心镂空遮罩 -->
+    <mask id="gearHole">
+      <rect width="500" height="500" fill="white"/>
+      <circle cx="250" cy="250" r="115" fill="black"/>
+    </mask>
+
+    <!-- 齿轮渐变色 -->
+    <linearGradient id="gearGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFCA28"/>
+      <stop offset="25%" stop-color="#FF9800"/>
+      <stop offset="75%" stop-color="#E65100"/>
+      <stop offset="100%" stop-color="#870000"/>
+    </linearGradient>
+
+    <!-- 字母 'A' 右侧长腿渐变 -->
+    <linearGradient id="rightLegGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFD54F"/>
+      <stop offset="50%" stop-color="#FF9800"/>
+      <stop offset="100%" stop-color="#BF360C"/>
+    </linearGradient>
+
+    <!-- 字母 'A' 左上侧腿渐变 -->
+    <linearGradient id="topLeftGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFCA28"/>
+      <stop offset="100%" stop-color="#E65100"/>
+    </linearGradient>
+
+    <!-- 字母 'A' 中间横幅渐变 (模拟插入阴影) -->
+    <linearGradient id="crossbarGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FF9800"/>
+      <stop offset="100%" stop-color="#6A0000"/>
+    </linearGradient>
+
+    <!-- 字母 'A' 左下侧腿渐变 (顶部带深色阴影) -->
+    <linearGradient id="bottomLeftGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#4A0000"/>
+      <stop offset="40%" stop-color="#D84315"/>
+      <stop offset="100%" stop-color="#FF9800"/>
+    </linearGradient>
+
+    <!-- 单个齿轮的齿模型 -->
+    <g id="tooth">
+      <polygon points="230,75 270,75 282,110 218,110"/>
+    </g>
+
+    <!-- 完整齿轮基础形状 -->
+    <g id="gearShape">
+      <circle cx="250" cy="250" r="150"/>
+      <use href="#tooth"/>
+      <use href="#tooth" transform="rotate(45 250 250)"/>
+      <use href="#tooth" transform="rotate(90 250 250)"/>
+      <use href="#tooth" transform="rotate(135 250 250)"/>
+      <use href="#tooth" transform="rotate(180 250 250)"/>
+      <use href="#tooth" transform="rotate(225 250 250)"/>
+      <use href="#tooth" transform="rotate(270 250 250)"/>
+      <use href="#tooth" transform="rotate(315 250 250)"/>
+    </g>
+  </defs>
+
+  <!-- 渲染外围齿轮 -->
+  <g filter="url(#shadow)">
+    <use href="#gearShape" fill="url(#gearGrad)" mask="url(#gearHole)"/>
+    <!-- 齿轮内圈高光/立体边缘 -->
+    <circle cx="250" cy="250" r="115" fill="none" stroke="#FFCA28" stroke-width="2" opacity="0.6"/>
+    <!-- 齿轮外圈暗部立体边缘 -->
+    <circle cx="250" cy="250" r="150" fill="none" stroke="#BF360C" stroke-width="2" opacity="0.4"/>
+  </g>
+
+  <!-- 渲染中心字母 'A' (严格按照视觉层级从后到前绘制) -->
+  <g filter="url(#shadow)">
+    <!-- 1. 左下侧腿 (最底层) -->
+    <polygon points="162.5,285 210,285 190,340 140,340" fill="url(#bottomLeftGrad)"/>
+    
+    <!-- 2. 中间横幅 (覆盖在左下腿之上，插入右侧腿之下) -->
+    <polygon points="176.8,250 277.3,250 290,285 162.5,285" fill="url(#crossbarGrad)"/>
+    
+    <!-- 3. 左上侧腿 (与横幅相连) -->
+    <polygon points="230,120 270,120 222.7,250 176.8,250" fill="url(#topLeftGrad)"/>
+    
+    <!-- 4. 右侧长腿 (最顶层，覆盖左上腿的右半部分形成A的顶部尖端) -->
+    <polygon points="230,120 270,120 360,340 310,340" fill="url(#rightLegGrad)"/>
+  </g>
+</svg>
