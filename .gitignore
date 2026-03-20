@@ -15,6 +15,8 @@ target/
 # E2E Test artifacts
 tests/e2e/manual_config.json
 tests/e2e/server.log
+tests/e2e/generated.e2e.config.json
+.env.e2e
 
 # Python artifacts
 __pycache__/
@@ -28,7 +30,6 @@ __pycache__/
 .vscode/
 .idea/
 .trae/
-_bmad/
 
 # Local test runtime directory
 .run/

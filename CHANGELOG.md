@@ -144,4 +144,4 @@ CREATE TABLE metrics_latency (...);
 
 ---
 
-*For detailed implementation artifacts, see [docs/implementation-artifacts/](docs/implementation-artifacts/)*
+*For detailed implementation artifacts, see [_bmad-output/implementation/](_bmad-output/implementation/)*
