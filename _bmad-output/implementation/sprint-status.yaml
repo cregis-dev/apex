@@ -23,7 +23,7 @@
 #   - done: Retrospective has been completed
 
 generated: 2026-03-20T00:00:00+08:00
-last_updated: 2026-03-20T00:00:00+08:00
+last_updated: 2026-03-21T00:44:09+08:00
 project: apex
 project_key: NOKEY
 tracking_system: file-system
@@ -74,7 +74,7 @@ development_status:
 
   epic-7: in-progress
   7-1-pii-masking-engine: done
-  7-2-compliance-middleware: backlog
+  7-2-compliance-middleware: ready-for-dev
   epic-7-retrospective: optional
 
   epic-8: done
