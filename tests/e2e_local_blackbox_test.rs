@@ -99,7 +99,12 @@ APEX_UPSTREAM_1_MODEL=mock-openai-model
         .send()
         .await
         .unwrap();
-    assert_eq!(usage.status(), 200, "gateway logs:\n{}", gateway.read_logs());
+    assert_eq!(
+        usage.status(),
+        200,
+        "gateway logs:\n{}",
+        gateway.read_logs()
+    );
     let usage_body: serde_json::Value = usage.json().await.unwrap();
     assert_eq!(usage_body["total"], 1);
     assert_eq!(usage_body["data"][0]["team_id"], "blackbox-team");
