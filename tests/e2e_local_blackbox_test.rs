@@ -18,7 +18,7 @@ async fn local_blackbox_openai_chat_and_models_work() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("generated.e2e.config.json");
 
-    let env = E2eEnv::from_str(&format!(
+    let env: E2eEnv = format!(
         r#"
 APEX_E2E_LISTEN={listen}
 APEX_E2E_TEAM_ID=blackbox-team
@@ -34,7 +34,8 @@ APEX_UPSTREAM_1_BASE_URL={}
 APEX_UPSTREAM_1_MODEL=mock-openai-model
 "#,
         upstream.base_url()
-    ))
+    )
+    .parse()
     .unwrap();
 
     write_config(&env, &config_path).unwrap();
@@ -120,7 +121,7 @@ async fn local_blackbox_anthropic_messages_and_stream_work() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("generated.e2e.config.json");
 
-    let env = E2eEnv::from_str(&format!(
+    let env: E2eEnv = format!(
         r#"
 APEX_E2E_LISTEN={listen}
 APEX_E2E_TEAM_ID=anthropic-team
@@ -140,7 +141,8 @@ APEX_UPSTREAM_1_HEADERS_JSON={{"anthropic-version":"2023-06-01"}}
 "#,
         upstream.base_url(),
         upstream.base_url()
-    ))
+    )
+    .parse()
     .unwrap();
 
     write_config(&env, &config_path).unwrap();
@@ -212,7 +214,7 @@ async fn local_blackbox_fallback_to_secondary_channel_works() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("generated.e2e.config.json");
 
-    let env = E2eEnv::from_str(&format!(
+    let env: E2eEnv = format!(
         r#"
 APEX_E2E_LISTEN={listen}
 APEX_E2E_TEAM_ID=fallback-team
@@ -234,7 +236,8 @@ APEX_UPSTREAM_2_MODEL=good-model
 "#,
         bad_upstream.base_url(),
         good_upstream.base_url(),
-    ))
+    )
+    .parse()
     .unwrap();
 
     let mut config = harness::config_builder::build_config(&env, &config_path);
@@ -274,7 +277,7 @@ async fn local_blackbox_hot_reload_switches_channel() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("generated.e2e.config.json");
 
-    let env = E2eEnv::from_str(&format!(
+    let env: E2eEnv = format!(
         r#"
 APEX_E2E_LISTEN={listen}
 APEX_E2E_TEAM_ID=reload-team
@@ -289,7 +292,8 @@ APEX_UPSTREAM_1_BASE_URL={}
 APEX_UPSTREAM_1_MODEL=reload-primary-model
 "#,
         first_upstream.base_url(),
-    ))
+    )
+    .parse()
     .unwrap();
 
     let mut config = harness::config_builder::build_config(&env, &config_path);

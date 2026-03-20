@@ -6,8 +6,7 @@ use tempfile::tempdir;
 
 #[test]
 fn parses_env_and_builds_config() {
-    let env = E2eEnv::from_str(
-        r#"
+    let env: E2eEnv = (r#"
 APEX_E2E_LISTEN=127.0.0.1:22345
 APEX_E2E_TEAM_ID=smoke-team
 APEX_E2E_TEAM_KEY=sk-apex-e2e-team
@@ -33,9 +32,9 @@ APEX_UPSTREAM_2_API_KEY=sk-anthropic
 APEX_UPSTREAM_2_ANTHROPIC_BASE_URL=https://api.anthropic.com
 APEX_UPSTREAM_2_MODEL_MAP_JSON={"apex-test-chat":"claude-sonnet-test"}
 APEX_UPSTREAM_2_HEADERS_JSON={"anthropic-version":"2023-06-01"}
-"#,
-    )
-    .unwrap();
+"#,)
+        .parse()
+        .unwrap();
 
     assert_eq!(env.listen, "127.0.0.1:22345");
     assert_eq!(env.upstreams.len(), 2);

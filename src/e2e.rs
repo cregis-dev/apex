@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -40,10 +41,14 @@ impl E2eEnv {
     pub fn from_env_file(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read env file: {}", path.display()))?;
-        Self::from_str(&content)
+        content.parse()
     }
+}
 
-    pub fn from_str(content: &str) -> anyhow::Result<Self> {
+impl FromStr for E2eEnv {
+    type Err = anyhow::Error;
+
+    fn from_str(content: &str) -> anyhow::Result<Self> {
         let values = parse_env_map(content)?;
         let listen = get_or_default(&values, "APEX_E2E_LISTEN", "127.0.0.1:12356");
         let team_id = get_or_default(&values, "APEX_E2E_TEAM_ID", "e2e-team");
