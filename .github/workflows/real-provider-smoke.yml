@@ -1,0 +1,95 @@
+name: Real Provider Smoke
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  APEX_E2E_LISTEN: ${{ vars.APEX_E2E_LISTEN || '127.0.0.1:12356' }}
+  APEX_E2E_TEAM_ID: ${{ vars.APEX_E2E_TEAM_ID || 'e2e-team' }}
+  APEX_E2E_TEAM_KEY: ${{ secrets.APEX_E2E_TEAM_KEY }}
+  APEX_E2E_ADMIN_KEY: ${{ secrets.APEX_E2E_ADMIN_KEY }}
+  APEX_E2E_ROUTER_NAME: ${{ vars.APEX_E2E_ROUTER_NAME || 'e2e-default' }}
+  APEX_E2E_ROUTER_STRATEGY: ${{ vars.APEX_E2E_ROUTER_STRATEGY || 'priority' }}
+  APEX_E2E_TEST_MODEL: ${{ vars.APEX_E2E_TEST_MODEL || 'apex-test-chat' }}
+  APEX_E2E_ENABLE_MCP: ${{ vars.APEX_E2E_ENABLE_MCP || 'true' }}
+  APEX_E2E_METRICS_PATH: ${{ vars.APEX_E2E_METRICS_PATH || '/metrics' }}
+  APEX_UPSTREAM_1_ENABLED: ${{ vars.APEX_UPSTREAM_1_ENABLED || 'true' }}
+  APEX_UPSTREAM_1_NAME: ${{ vars.APEX_UPSTREAM_1_NAME || 'openai_primary' }}
+  APEX_UPSTREAM_1_TYPE: ${{ vars.APEX_UPSTREAM_1_TYPE || 'openai' }}
+  APEX_UPSTREAM_1_BASE_URL: ${{ vars.APEX_UPSTREAM_1_BASE_URL }}
+  APEX_UPSTREAM_1_API_KEY: ${{ secrets.APEX_UPSTREAM_1_API_KEY }}
+  APEX_UPSTREAM_1_MODEL: ${{ vars.APEX_UPSTREAM_1_MODEL }}
+  APEX_UPSTREAM_1_MODEL_MAP_JSON: ${{ vars.APEX_UPSTREAM_1_MODEL_MAP_JSON }}
+  APEX_UPSTREAM_1_HEADERS_JSON: ${{ vars.APEX_UPSTREAM_1_HEADERS_JSON }}
+  APEX_UPSTREAM_1_ANTHROPIC_BASE_URL: ${{ vars.APEX_UPSTREAM_1_ANTHROPIC_BASE_URL }}
+  APEX_UPSTREAM_1_WEIGHT: ${{ vars.APEX_UPSTREAM_1_WEIGHT || '1' }}
+  APEX_UPSTREAM_2_ENABLED: ${{ vars.APEX_UPSTREAM_2_ENABLED || 'false' }}
+  APEX_UPSTREAM_2_NAME: ${{ vars.APEX_UPSTREAM_2_NAME || 'anthropic_fallback' }}
+  APEX_UPSTREAM_2_TYPE: ${{ vars.APEX_UPSTREAM_2_TYPE || 'anthropic' }}
+  APEX_UPSTREAM_2_BASE_URL: ${{ vars.APEX_UPSTREAM_2_BASE_URL }}
+  APEX_UPSTREAM_2_ANTHROPIC_BASE_URL: ${{ vars.APEX_UPSTREAM_2_ANTHROPIC_BASE_URL }}
+  APEX_UPSTREAM_2_API_KEY: ${{ secrets.APEX_UPSTREAM_2_API_KEY }}
+  APEX_UPSTREAM_2_MODEL: ${{ vars.APEX_UPSTREAM_2_MODEL }}
+  APEX_UPSTREAM_2_MODEL_MAP_JSON: ${{ vars.APEX_UPSTREAM_2_MODEL_MAP_JSON }}
+  APEX_UPSTREAM_2_HEADERS_JSON: ${{ vars.APEX_UPSTREAM_2_HEADERS_JSON }}
+  APEX_UPSTREAM_2_WEIGHT: ${{ vars.APEX_UPSTREAM_2_WEIGHT || '1' }}
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python smoke dependencies
+        run: python3 -m pip install -r tests/e2e/requirements.txt
+
+      - name: Write .env.e2e from workflow variables
+        shell: bash
+        run: |
+          cat > .env.e2e <<EOF
+          APEX_E2E_LISTEN=${APEX_E2E_LISTEN}
+          APEX_E2E_TEAM_ID=${APEX_E2E_TEAM_ID}
+          APEX_E2E_TEAM_KEY=${APEX_E2E_TEAM_KEY}
+          APEX_E2E_ADMIN_KEY=${APEX_E2E_ADMIN_KEY}
+          APEX_E2E_ROUTER_NAME=${APEX_E2E_ROUTER_NAME}
+          APEX_E2E_ROUTER_STRATEGY=${APEX_E2E_ROUTER_STRATEGY}
+          APEX_E2E_TEST_MODEL=${APEX_E2E_TEST_MODEL}
+          APEX_E2E_ENABLE_MCP=${APEX_E2E_ENABLE_MCP}
+          APEX_E2E_METRICS_PATH=${APEX_E2E_METRICS_PATH}
+          APEX_UPSTREAM_1_ENABLED=${APEX_UPSTREAM_1_ENABLED}
+          APEX_UPSTREAM_1_NAME=${APEX_UPSTREAM_1_NAME}
+          APEX_UPSTREAM_1_TYPE=${APEX_UPSTREAM_1_TYPE}
+          APEX_UPSTREAM_1_BASE_URL=${APEX_UPSTREAM_1_BASE_URL}
+          APEX_UPSTREAM_1_API_KEY=${APEX_UPSTREAM_1_API_KEY}
+          APEX_UPSTREAM_1_MODEL=${APEX_UPSTREAM_1_MODEL}
+          APEX_UPSTREAM_1_MODEL_MAP_JSON=${APEX_UPSTREAM_1_MODEL_MAP_JSON}
+          APEX_UPSTREAM_1_HEADERS_JSON=${APEX_UPSTREAM_1_HEADERS_JSON}
+          APEX_UPSTREAM_1_ANTHROPIC_BASE_URL=${APEX_UPSTREAM_1_ANTHROPIC_BASE_URL}
+          APEX_UPSTREAM_1_WEIGHT=${APEX_UPSTREAM_1_WEIGHT}
+          APEX_UPSTREAM_2_ENABLED=${APEX_UPSTREAM_2_ENABLED}
+          APEX_UPSTREAM_2_NAME=${APEX_UPSTREAM_2_NAME}
+          APEX_UPSTREAM_2_TYPE=${APEX_UPSTREAM_2_TYPE}
+          APEX_UPSTREAM_2_BASE_URL=${APEX_UPSTREAM_2_BASE_URL}
+          APEX_UPSTREAM_2_ANTHROPIC_BASE_URL=${APEX_UPSTREAM_2_ANTHROPIC_BASE_URL}
+          APEX_UPSTREAM_2_API_KEY=${APEX_UPSTREAM_2_API_KEY}
+          APEX_UPSTREAM_2_MODEL=${APEX_UPSTREAM_2_MODEL}
+          APEX_UPSTREAM_2_MODEL_MAP_JSON=${APEX_UPSTREAM_2_MODEL_MAP_JSON}
+          APEX_UPSTREAM_2_HEADERS_JSON=${APEX_UPSTREAM_2_HEADERS_JSON}
+          APEX_UPSTREAM_2_WEIGHT=${APEX_UPSTREAM_2_WEIGHT}
+          EOF
+
+      - name: Run real provider smoke
+        run: ./scripts/test-real-smoke.sh

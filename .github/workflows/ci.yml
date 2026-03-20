@@ -10,28 +10,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-and-test:
+  rust-quality:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: clippy, rustfmt
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
-    - name: Cache Cargo dependencies
-      uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
 
-    - name: Check formatting
-      run: cargo fmt -- --check
+      - name: Check formatting
+        run: cargo fmt -- --check
 
-    - name: Lint with Clippy
-      run: cargo clippy -- -D warnings
+      - name: Lint with Clippy
+        run: cargo clippy -- -D warnings
 
-    - name: Run tests
-      run: cargo test --verbose
+      - name: Run offline Rust test suite
+        run: cargo test --verbose
 
-    - name: Build (Release)
-      run: cargo build --release --verbose
+      - name: Build (Release)
+        run: cargo build --release --verbose
+
+  local-e2e:
+    runs-on: ubuntu-latest
+    needs: rust-quality
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run deterministic local E2E
+        run: ./scripts/test-local-e2e.sh

@@ -103,8 +103,10 @@ apex gateway start
 
 ## 📚 文档
 
-- [操作手册](docs/operations.md): 详细的配置和路由策略说明。
-- [架构文档](docs/architecture.md): 设计原则。
+- [文档索引](docs/index.md): 当前项目文档导航。
+- [操作手册](docs/current/guides/operations.md): 详细的配置和路由策略说明。
+- [架构文档](docs/current/architecture/system-overview.md): 设计原则。
+- [BMAD 产物](_bmad-output/index.md): 规划、故事与实现过程文档。
 - [English Documentation](README.md): 英文文档。
 
 ## 🤝 社区与治理

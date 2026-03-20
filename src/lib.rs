@@ -2,6 +2,7 @@ pub mod compliance;
 pub mod config;
 pub mod converters;
 pub mod database;
+pub mod e2e;
 pub mod mcp;
 pub mod metrics;
 pub mod middleware;

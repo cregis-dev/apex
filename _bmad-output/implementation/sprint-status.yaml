@@ -1,0 +1,88 @@
+# generated: 2026-03-20T00:00:00+08:00
+# last_updated: 2026-03-20T00:00:00+08:00
+# project: apex
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation/stories
+#
+# STATUS DEFINITIONS:
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+generated: 2026-03-20T00:00:00+08:00
+last_updated: 2026-03-20T00:00:00+08:00
+project: apex
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation/stories
+
+development_status:
+  epic-1: done
+  1-1-http-server-basic-routing: done
+  1-2-provider-adapters-openai-anthropic: done
+  1-3-extended-providers-support: done
+  1-4-configuration-system: done
+  1-5-basic-authentication-rate-limiting: done
+  1-6-basic-fallback-mechanism: done
+  epic-1-retrospective: optional
+
+  epic-2: done
+  2-1-multi-channel-configuration-support: done
+  2-2-router-rule-cache: done
+  2-3-routing-strategy-implementation: done
+  2-4-content-based-routing-model-matcher: done
+  epic-2-retrospective: optional
+
+  epic-3: done
+  3-1-cli-infrastructure: done
+  3-2-channel-management-commands: done
+  3-3-router-management-commands: done
+  3-4-gateway-control: done
+  epic-3-retrospective: optional
+
+  epic-4: done
+  4-1-prometheus-metrics: done
+  4-2-structured-logging: done
+  epic-4-retrospective: optional
+
+  epic-5: done
+  5-1-configuration-schema-update: done
+  5-2-backward-compatibility-migration: done
+  5-3-router-selector-logic-update: done
+  5-4-cli-documentation-update: done
+  epic-5-retrospective: optional
+
+  epic-6: done
+  6-1-team-configuration-support: done
+  6-2-team-cli-management: done
+  6-3-team-authentication-middleware: done
+  6-4-team-policy-middleware: done
+  epic-6-retrospective: optional
+
+  epic-7: in-progress
+  7-1-pii-masking-engine: done
+  7-2-compliance-middleware: backlog
+  epic-7-retrospective: optional
+
+  epic-8: done
+  8-1-mcp-protocol-transport: done
+  8-2-session-lifecycle: done
+  8-3-mcp-resources: done
+  8-4-resource-listing-key-masking: done
+  8-5-analytics-reporting: done
+  8-6-mcp-prompts: done
+  8-7-mcp-tools: done
+  epic-8-retrospective: optional

@@ -83,7 +83,7 @@ cd tests/e2e && python run_e2e.py
 }
 ```
 
-详细配置说明见 [docs/config-example.md](docs/config-example.md)
+详细配置说明见 [docs/current/reference/config-reference.md](docs/current/reference/config-reference.md)
 
 ## 代码规范
 

@@ -1,0 +1,6 @@
+{
+  "error": {
+    "message": "forced failure from mock-openai",
+    "type": "upstream_error"
+  }
+}
