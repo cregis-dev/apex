@@ -1,9 +1,9 @@
-use crate::compliance::{PiiProcessor, process_json_content};
 use crate::config::Config;
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::database::{Database, UsageRecord as DashboardUsageRecord, UsageRecordQuery};
 use crate::metrics::MetricsState;
 use crate::middleware::auth::{TeamContext, global_auth, team_auth};
+use crate::middleware::compliance::{OriginalModelName, compliance_middleware};
 use crate::middleware::policy::team_policy;
 use crate::middleware::ratelimit::TeamRateLimiter;
 use crate::providers::{
@@ -48,6 +48,8 @@ pub struct AppState {
     pub database: Arc<Database>,
     pub web_dir: String,
 }
+
+pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 use crate::mcp::server::{McpServer, streamable_http_handler};
 
@@ -231,6 +233,10 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/models", get(handle_models))
         .route("/messages", post(handle_anthropic))
         .route("/responses", post(handle_openai))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            compliance_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             team_policy,
@@ -1713,7 +1719,7 @@ fn read_auth_token(headers: &HeaderMap, key: &str) -> Option<String> {
 
 use crate::utils::mask_secret;
 
-fn error_response(status: StatusCode, message: &str) -> Response<Body> {
+pub(crate) fn error_response(status: StatusCode, message: &str) -> Response<Body> {
     let body = json!({
         "error": {
             "message": message,
@@ -1785,7 +1791,7 @@ async fn process_request(
     let (parts, body) = req.into_parts();
 
     // 1. Read Body
-    let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
+    let bytes = match axum::body::to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
             tracing::error!("Request Failed: Failed to read body: {}", e);
@@ -1794,13 +1800,19 @@ async fn process_request(
     };
 
     // 2. Parse Model
-    let model_name = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-        json.get("model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    } else {
-        None
-    };
+    let model_name = parts
+        .extensions
+        .get::<OriginalModelName>()
+        .map(|model| model.0.clone())
+        .or_else(|| {
+            serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|json| {
+                    json.get("model")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string())
+                })
+        });
     let model_name_str = model_name.as_deref().unwrap_or("default");
 
     // 3. Log Request with Context
@@ -1838,40 +1850,6 @@ async fn process_request(
         .map(|ctx| ctx.team_id.clone())
         .unwrap_or_else(|| "global".to_string());
     let config = state.config.read().unwrap().clone();
-
-    // 2.5. PII Masking (AC6) - Process request body before forwarding
-    let bytes = if let Some(ref compliance_config) = config.compliance
-        && compliance_config.enabled
-    {
-        let processor = PiiProcessor::new(&config.compliance);
-        let body_str = String::from_utf8_lossy(&bytes);
-
-        // Check if request should be blocked
-        if let Some(detection) = processor.should_block(&body_str) {
-            tracing::warn!(
-                "Request Blocked: PII detected (rule={}, action=block)",
-                detection.rule_name
-            );
-            return error_response(
-                StatusCode::FORBIDDEN,
-                &format!("Request blocked: {} detected", detection.rule_name),
-            );
-        }
-
-        // Process and mask PII
-        let (processed_body, detections) = process_json_content(&processor, &body_str);
-
-        if !detections.is_empty() {
-            tracing::info!(
-                "PII Masking Applied: {} detections in request",
-                detections.len()
-            );
-        }
-
-        Bytes::from(processed_body)
-    } else {
-        bytes
-    };
 
     // 2. Resolve Router
     let router_name = if let Some(name) = router_name_override {

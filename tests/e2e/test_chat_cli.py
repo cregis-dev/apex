@@ -1,15 +1,12 @@
 import os
 import sys
-import time
 import json
 import argparse
-import asyncio
-from typing import List, Dict, Any, Optional
+from typing import Callable, List, Dict, Any, Optional
 from openai import OpenAI
 from anthropic import Anthropic
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.panel import Panel
 from rich.live import Live
 from rich.prompt import Prompt
 
@@ -19,9 +16,7 @@ console = Console()
 BASE_URL_OPENAI = os.environ.get("APEX_BASE_URL", "http://127.0.0.1:12356")
 BASE_URL_ANTHROPIC = os.environ.get("APEX_BASE_URL", "http://127.0.0.1:12356")
 TEST_MODEL = os.environ.get("APEX_TEST_MODEL", "apex-test-chat")
-# Note: Anthropic Python SDK defaults to https://api.anthropic.com. We need to override base_url.
-# Apex exposes /messages (without v1) and /v1/messages.
-# Anthropic SDK usually expects /v1/messages if we point it to a base url.
+DEFAULT_PROTOCOLS = ["openai", "anthropic"]
 
 def load_api_key(router_type: str) -> Optional[str]:
     api_key = os.environ.get("APEX_TEAM_KEY") or os.environ.get("APEX_VKEY")
@@ -71,17 +66,25 @@ def configured_protocols() -> List[str]:
         "gemini",
         "jina",
     }
+    anthropic_compatible = set(openai_like)
+    anthropic_compatible.update({"anthropic", "customdual"})
 
     for channel in config.get("channels", []):
         provider_type = channel.get("provider_type")
         if provider_type in openai_like and "openai" not in protocols:
             protocols.append("openai")
-        if provider_type == "anthropic" and "anthropic" not in protocols:
+        if provider_type in anthropic_compatible and "anthropic" not in protocols:
             protocols.append("anthropic")
 
     if not protocols:
         protocols.append("openai")
     return protocols
+
+def parse_protocols(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return DEFAULT_PROTOCOLS.copy()
+    protocols = [item.strip() for item in raw.split(",") if item.strip()]
+    return protocols or DEFAULT_PROTOCOLS.copy()
 
 def extract_anthropic_content(blocks: List[Any]) -> str:
     parts: List[str] = []
@@ -134,6 +137,7 @@ def test_openai_protocol():
             console.print("[green]OK[/green]")
         else:
             console.print(f"[red]Failed[/red] (Response: {response})")
+            return False
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         return False
@@ -178,6 +182,7 @@ def test_anthropic_protocol():
             console.print("[green]OK[/green]")
         else:
             console.print(f"[red]Failed[/red] (Response: {response})")
+            return False
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         # Don't fail the whole suite if Anthropic is not fully configured/supported yet, but we implemented it.
@@ -188,22 +193,101 @@ def test_anthropic_protocol():
         console.print("  - Sending message request (stream)...", end=" ")
         content = ""
         with client.messages.stream(
-            max_tokens=16,
-            messages=[{"role": "user", "content": "Hi"}],
+            max_tokens=64,
+            messages=[{"role": "user", "content": "Reply with exactly OK and nothing else."}],
             model=TEST_MODEL,
         ) as stream:
             for text in stream.text_stream:
                 content += text
+            if len(content) <= 5:
+                final_message = stream.get_final_message()
+                content = extract_anthropic_content(final_message.content)
         
         if len(content) > 5:
              console.print("[green]OK[/green]")
         else:
              console.print(f"[red]Failed[/red] (Content too short: {content})")
+             return False
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        return False
+
+    # 3. Test Claude Code style tool history
+    try:
+        console.print("  - Sending Claude Code style tool history request...", end=" ")
+        message = client.messages.create(
+            model=TEST_MODEL,
+            max_tokens=32,
+            system=[{"type": "text", "text": "You are Claude Code."}],
+            tools=[
+                {
+                    "name": "run_command",
+                    "description": "Execute a shell command",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"cmd": {"type": "string"}},
+                        "required": ["cmd"],
+                    },
+                }
+            ],
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "I'll inspect the repo."},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_123",
+                            "name": "run_command",
+                            "input": {"cmd": "pwd"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_123",
+                            "content": [{"type": "text", "text": "/workspace/apex"}],
+                        },
+                        {"type": "text", "text": "Continue and answer briefly."},
+                    ],
+                },
+            ],
+        )
+        response = extract_anthropic_content(message.content)
+        if len(response) > 0:
+            console.print("[green]OK[/green]")
+        else:
+            console.print(f"[red]Failed[/red] (Response: {response})")
+            return False
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         return False
         
     return True
+
+def run_auto_mode(protocols: List[str]) -> int:
+    configured = configured_protocols()
+    console.print(f"[bold blue]Target Protocols:[/bold blue] {', '.join(protocols)}")
+    console.print(f"[bold blue]Configured Protocols:[/bold blue] {', '.join(configured)}")
+
+    protocol_runners: Dict[str, Callable[[], bool]] = {
+        "openai": test_openai_protocol,
+        "anthropic": test_anthropic_protocol,
+    }
+
+    for protocol in protocols:
+        runner = protocol_runners.get(protocol)
+        if runner is None:
+            console.print(f"[red]Unsupported protocol: {protocol}[/red]")
+            return 1
+        if not runner():
+            return 1
+
+    console.print("[bold green]All Automated Tests Passed![/bold green]")
+    return 0
 
 def run_interactive_mode(protocol="openai"):
     console.print(f"[bold green]Starting Interactive Mode ({protocol})[/bold green]")
@@ -264,23 +348,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["auto", "interactive"], default="auto")
     parser.add_argument("--protocol", choices=["openai", "anthropic"], default="openai")
+    parser.add_argument(
+        "--protocols",
+        default=os.environ.get("APEX_E2E_PROTOCOLS", ",".join(DEFAULT_PROTOCOLS)),
+        help="Comma-separated protocol list for auto mode",
+    )
     args = parser.parse_args()
 
     if args.mode == "auto":
-        protocols = configured_protocols()
-        console.print(f"[bold blue]Configured Protocols:[/bold blue] {', '.join(protocols)}")
-
-        if "openai" in protocols:
-            success = test_openai_protocol()
-            if not success:
-                sys.exit(1)
-
-        if "anthropic" in protocols:
-            success = test_anthropic_protocol()
-            if not success:
-                sys.exit(1)
-
-        console.print("[bold green]All Automated Tests Passed![/bold green]")
+        sys.exit(run_auto_mode(parse_protocols(args.protocols)))
         
     elif args.mode == "interactive":
         run_interactive_mode(args.protocol)

@@ -204,6 +204,135 @@ APEX_UPSTREAM_1_HEADERS_JSON={{"anthropic-version":"2023-06-01"}}
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_blackbox_claude_code_to_gemini_work() {
+    let upstream = MockProvider::spawn("mock-gemini-openai").await.unwrap();
+    let listen = pick_listen_addr().unwrap();
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("generated.gemini.e2e.config.json");
+
+    let env: E2eEnv = format!(
+        r#"
+APEX_E2E_LISTEN={listen}
+APEX_E2E_TEAM_ID=gemini-team
+APEX_E2E_TEAM_KEY=sk-gemini-team
+APEX_E2E_ADMIN_KEY=sk-gemini-admin
+APEX_E2E_ROUTER_NAME=gemini-router
+APEX_E2E_TEST_MODEL=gemini-3.1-pro-preview
+
+APEX_UPSTREAM_1_ENABLED=true
+APEX_UPSTREAM_1_NAME=mock_gemini
+APEX_UPSTREAM_1_TYPE=gemini
+APEX_UPSTREAM_1_BASE_URL={}
+APEX_UPSTREAM_1_API_KEY=sk-gemini-upstream
+APEX_UPSTREAM_1_MODEL=gemini-3.1-pro-preview
+"#,
+        upstream.base_url(),
+    )
+    .parse()
+    .unwrap();
+
+    write_config(&env, &config_path).unwrap();
+
+    let mut gateway = GatewayProcess::spawn(&config_path, &listen).unwrap();
+    gateway.wait_until_ready(Duration::from_secs(10)).unwrap();
+
+    let client = Client::new();
+
+    let message = client
+        .post(format!("{}/v1/messages?beta=true", gateway.base_url()))
+        .header("x-api-key", "sk-gemini-team")
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "model": "gemini-3.1-pro-preview",
+            "system": [
+                {"type": "text", "text": "You are Claude Code."}
+            ],
+            "max_tokens": 128,
+            "tools": [{
+                "name": "run_command",
+                "description": "Execute a shell command",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "cmd": {"type": "string"}
+                    },
+                    "required": ["cmd"]
+                }
+            }],
+            "tool_choice": {
+                "type": "tool",
+                "name": "run_command",
+                "disable_parallel_tool_use": true
+            },
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "I'll inspect the repo."},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_123",
+                            "name": "run_command",
+                            "input": {"cmd": "pwd"}
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_123",
+                            "content": [{"type": "text", "text": "/workspace/apex"}]
+                        },
+                        {"type": "text", "text": "Continue"}
+                    ]
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        message.status(),
+        200,
+        "gateway logs:\n{}",
+        gateway.read_logs()
+    );
+    let message_body: serde_json::Value = message.json().await.unwrap();
+    assert_eq!(message_body["type"], "message");
+    assert_eq!(
+        message_body["content"][0]["text"],
+        "response from mock-gemini-openai"
+    );
+
+    let stream = client
+        .post(format!("{}/v1/messages?beta=true", gateway.base_url()))
+        .header("x-api-key", "sk-gemini-team")
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "model": "gemini-3.1-pro-preview",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "stream please"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        stream.status(),
+        200,
+        "gateway logs:\n{}",
+        gateway.read_logs()
+    );
+    let stream_body = stream.text().await.unwrap();
+    assert!(stream_body.contains("event: message_start"));
+    assert!(stream_body.contains("stream from mock-gemini-openai"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_blackbox_fallback_to_secondary_channel_works() {
     let bad_upstream =
         MockProvider::spawn_failing_chat("mock-bad", StatusCode::INTERNAL_SERVER_ERROR)

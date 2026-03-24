@@ -6,9 +6,11 @@ use apex::config::{
     Timeouts,
 };
 use apex::server::{build_app, build_state};
+use axum::body::Body;
+use axum::extract::Request;
 use axum::http::StatusCode;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -78,6 +80,44 @@ pub async fn spawn_upstream_status(status: StatusCode, body: &'static str) -> So
 
 pub async fn spawn_upstream_models() -> SocketAddr {
     spawn_upstream_status(StatusCode::OK, r#"{"object":"list","data":[{"id":"gpt-4","object":"model","created":1686935002,"owned_by":"openai"},{"id":"gpt-3.5-turbo","object":"model","created":1677610602,"owned_by":"openai"}]}"#).await
+}
+
+#[derive(Debug, Clone)]
+pub struct CapturedRequest {
+    pub method: String,
+    pub path: String,
+    pub body: String,
+}
+
+pub async fn spawn_upstream_capture(
+    status: StatusCode,
+    body: &'static str,
+) -> (SocketAddr, Arc<Mutex<Vec<CapturedRequest>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let captures_for_app = Arc::clone(&captures);
+
+    let app = axum::Router::new().fallback(move |req: Request<Body>| {
+        let captures = Arc::clone(&captures_for_app);
+        async move {
+            let (parts, body_stream) = req.into_parts();
+            let body_bytes = axum::body::to_bytes(body_stream, usize::MAX).await.unwrap();
+            captures.lock().unwrap().push(CapturedRequest {
+                method: parts.method.to_string(),
+                path: parts.uri.path().to_string(),
+                body: String::from_utf8(body_bytes.to_vec()).unwrap(),
+            });
+
+            (status, [("content-type", "application/json")], body)
+        }
+    });
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    (addr, captures)
 }
 
 pub async fn ensure_upstream_ok(addr: SocketAddr, path: &str) {

@@ -19,6 +19,7 @@ CONFIG_PATH = Path(
 SERVER_LOG = Path(
     os.environ.get("APEX_SERVER_LOG", ROOT_DIR / "tests/e2e/server.log")
 )
+DEFAULT_PROTOCOLS = "openai,anthropic"
 
 
 def generate_config():
@@ -109,10 +110,18 @@ def main():
             if team_key:
                 env.setdefault("APEX_TEAM_KEY", team_key)
             env.setdefault("APEX_TEST_MODEL", test_model)
+            env.setdefault("APEX_E2E_PROTOCOLS", DEFAULT_PROTOCOLS)
 
             console.print("\n[bold yellow]Running Automated Tests...[/bold yellow]")
             ret = subprocess.call(
-                [sys.executable, "tests/e2e/test_chat_cli.py", "--mode", "auto"],
+                [
+                    sys.executable,
+                    "tests/e2e/test_chat_cli.py",
+                    "--mode",
+                    "auto",
+                    "--protocols",
+                    env["APEX_E2E_PROTOCOLS"],
+                ],
                 env=env,
                 cwd=ROOT_DIR,
             )

@@ -543,8 +543,8 @@ impl ProviderAdapter for AnthropicAdapter {
 struct GeminiAdapter;
 
 impl ProviderAdapter for GeminiAdapter {
-    fn map_path(&self, route: RouteKind, _base_url: &str, path: &str) -> String {
-        match route {
+    fn map_path(&self, route: RouteKind, base_url: &str, path: &str) -> String {
+        let normalized = match route {
             RouteKind::Anthropic => "chat/completions".to_string(),
             _ => {
                 if let Some(stripped) = path.strip_prefix("v1/") {
@@ -553,6 +553,12 @@ impl ProviderAdapter for GeminiAdapter {
                     path.to_string()
                 }
             }
+        };
+
+        if base_url.contains("/openai") || normalized.starts_with("openai/") {
+            normalized
+        } else {
+            format!("openai/{}", normalized.trim_start_matches('/'))
         }
     }
 
@@ -584,16 +590,19 @@ impl ProviderAdapter for GeminiAdapter {
         _route: RouteKind,
         headers: &mut HeaderMap,
         api_key: &str,
-        base_url: &str,
+        _base_url: &str,
     ) {
-        // Some Gemini endpoints/proxies might use OpenAI format if running via a bridge,
-        // but native Gemini usually uses x-goog-api-key or query param.
-        // Assuming here we are talking to a service that accepts header auth.
-        if base_url.contains("/openai") {
-            apply_bearer_auth(headers, api_key, "authorization");
-        } else {
-            apply_bearer_auth(headers, api_key, "x-goog-api-key");
-        }
+        // Gemini adapter always targets the OpenAI compatibility surface.
+        apply_bearer_auth(headers, api_key, "authorization");
+    }
+
+    fn handle_response(
+        &self,
+        route: RouteKind,
+        resp: reqwest::Response,
+        timeout: Duration,
+    ) -> Response<Body> {
+        handle_openai_compatible_response(route, resp, timeout)
     }
 }
 
@@ -1170,7 +1179,70 @@ mod tests {
             &Bytes::from("{}"),
         )
         .unwrap();
-        assert!(prepared.headers.get("x-goog-api-key").is_some());
+        assert_eq!(prepared.headers.get("authorization").unwrap(), "Bearer key");
+    }
+
+    #[test]
+    fn gemini_base_url_without_openai_prefix_targets_openai_compat_path() {
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Openai,
+            &channel.base_url,
+            "/v1/chat/completions",
+            None,
+            &headers,
+            &Bytes::from("{}"),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        );
+    }
+
+    #[test]
+    fn gemini_anthropic_route_targets_openai_compat_path() {
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Anthropic,
+            &channel.base_url,
+            "/v1/messages",
+            Some("beta=true"),
+            &headers,
+            &Bytes::from("{}"),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        );
+        assert_eq!(prepared.headers.get("authorization").unwrap(), "Bearer key");
     }
 
     #[test]
