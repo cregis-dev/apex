@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Channel, Config, ProviderType};
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::database::{Database, UsageRecord as DashboardUsageRecord, UsageRecordQuery};
 use crate::metrics::MetricsState;
@@ -1735,6 +1735,150 @@ pub(crate) fn error_response(status: StatusCode, message: &str) -> Response<Body
         .unwrap()
 }
 
+fn protocol_error_response(route: RouteKind, status: StatusCode, message: &str) -> Response<Body> {
+    if matches!(route, RouteKind::Anthropic) {
+        let body = json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+            }
+        });
+        Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    } else {
+        error_response(status, message)
+    }
+}
+
+fn effective_channel_model(channel: &Channel, body: &Bytes) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let model = value.get("model").and_then(|value| value.as_str())?;
+    Some(
+        channel
+            .model_map
+            .as_ref()
+            .and_then(|map| map.get(model))
+            .cloned()
+            .unwrap_or_else(|| model.to_string()),
+    )
+}
+
+fn anthropic_request_contains_tool_result(body: &Bytes) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+
+    value
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .map(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|parts| {
+                        parts.iter().any(|part| {
+                            part.get("type").and_then(serde_json::Value::as_str)
+                                == Some("tool_result")
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn anthropic_request_missing_gemini_thought_signature(body: &Bytes) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(messages) = value.get("messages").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+
+    let mut referenced_tool_use_ids = std::collections::BTreeSet::new();
+    for message in messages {
+        let Some(content) = message.get("content").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+                && let Some(tool_use_id) =
+                    block.get("tool_use_id").and_then(serde_json::Value::as_str)
+            {
+                referenced_tool_use_ids.insert(tool_use_id.to_string());
+            }
+        }
+    }
+
+    if referenced_tool_use_ids.is_empty() {
+        return false;
+    }
+
+    for message in messages {
+        if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(content) = message.get("content").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            let Some(tool_use_id) = block.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if !referenced_tool_use_ids.contains(tool_use_id) {
+                continue;
+            }
+
+            let has_signature = block
+                .get("extra_content")
+                .and_then(|value| value.get("google"))
+                .and_then(|value| value.get("thought_signature"))
+                .and_then(serde_json::Value::as_str)
+                .map(|value| !value.is_empty())
+                .unwrap_or(false);
+            if !has_signature {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn gemini_anthropic_tool_history_rejection_reason(
+    channel: &Channel,
+    route: RouteKind,
+    body: &Bytes,
+) -> Option<String> {
+    if channel.provider_type != ProviderType::Gemini || !matches!(route, RouteKind::Anthropic) {
+        return None;
+    }
+
+    let model = effective_channel_model(channel, body)?;
+    if !model.to_ascii_lowercase().starts_with("gemini-3") {
+        return None;
+    }
+
+    if !anthropic_request_contains_tool_result(body)
+        || !anthropic_request_missing_gemini_thought_signature(body)
+    {
+        return None;
+    }
+
+    Some(format!(
+        "Gemini model '{}' requires Google thought_signature data on tool-result follow-up turns. Preserve tool_use.extra_content.google.thought_signature from the prior response when sending the next /v1/messages request.",
+        model
+    ))
+}
+
 fn request_id_from_parts(parts: &axum::http::request::Parts) -> Option<String> {
     parts
         .extensions
@@ -2080,6 +2224,35 @@ async fn process_request(
             continue;
         }
 
+        if let Some(reason) = gemini_anthropic_tool_history_rejection_reason(channel, route, &bytes)
+        {
+            tracing::warn!("Request Rejected: {}", reason);
+            state
+                .access_audit
+                .audit(&channel.provider_type, route, false);
+            state
+                .metrics
+                .error_total
+                .with_label_values(&[route_label, &router_name])
+                .inc();
+            state.database.log_error(route_label, &router_name);
+            state.usage_logger.log_failure(
+                request_id.as_deref(),
+                &team_id,
+                &router_name,
+                matched_rule.as_deref(),
+                &channel.name,
+                model_name_str,
+                None,
+                fallback_triggered,
+                StatusCode::BAD_REQUEST.as_u16() as i64,
+                &reason,
+                None,
+                None,
+            );
+            return protocol_error_response(route, StatusCode::BAD_REQUEST, &reason);
+        }
+
         for attempt in 0..max_attempts {
             let prepared = match prepare_request(
                 &state.providers,
@@ -2228,6 +2401,9 @@ async fn process_request(
                         let error_body_bytes = resp.bytes().await.unwrap_or_default();
                         let provider_error_body = String::from_utf8_lossy(&error_body_bytes);
                         let stored_error_body = truncate_for_storage(&provider_error_body, 4000);
+                        if !stored_error_body.is_empty() {
+                            tracing::warn!("Upstream Error Body: {}", stored_error_body);
+                        }
                         state.usage_logger.log_failure(
                             request_id.as_deref(),
                             &team_id,
@@ -2447,6 +2623,161 @@ mod tests {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(Some(dir.path().to_string_lossy().to_string())).unwrap());
         (dir, db)
+    }
+
+    #[test]
+    fn gemini_three_anthropic_tool_history_is_rejected() {
+        let channel = Channel {
+            name: "gemini".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gemini-3-flash-preview",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_use", "id": "toolu_1", "name": "run_command", "input": {"cmd": "pwd"}}
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+                            {"type": "text", "text": "continue"}
+                        ]
+                    }
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let reason =
+            gemini_anthropic_tool_history_rejection_reason(&channel, RouteKind::Anthropic, &body)
+                .expect("gemini-3 tool history should be rejected");
+
+        assert!(reason.contains("thought_signature"));
+    }
+
+    #[test]
+    fn gemini_three_first_turn_anthropic_request_is_allowed() {
+        let channel = Channel {
+            name: "gemini".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gemini-3-flash-preview",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "hello"}]
+                    }
+                ]
+            }))
+            .unwrap(),
+        );
+
+        assert!(
+            gemini_anthropic_tool_history_rejection_reason(&channel, RouteKind::Anthropic, &body)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn gemini_three_tool_history_with_preserved_signature_is_allowed() {
+        let channel = Channel {
+            name: "gemini".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gemini-3-flash-preview",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_1",
+                                "name": "run_command",
+                                "input": {"cmd": "pwd"},
+                                "extra_content": {
+                                    "google": {
+                                        "thought_signature": "sig_123"
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+                            {"type": "text", "text": "continue"}
+                        ]
+                    }
+                ]
+            }))
+            .unwrap(),
+        );
+
+        assert!(
+            gemini_anthropic_tool_history_rejection_reason(&channel, RouteKind::Anthropic, &body)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn gemini_two_five_tool_history_is_not_rejected_by_guard() {
+        let channel = Channel {
+            name: "gemini".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gemini-2.5-flash",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}
+                        ]
+                    }
+                ]
+            }))
+            .unwrap(),
+        );
+
+        assert!(
+            gemini_anthropic_tool_history_rejection_reason(&channel, RouteKind::Anthropic, &body)
+                .is_none()
+        );
     }
 
     #[tokio::test]

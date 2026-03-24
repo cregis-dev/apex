@@ -296,14 +296,92 @@ APEX_UPSTREAM_1_MODEL=gemini-3.1-pro-preview
         .unwrap();
     assert_eq!(
         message.status(),
-        200,
+        400,
         "gateway logs:\n{}",
         gateway.read_logs()
     );
     let message_body: serde_json::Value = message.json().await.unwrap();
-    assert_eq!(message_body["type"], "message");
+    assert_eq!(message_body["type"], "error");
+    assert_eq!(message_body["error"]["type"], "invalid_request_error");
+    assert!(
+        message_body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("thought_signature")
+    );
+
+    let message_with_signature = client
+        .post(format!("{}/v1/messages?beta=true", gateway.base_url()))
+        .header("x-api-key", "sk-gemini-team")
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "model": "gemini-3.1-pro-preview",
+            "system": [
+                {"type": "text", "text": "You are Claude Code."}
+            ],
+            "max_tokens": 128,
+            "tools": [{
+                "name": "run_command",
+                "description": "Execute a shell command",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "cmd": {"type": "string"}
+                    },
+                    "required": ["cmd"]
+                }
+            }],
+            "tool_choice": {
+                "type": "tool",
+                "name": "run_command",
+                "disable_parallel_tool_use": true
+            },
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "I'll inspect the repo."},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_123",
+                            "name": "run_command",
+                            "input": {"cmd": "pwd"},
+                            "extra_content": {
+                                "google": {
+                                    "thought_signature": "sig_123"
+                                }
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_123",
+                            "content": [{"type": "text", "text": "/workspace/apex"}]
+                        },
+                        {"type": "text", "text": "Continue"}
+                    ]
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(
-        message_body["content"][0]["text"],
+        message_with_signature.status(),
+        200,
+        "gateway logs:\n{}",
+        gateway.read_logs()
+    );
+    let message_with_signature_body: serde_json::Value =
+        message_with_signature.json().await.unwrap();
+    assert_eq!(message_with_signature_body["type"], "message");
+    assert_eq!(
+        message_with_signature_body["content"][0]["text"],
         "response from mock-gemini-openai"
     );
 
