@@ -63,6 +63,15 @@ impl GeminiAnthropicReplayCache {
             return body.clone();
         }
 
+        let has_assistant_tool_use = messages.iter().any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("assistant")
+                && message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .map(|content| content.iter().any(is_tool_use_block))
+                    .unwrap_or(false)
+        });
+
         let assistant_index = messages.iter().position(|message| {
             message.get("role").and_then(Value::as_str) == Some("assistant")
                 && message
@@ -79,7 +88,68 @@ impl GeminiAnthropicReplayCache {
                     .unwrap_or(false)
         });
 
-        let Some(replay_turn) = messages
+        let mut patched_messages = messages.to_vec();
+        let mut patched_any_assistant_turn = false;
+        for message in &mut patched_messages {
+            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                continue;
+            }
+            let Some(content) = message.get("content").and_then(Value::as_array) else {
+                continue;
+            };
+            let cached_turn = content.iter().find_map(|block| {
+                let tool_use_id = block.get("id").and_then(Value::as_str)?;
+                if !referenced_tool_use_ids
+                    .iter()
+                    .any(|candidate| candidate == tool_use_id)
+                {
+                    return None;
+                }
+                tool_use_cache_key(team_id, request_model.as_deref(), block)
+                    .and_then(|key| self.turns.get(&key))
+                    .or_else(|| {
+                        self.turns.get(&tool_use_id_cache_key(
+                            team_id,
+                            request_model.as_deref(),
+                            tool_use_id,
+                        ))
+                    })
+            });
+            let Some(cached_turn) = cached_turn else {
+                continue;
+            };
+            if let Some(obj) = message.as_object_mut() {
+                obj.insert(
+                    "content".to_string(),
+                    Value::Array(cached_turn.assistant_content.clone()),
+                );
+                patched_any_assistant_turn = true;
+            }
+        }
+        if patched_any_assistant_turn && assistant_index.unwrap_or(0) > 0 {
+            let mut patched_value = value.clone();
+            if let Some(obj) = patched_value.as_object_mut() {
+                obj.insert(
+                    "messages".to_string(),
+                    Value::Array(patched_messages.clone()),
+                );
+            }
+            if let Ok(patched_bytes) = serde_json::to_vec(&patched_value).map(Bytes::from)
+                && !gemini_replay_missing_signature(&patched_bytes)
+            {
+                tracing::info!(
+                    team_id,
+                    model = request_model.as_deref().unwrap_or(""),
+                    tool_use_ids = ?referenced_tool_use_ids,
+                    has_assistant_tool_use,
+                    replay_match = "patched_assistant_turns",
+                    "Gemini replay cache hit"
+                );
+                return patched_bytes;
+            }
+        }
+
+        let replay_turn = messages
             .iter()
             .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
             .filter_map(|message| message.get("content").and_then(Value::as_array))
@@ -95,9 +165,34 @@ impl GeminiAnthropicReplayCache {
                 tool_use_cache_key(team_id, request_model.as_deref(), block)
                     .and_then(|key| self.turns.get(&key))
             })
-        else {
+            .or_else(|| {
+                referenced_tool_use_ids.iter().find_map(|tool_use_id| {
+                    self.turns.get(&tool_use_id_cache_key(
+                        team_id,
+                        request_model.as_deref(),
+                        tool_use_id,
+                    ))
+                })
+            });
+        let Some(replay_turn) = replay_turn else {
+            tracing::warn!(
+                team_id,
+                model = request_model.as_deref().unwrap_or(""),
+                tool_use_ids = ?referenced_tool_use_ids,
+                has_assistant_tool_use,
+                "Gemini replay cache miss"
+            );
             return body.clone();
         };
+
+        tracing::info!(
+            team_id,
+            model = request_model.as_deref().unwrap_or(""),
+            tool_use_ids = ?referenced_tool_use_ids,
+            has_assistant_tool_use,
+            replay_match = "replayed_missing_turn",
+            "Gemini replay cache hit"
+        );
 
         let suffix_messages = assistant_index
             .map(|idx| messages[(idx + 1)..].to_vec())
@@ -153,7 +248,6 @@ impl GeminiAnthropicReplayCache {
                 Err(_) => return Response::from_parts(parts, Body::empty()),
             };
             self.store_from_anthropic_response(&team_id, &request_body, &bytes);
-            self.forget_completed_turn(&team_id, &request_body);
             Response::from_parts(parts, Body::from(bytes))
         }
     }
@@ -191,12 +285,18 @@ impl GeminiAnthropicReplayCache {
                 continue;
             };
             self.turns.insert(key, replay_turn.clone());
-        }
-    }
-
-    fn forget_completed_turn(&self, team_id: &str, request_body: &Bytes) {
-        for key in referenced_tool_use_cache_keys(team_id, request_body) {
-            self.turns.invalidate(&key);
+            if let Some(tool_use_id) = block.get("id").and_then(Value::as_str) {
+                self.turns.insert(
+                    tool_use_id_cache_key(team_id, request_model.as_deref(), tool_use_id),
+                    replay_turn.clone(),
+                );
+                tracing::info!(
+                    team_id,
+                    model = request_model.as_deref().unwrap_or(""),
+                    tool_use_id,
+                    "Gemini replay cache store"
+                );
+            }
         }
     }
 }
@@ -397,8 +497,6 @@ impl StreamReplayRecorder {
                 &Bytes::from(bytes),
             );
         }
-        self.cache
-            .forget_completed_turn(&self.team_id, &self.request_body);
     }
 }
 
@@ -423,56 +521,6 @@ fn request_model_name(request: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn referenced_tool_use_cache_keys(team_id: &str, body: &Bytes) -> Vec<String> {
-    let Ok(request) = serde_json::from_slice::<Value>(body) else {
-        return Vec::new();
-    };
-    let request_model = request_model_name(&request);
-    let Some(messages) = request.get("messages").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-
-    let mut referenced_tool_use_ids = std::collections::BTreeSet::new();
-    for message in messages {
-        let Some(content) = message.get("content").and_then(Value::as_array) else {
-            continue;
-        };
-        for block in content {
-            if block.get("type").and_then(Value::as_str) == Some("tool_result")
-                && let Some(tool_use_id) = block.get("tool_use_id").and_then(Value::as_str)
-            {
-                referenced_tool_use_ids.insert(tool_use_id.to_string());
-            }
-        }
-    }
-
-    if referenced_tool_use_ids.is_empty() {
-        return Vec::new();
-    }
-
-    let mut keys = Vec::new();
-    for message in messages {
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(content) = message.get("content").and_then(Value::as_array) else {
-            continue;
-        };
-        for block in content {
-            let Some(tool_use_id) = block.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            if !referenced_tool_use_ids.contains(tool_use_id) {
-                continue;
-            }
-            if let Some(key) = tool_use_cache_key(team_id, request_model.as_deref(), block) {
-                keys.push(key);
-            }
-        }
-    }
-    keys
-}
-
 fn tool_use_cache_key(team_id: &str, model: Option<&str>, block: &Value) -> Option<String> {
     if !is_tool_use_block(block) {
         return None;
@@ -495,6 +543,10 @@ fn tool_use_cache_key(team_id: &str, model: Option<&str>, block: &Value) -> Opti
         "{team_id}:{}:{tool_use_id}:{fingerprint}",
         model.unwrap_or("")
     ))
+}
+
+fn tool_use_id_cache_key(team_id: &str, model: Option<&str>, tool_use_id: &str) -> String {
+    format!("{team_id}:{}:{tool_use_id}", model.unwrap_or(""))
 }
 
 pub fn gemini_replay_missing_signature(body: &Bytes) -> bool {
@@ -755,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn referenced_turn_keys_are_invalidated_after_completion() {
+    fn augment_request_can_rebuild_from_tool_result_only_followup() {
         let cache = GeminiAnthropicReplayCache::new();
         let first_turn_request = Bytes::from(
             serde_json::to_vec(&json!({
@@ -784,25 +836,15 @@ mod tests {
         );
         cache.store_from_anthropic_response("team", &first_turn_request, &first_turn_response);
 
-        let followup = Bytes::from(
+        let tool_result_only_followup = Bytes::from(
             serde_json::to_vec(&json!({
                 "model": "gemini-3.1-pro-preview",
                 "messages": [
                     {
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": "toolu_1",
-                                "name": "run_command",
-                                "input": {"cmd": "pwd"}
-                            }
-                        ]
-                    },
-                    {
                         "role": "user",
                         "content": [
-                            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}
+                            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+                            {"type": "text", "text": "Continue"}
                         ]
                     }
                 ]
@@ -810,11 +852,109 @@ mod tests {
             .unwrap(),
         );
 
-        assert!(!referenced_tool_use_cache_keys("team", &followup).is_empty());
-        let rebuilt = cache.augment_request("team", &followup);
-        assert_ne!(rebuilt, followup);
-        cache.forget_completed_turn("team", &rebuilt);
-        let rebuilt_again = cache.augment_request("team", &followup);
-        assert_eq!(rebuilt_again, followup);
+        let rebuilt = cache.augment_request("team", &tool_result_only_followup);
+        let rebuilt: Value = serde_json::from_slice(&rebuilt).unwrap();
+        let messages = rebuilt["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(
+            messages[1]["content"][0]["extra_content"]["google"]["thought_signature"],
+            "sig_123"
+        );
+    }
+
+    #[test]
+    fn augment_request_keeps_signatures_for_multiple_completed_tool_turns() {
+        let cache = GeminiAnthropicReplayCache::new();
+
+        let first_turn_request = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gemini-3.1-pro-preview",
+                "messages": [{"role": "user", "content": "first"}]
+            }))
+            .unwrap(),
+        );
+        let first_turn_response = Bytes::from(
+            serde_json::to_vec(&json!({
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "run_command",
+                    "input": {"cmd": "pwd"},
+                    "extra_content": {"google": {"thought_signature": "sig_1"}}
+                }]
+            }))
+            .unwrap(),
+        );
+        cache.store_from_anthropic_response("team", &first_turn_request, &first_turn_response);
+
+        let second_turn_request = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gemini-3.1-pro-preview",
+                "messages": [
+                    {"role": "user", "content": "first"},
+                    {"role": "assistant", "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "run_command",
+                        "input": {"cmd": "pwd"}
+                    }]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+                    {"role": "user", "content": "second"}
+                ]
+            }))
+            .unwrap(),
+        );
+        let second_turn_response = Bytes::from(
+            serde_json::to_vec(&json!({
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_2",
+                    "name": "run_command",
+                    "input": {"cmd": "ls"},
+                    "extra_content": {"google": {"thought_signature": "sig_2"}}
+                }]
+            }))
+            .unwrap(),
+        );
+        cache.store_from_anthropic_response("team", &second_turn_request, &second_turn_response);
+
+        let long_history_followup = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gemini-3.1-pro-preview",
+                "messages": [
+                    {"role": "user", "content": "first"},
+                    {"role": "assistant", "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "run_command",
+                        "input": {"cmd": "pwd"}
+                    }]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]},
+                    {"role": "assistant", "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_2",
+                        "name": "run_command",
+                        "input": {"cmd": "ls"}
+                    }]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_2", "content": "ok"}]}
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let rebuilt = cache.augment_request("team", &long_history_followup);
+        let rebuilt: Value = serde_json::from_slice(&rebuilt).unwrap();
+        let messages = rebuilt["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[1]["content"][0]["extra_content"]["google"]["thought_signature"],
+            "sig_1"
+        );
+        assert_eq!(
+            messages[3]["content"][0]["extra_content"]["google"]["thought_signature"],
+            "sig_2"
+        );
     }
 }
