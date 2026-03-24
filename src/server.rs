@@ -1757,6 +1757,16 @@ fn protocol_error_response(route: RouteKind, status: StatusCode, message: &str) 
     }
 }
 
+fn format_error_chain(error: &dyn std::error::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut current = error.source();
+    while let Some(source) = current {
+        parts.push(source.to_string());
+        current = source.source();
+    }
+    parts.join(" | caused by: ")
+}
+
 fn anthropic_request_contains_tool_result(body: &Bytes) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
@@ -1780,6 +1790,48 @@ fn anthropic_request_contains_tool_result(body: &Bytes) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+fn summarize_anthropic_request(body: &Bytes) -> String {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return "invalid_json".to_string();
+    };
+    let Some(messages) = value.get("messages").and_then(serde_json::Value::as_array) else {
+        return "messages=missing".to_string();
+    };
+
+    let mut referenced_tool_use_ids = Vec::new();
+    let mut segments = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        let role = message
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let mut kinds = Vec::new();
+        if let Some(content) = message.get("content").and_then(serde_json::Value::as_array) {
+            for block in content {
+                let kind = block
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                kinds.push(kind.to_string());
+                if kind == "tool_result"
+                    && let Some(tool_use_id) =
+                        block.get("tool_use_id").and_then(serde_json::Value::as_str)
+                {
+                    referenced_tool_use_ids.push(tool_use_id.to_string());
+                }
+            }
+        }
+        segments.push(format!("{index}:{role}[{}]", kinds.join(",")));
+    }
+
+    format!(
+        "messages={} {} tool_result_ids={:?}",
+        messages.len(),
+        segments.join(" "),
+        referenced_tool_use_ids
+    )
 }
 
 fn request_id_from_parts(parts: &axum::http::request::Parts) -> Option<String> {
@@ -2164,6 +2216,8 @@ async fn process_request(
                 "Gemini model '{}' requires Google thought_signature data on tool-result follow-up turns. Claude Code did not preserve the prior Gemini tool call state, and Apex could not reconstruct it from cache.",
                 effective_model.as_deref().unwrap_or(model_name_str)
             );
+            let request_summary = summarize_anthropic_request(&effective_bytes);
+            tracing::warn!("Gemini replay rejection summary: {}", request_summary);
             tracing::warn!("Request Rejected: {}", reason);
             state
                 .access_audit
@@ -2384,7 +2438,17 @@ async fn process_request(
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Upstream Error: {}", e);
+                    let error_chain = format_error_chain(&e);
+                    tracing::error!(
+                        is_connect = e.is_connect(),
+                        is_timeout = e.is_timeout(),
+                        is_request = e.is_request(),
+                        is_body = e.is_body(),
+                        is_decode = e.is_decode(),
+                        error_chain = %error_chain,
+                        "Upstream Error: {}",
+                        e
+                    );
                     state
                         .access_audit
                         .audit(&channel.provider_type, route, false);
