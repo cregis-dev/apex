@@ -11,6 +11,7 @@ mod compliance;
 mod config;
 mod converters;
 mod database;
+mod gemini_compat;
 mod logs;
 mod mcp;
 mod metrics;
