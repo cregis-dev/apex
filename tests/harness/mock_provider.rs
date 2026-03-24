@@ -52,8 +52,10 @@ impl MockProvider {
             .route("/healthz", get(healthz))
             .route("/v1/models", get(models))
             .route("/models", get(models))
+            .route("/openai/models", get(models))
             .route("/v1/chat/completions", post(chat_completions))
             .route("/chat/completions", post(chat_completions))
+            .route("/openai/chat/completions", post(chat_completions))
             .route("/v1/messages", post(messages))
             .route("/messages", post(messages))
             .with_state(state);
