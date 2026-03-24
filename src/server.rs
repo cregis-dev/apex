@@ -1,6 +1,7 @@
-use crate::config::{Channel, Config, ProviderType};
+use crate::config::Config;
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::database::{Database, UsageRecord as DashboardUsageRecord, UsageRecordQuery};
+use crate::gemini_compat::{GeminiAnthropicReplayCache, gemini_replay_missing_signature};
 use crate::metrics::MetricsState;
 use crate::middleware::auth::{TeamContext, global_auth, team_auth};
 use crate::middleware::compliance::{OriginalModelName, compliance_middleware};
@@ -42,6 +43,7 @@ pub struct AppState {
     pub rate_limiter: Arc<dyn RateLimiter>,
     pub team_rate_limiter: Arc<TeamRateLimiter>,
     pub selector: Arc<RouterSelector>,
+    pub gemini_replay: Arc<GeminiAnthropicReplayCache>,
     pub client: reqwest::Client,
     pub usage_logger: Arc<UsageLogger>,
     pub mcp_server: Arc<McpServer>,
@@ -203,6 +205,7 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
         rate_limiter: Arc::new(NoOpRateLimiter),
         team_rate_limiter: Arc::new(TeamRateLimiter::new()),
         selector: Arc::new(RouterSelector::new()),
+        gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
         client,
         usage_logger,
         mcp_server,
@@ -1754,19 +1757,6 @@ fn protocol_error_response(route: RouteKind, status: StatusCode, message: &str) 
     }
 }
 
-fn effective_channel_model(channel: &Channel, body: &Bytes) -> Option<String> {
-    let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
-    let model = value.get("model").and_then(|value| value.as_str())?;
-    Some(
-        channel
-            .model_map
-            .as_ref()
-            .and_then(|map| map.get(model))
-            .cloned()
-            .unwrap_or_else(|| model.to_string()),
-    )
-}
-
 fn anthropic_request_contains_tool_result(body: &Bytes) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
@@ -1790,93 +1780,6 @@ fn anthropic_request_contains_tool_result(body: &Bytes) -> bool {
             })
         })
         .unwrap_or(false)
-}
-
-fn anthropic_request_missing_gemini_thought_signature(body: &Bytes) -> bool {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return false;
-    };
-    let Some(messages) = value.get("messages").and_then(serde_json::Value::as_array) else {
-        return false;
-    };
-
-    let mut referenced_tool_use_ids = std::collections::BTreeSet::new();
-    for message in messages {
-        let Some(content) = message.get("content").and_then(serde_json::Value::as_array) else {
-            continue;
-        };
-        for block in content {
-            if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
-                && let Some(tool_use_id) =
-                    block.get("tool_use_id").and_then(serde_json::Value::as_str)
-            {
-                referenced_tool_use_ids.insert(tool_use_id.to_string());
-            }
-        }
-    }
-
-    if referenced_tool_use_ids.is_empty() {
-        return false;
-    }
-
-    for message in messages {
-        if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(content) = message.get("content").and_then(serde_json::Value::as_array) else {
-            continue;
-        };
-        for block in content {
-            if block.get("type").and_then(serde_json::Value::as_str) != Some("tool_use") {
-                continue;
-            }
-            let Some(tool_use_id) = block.get("id").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            if !referenced_tool_use_ids.contains(tool_use_id) {
-                continue;
-            }
-
-            let has_signature = block
-                .get("extra_content")
-                .and_then(|value| value.get("google"))
-                .and_then(|value| value.get("thought_signature"))
-                .and_then(serde_json::Value::as_str)
-                .map(|value| !value.is_empty())
-                .unwrap_or(false);
-            if !has_signature {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-fn gemini_anthropic_tool_history_rejection_reason(
-    channel: &Channel,
-    route: RouteKind,
-    body: &Bytes,
-) -> Option<String> {
-    if channel.provider_type != ProviderType::Gemini || !matches!(route, RouteKind::Anthropic) {
-        return None;
-    }
-
-    let model = effective_channel_model(channel, body)?;
-    if !model.to_ascii_lowercase().starts_with("gemini-3") {
-        return None;
-    }
-
-    if !anthropic_request_contains_tool_result(body)
-        || !anthropic_request_missing_gemini_thought_signature(body)
-    {
-        return None;
-    }
-
-    Some(format!(
-        "Gemini model '{}' requires Google thought_signature data on tool-result follow-up turns. Preserve tool_use.extra_content.google.thought_signature from the prior response when sending the next /v1/messages request.",
-        model
-    ))
 }
 
 fn request_id_from_parts(parts: &axum::http::request::Parts) -> Option<String> {
@@ -2224,8 +2127,43 @@ async fn process_request(
             continue;
         }
 
-        if let Some(reason) = gemini_anthropic_tool_history_rejection_reason(channel, route, &bytes)
+        let effective_bytes = if channel.provider_type == crate::config::ProviderType::Gemini
+            && matches!(route, RouteKind::Anthropic)
         {
+            state.gemini_replay.augment_request(&team_id, &bytes)
+        } else {
+            bytes.clone()
+        };
+
+        let effective_model = serde_json::from_slice::<serde_json::Value>(&effective_bytes)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("model")
+                    .and_then(|model| model.as_str())
+                    .map(str::to_string)
+            })
+            .and_then(|model| {
+                channel
+                    .model_map
+                    .as_ref()
+                    .and_then(|map| map.get(&model))
+                    .cloned()
+                    .or(Some(model))
+            });
+
+        if channel.provider_type == crate::config::ProviderType::Gemini
+            && matches!(route, RouteKind::Anthropic)
+            && effective_model
+                .as_deref()
+                .is_some_and(|model| model.to_ascii_lowercase().starts_with("gemini-3"))
+            && anthropic_request_contains_tool_result(&effective_bytes)
+            && gemini_replay_missing_signature(&effective_bytes)
+        {
+            let reason = format!(
+                "Gemini model '{}' requires Google thought_signature data on tool-result follow-up turns. Claude Code did not preserve the prior Gemini tool call state, and Apex could not reconstruct it from cache.",
+                effective_model.as_deref().unwrap_or(model_name_str)
+            );
             tracing::warn!("Request Rejected: {}", reason);
             state
                 .access_audit
@@ -2262,7 +2200,7 @@ async fn process_request(
                 &path,
                 query.as_deref(),
                 &headers,
-                &bytes,
+                &effective_bytes,
             ) {
                 Ok(p) => p,
                 Err(e) => {
@@ -2321,11 +2259,20 @@ async fn process_request(
                         state
                             .access_audit
                             .audit(&channel.provider_type, route, true);
-                        let response = adapter.handle_response(
+                        let mut response = adapter.handle_response(
                             route,
                             resp,
                             Duration::from_millis(config.global.timeouts.response_ms),
                         );
+                        if channel.provider_type == crate::config::ProviderType::Gemini
+                            && matches!(route, RouteKind::Anthropic)
+                        {
+                            response = state
+                                .gemini_replay
+                                .clone()
+                                .wrap_response(team_id.clone(), effective_bytes.clone(), response)
+                                .await;
+                        }
                         return crate::usage::wrap_response(
                             response,
                             request_id.clone(),
@@ -2626,20 +2573,9 @@ mod tests {
     }
 
     #[test]
-    fn gemini_three_anthropic_tool_history_is_rejected() {
-        let channel = Channel {
-            name: "gemini".to_string(),
-            provider_type: ProviderType::Gemini,
-            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
-            api_key: "key".to_string(),
-            anthropic_base_url: None,
-            headers: None,
-            model_map: None,
-            timeouts: None,
-        };
-        let body = Bytes::from(
+    fn gemini_missing_signature_guard_triggers_only_for_tool_result_followups() {
+        let followup = Bytes::from(
             serde_json::to_vec(&json!({
-                "model": "gemini-3-flash-preview",
                 "messages": [
                     {
                         "role": "assistant",
@@ -2650,37 +2586,17 @@ mod tests {
                     {
                         "role": "user",
                         "content": [
-                            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
-                            {"type": "text", "text": "continue"}
+                            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}
                         ]
                     }
                 ]
             }))
             .unwrap(),
         );
+        assert!(gemini_replay_missing_signature(&followup));
 
-        let reason =
-            gemini_anthropic_tool_history_rejection_reason(&channel, RouteKind::Anthropic, &body)
-                .expect("gemini-3 tool history should be rejected");
-
-        assert!(reason.contains("thought_signature"));
-    }
-
-    #[test]
-    fn gemini_three_first_turn_anthropic_request_is_allowed() {
-        let channel = Channel {
-            name: "gemini".to_string(),
-            provider_type: ProviderType::Gemini,
-            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
-            api_key: "key".to_string(),
-            anthropic_base_url: None,
-            headers: None,
-            model_map: None,
-            timeouts: None,
-        };
-        let body = Bytes::from(
+        let first_turn = Bytes::from(
             serde_json::to_vec(&json!({
-                "model": "gemini-3-flash-preview",
                 "messages": [
                     {
                         "role": "user",
@@ -2690,94 +2606,7 @@ mod tests {
             }))
             .unwrap(),
         );
-
-        assert!(
-            gemini_anthropic_tool_history_rejection_reason(&channel, RouteKind::Anthropic, &body)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn gemini_three_tool_history_with_preserved_signature_is_allowed() {
-        let channel = Channel {
-            name: "gemini".to_string(),
-            provider_type: ProviderType::Gemini,
-            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
-            api_key: "key".to_string(),
-            anthropic_base_url: None,
-            headers: None,
-            model_map: None,
-            timeouts: None,
-        };
-        let body = Bytes::from(
-            serde_json::to_vec(&json!({
-                "model": "gemini-3-flash-preview",
-                "messages": [
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": "toolu_1",
-                                "name": "run_command",
-                                "input": {"cmd": "pwd"},
-                                "extra_content": {
-                                    "google": {
-                                        "thought_signature": "sig_123"
-                                    }
-                                }
-                            }
-                        ]
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
-                            {"type": "text", "text": "continue"}
-                        ]
-                    }
-                ]
-            }))
-            .unwrap(),
-        );
-
-        assert!(
-            gemini_anthropic_tool_history_rejection_reason(&channel, RouteKind::Anthropic, &body)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn gemini_two_five_tool_history_is_not_rejected_by_guard() {
-        let channel = Channel {
-            name: "gemini".to_string(),
-            provider_type: ProviderType::Gemini,
-            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
-            api_key: "key".to_string(),
-            anthropic_base_url: None,
-            headers: None,
-            model_map: None,
-            timeouts: None,
-        };
-        let body = Bytes::from(
-            serde_json::to_vec(&json!({
-                "model": "gemini-2.5-flash",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}
-                        ]
-                    }
-                ]
-            }))
-            .unwrap(),
-        );
-
-        assert!(
-            gemini_anthropic_tool_history_rejection_reason(&channel, RouteKind::Anthropic, &body)
-                .is_none()
-        );
+        assert!(!gemini_replay_missing_signature(&first_turn));
     }
 
     #[tokio::test]
@@ -2798,6 +2627,7 @@ mod tests {
             rate_limiter: Arc::new(MockRateLimiter { allow: false }),
             team_rate_limiter: Arc::new(TeamRateLimiter::new()),
             selector: Arc::new(RouterSelector::new()),
+            gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
             mcp_server,
@@ -2835,6 +2665,7 @@ mod tests {
             rate_limiter: Arc::new(MockRateLimiter { allow: true }),
             team_rate_limiter: Arc::new(TeamRateLimiter::new()),
             selector: Arc::new(RouterSelector::new()),
+            gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
             mcp_server,
@@ -3027,6 +2858,7 @@ mod tests {
             rate_limiter: Arc::new(MockRateLimiter { allow: true }),
             team_rate_limiter: Arc::new(TeamRateLimiter::new()),
             selector: Arc::new(RouterSelector::new()),
+            gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
             mcp_server,
@@ -3079,6 +2911,7 @@ mod tests {
             rate_limiter: Arc::new(MockRateLimiter { allow: true }),
             team_rate_limiter: Arc::new(TeamRateLimiter::new()),
             selector: Arc::new(RouterSelector::new()),
+            gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
             mcp_server,
