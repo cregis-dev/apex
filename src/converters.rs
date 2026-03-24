@@ -279,17 +279,27 @@ where
                                                 .and_then(|function| function.get("name"))
                                                 .and_then(Value::as_str)
                                                 .unwrap_or("tool");
+                                            let mut content_block = json!({
+                                                "type": "tool_use",
+                                                "id": id,
+                                                "name": name,
+                                                "input": {}
+                                            });
+                                            if let Some(extra_content) =
+                                                tool_call.get("extra_content").cloned()
+                                                && let Some(map) = content_block.as_object_mut()
+                                            {
+                                                map.insert(
+                                                    "extra_content".to_string(),
+                                                    extra_content,
+                                                );
+                                            }
                                             events.push(format!(
                                                 "event: content_block_start\ndata: {}\n\n",
                                                 serde_json::json!({
                                                     "type": "content_block_start",
                                                     "index": block_index,
-                                                    "content_block": {
-                                                        "type": "tool_use",
-                                                        "id": id,
-                                                        "name": name,
-                                                        "input": {}
-                                                    }
+                                                    "content_block": content_block
                                                 })
                                             ));
                                             state.tool_blocks_started.insert(block_index);
@@ -549,12 +559,18 @@ fn append_openai_tool_calls_as_anthropic_blocks(
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or("tool_call");
-        blocks.push(json!({
+        let mut block = json!({
             "type": "tool_use",
             "id": id,
             "name": name,
             "input": input
-        }));
+        });
+        if let Some(extra_content) = tool_call.get("extra_content").cloned()
+            && let Some(map) = block.as_object_mut()
+        {
+            map.insert("extra_content".to_string(), extra_content);
+        }
+        blocks.push(block);
     }
 }
 
@@ -719,14 +735,21 @@ fn convert_anthropic_tool_use_block(block: &Value) -> Option<Value> {
         .map(serialize_tool_arguments)
         .unwrap_or_else(|| "{}".to_string());
 
-    Some(json!({
+    let mut tool_call = json!({
         "id": id,
         "type": "function",
         "function": {
             "name": name,
             "arguments": arguments
         }
-    }))
+    });
+    if let Some(extra_content) = block.get("extra_content").cloned()
+        && let Some(map) = tool_call.as_object_mut()
+    {
+        map.insert("extra_content".to_string(), extra_content);
+    }
+
+    Some(tool_call)
 }
 
 fn convert_anthropic_tool_result_block(block: &Value) -> Option<Value> {
@@ -924,6 +947,11 @@ mod tests {
                         "function": {
                             "name": "run_command",
                             "arguments": "{\"cmd\":\"pwd\"}"
+                        },
+                        "extra_content": {
+                            "google": {
+                                "thought_signature": "sig_123"
+                            }
                         }
                     }]
                 },
@@ -947,6 +975,10 @@ mod tests {
         assert_eq!(content[1]["id"], "toolu_123");
         assert_eq!(content[1]["name"], "run_command");
         assert_eq!(content[1]["input"]["cmd"], "pwd");
+        assert_eq!(
+            content[1]["extra_content"]["google"]["thought_signature"],
+            "sig_123"
+        );
     }
 
     #[test]
@@ -989,7 +1021,12 @@ mod tests {
                             "type": "tool_use",
                             "id": "toolu_123",
                             "name": "run_command",
-                            "input": {"cmd": "pwd"}
+                            "input": {"cmd": "pwd"},
+                            "extra_content": {
+                                "google": {
+                                    "thought_signature": "sig_123"
+                                }
+                            }
                         }
                     ]
                 },
@@ -1039,6 +1076,10 @@ mod tests {
             messages[1]["tool_calls"][0]["function"]["arguments"],
             "{\"cmd\":\"pwd\"}"
         );
+        assert_eq!(
+            messages[1]["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+            "sig_123"
+        );
         assert_eq!(messages[2]["role"], "tool");
         assert_eq!(messages[2]["tool_call_id"], "toolu_123");
         assert_eq!(messages[2]["content"], "/workspace/apex");
@@ -1062,7 +1103,7 @@ mod tests {
             ))),
             Ok::<Bytes, reqwest::Error>(Bytes::from(concat!(
                 "data: ",
-                "{\"id\":\"chatcmpl-tool\",\"model\":\"gemini-3.1-pro-preview\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"toolu_123\",\"type\":\"function\",\"function\":{\"name\":\"run_command\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}]}}]}\n\n"
+                "{\"id\":\"chatcmpl-tool\",\"model\":\"gemini-3.1-pro-preview\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"toolu_123\",\"type\":\"function\",\"function\":{\"name\":\"run_command\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"},\"extra_content\":{\"google\":{\"thought_signature\":\"sig_123\"}}}]}}]}\n\n"
             ))),
             Ok::<Bytes, reqwest::Error>(Bytes::from(concat!(
                 "data: ",
@@ -1084,6 +1125,7 @@ mod tests {
         assert!(output.contains("event: message_start"));
         assert!(output.contains("\"type\":\"tool_use\""));
         assert!(output.contains("\"name\":\"run_command\""));
+        assert!(output.contains("\"thought_signature\":\"sig_123\""));
         assert!(output.contains("\"type\":\"input_json_delta\""));
         assert!(output.contains("\"partial_json\":\"{\\\"cmd\\\":\\\"pwd\\\"}\""));
         assert!(output.contains("\"stop_reason\":\"tool_use\""));
