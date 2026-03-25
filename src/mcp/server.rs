@@ -1392,6 +1392,7 @@ mod tests {
                     backoff_ms: 10,
                     retry_on_status: vec![500],
                 },
+                gemini_replay: crate::config::GeminiReplay::default(),
                 enable_mcp: true,
                 cors_allowed_origins: vec![],
             },

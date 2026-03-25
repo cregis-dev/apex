@@ -629,6 +629,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
                 backoff_ms: 200,
                 retry_on_status: vec![429, 500, 502, 503, 504],
             },
+            gemini_replay: crate::config::GeminiReplay::default(),
             enable_mcp: true,
             cors_allowed_origins: vec![],
         },

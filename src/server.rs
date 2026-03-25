@@ -192,6 +192,13 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
     let client = builder.build()?;
 
     let database = Arc::new(Database::new(Some(config.data_dir.clone()))?);
+    let gemini_replay_ttl = Duration::from_secs(
+        config
+            .global
+            .gemini_replay
+            .ttl_hours
+            .saturating_mul(60 * 60),
+    );
     let usage_logger = Arc::new(UsageLogger::new(database.clone()));
     let web_dir = config.web_dir.clone();
     let config_arc = Arc::new(RwLock::new(config));
@@ -205,7 +212,10 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
         rate_limiter: Arc::new(NoOpRateLimiter),
         team_rate_limiter: Arc::new(TeamRateLimiter::new()),
         selector: Arc::new(RouterSelector::new()),
-        gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
+        gemini_replay: Arc::new(GeminiAnthropicReplayCache::with_persistence(
+            database.clone(),
+            gemini_replay_ttl,
+        )),
         client,
         usage_logger,
         mcp_server,
@@ -2565,6 +2575,7 @@ mod tests {
                     backoff_ms: 10,
                     retry_on_status: vec![],
                 },
+                gemini_replay: crate::config::GeminiReplay::default(),
                 enable_mcp: true,
                 cors_allowed_origins: vec![],
             },
