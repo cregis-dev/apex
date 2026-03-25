@@ -146,6 +146,84 @@ const emptyTopologyAnalyticsResponse = {
   },
 };
 
+const denseTopologyAnalyticsResponse = (() => {
+  const teams = [
+    "team-alpha",
+    "team-beta",
+    "team-gamma",
+    "team-delta",
+    "team-epsilon",
+    "team-zeta",
+    "team-eta",
+    "team-theta",
+    "team-iota",
+    "team-kappa",
+  ];
+  const routers = ["smart-router", "fallback-router"];
+  const channels = ["openai-primary", "bedrock-secondary"];
+  const models = ["gpt-4o", "claude-3-7-sonnet"];
+  const nodes = [
+    ...teams.map((name) => ({ name, kind: "team" })),
+    ...routers.map((name) => ({ name, kind: "router" })),
+    ...channels.map((name) => ({ name, kind: "channel" })),
+    ...models.map((name) => ({ name, kind: "model" })),
+  ];
+  const flows = teams.map((team, index) => {
+    const router = routers[index % routers.length];
+    const channel = channels[index % channels.length];
+    const model = models[index % models.length];
+    const requests = 420 - index * 20;
+    const total_tokens = requests * 320;
+
+    return {
+      team_id: team,
+      router,
+      channel,
+      model,
+      requests,
+      total_tokens,
+    };
+  });
+  const nodeIndex = new Map(nodes.map((node, index) => [`${node.kind}:${node.name}`, index]));
+  const aggregatedLinks = new Map<string, { source: number; target: number; value: number; total_tokens: number }>();
+
+  for (const flow of flows) {
+    for (const [sourceKey, targetKey] of [
+      [`team:${flow.team_id}`, `router:${flow.router}`],
+      [`router:${flow.router}`, `channel:${flow.channel}`],
+      [`channel:${flow.channel}`, `model:${flow.model}`],
+    ]) {
+      const source = nodeIndex.get(sourceKey);
+      const target = nodeIndex.get(targetKey);
+
+      if (source === undefined || target === undefined) {
+        continue;
+      }
+
+      const linkKey = `${source}:${target}`;
+      const current = aggregatedLinks.get(linkKey) ?? {
+        source,
+        target,
+        value: 0,
+        total_tokens: 0,
+      };
+      current.value += flow.requests;
+      current.total_tokens += flow.total_tokens;
+      aggregatedLinks.set(linkKey, current);
+    }
+  }
+
+  return {
+    ...analyticsResponse,
+    topology: {
+      nodes,
+      links: [...aggregatedLinks.values()],
+      flows,
+      render_mode: "sankey",
+    },
+  };
+})();
+
 const firstPageRecords = {
   data: [
     {
@@ -523,6 +601,35 @@ test.describe("Dashboard page", () => {
     );
     await expect(linkTooltip.getByText("220 requests")).toBeVisible();
     await expect(linkTooltip.getByText("91,000 total tokens")).toBeVisible();
+  });
+
+  test("falls back to compact topology summary when sankey layout would be noisy", async ({ page }) => {
+    await mockDashboardApis(page, { analytics: denseTopologyAnalyticsResponse });
+    await primeStoredToken(page);
+
+    await page.goto("/dashboard?tab=overview");
+
+    await expect(page.getByText("Traffic Topology")).toBeVisible({ timeout: 15000 });
+    await expect(
+      page.getByText(
+        "Compact view enabled because this routing graph collapses many nodes into a few middle stages."
+      )
+    ).toBeVisible();
+    await expect(page.locator("[data-topology-summary]")).toBeVisible();
+    await expect(page.getByText("Showing the busiest routing paths first.")).toBeVisible();
+    await expect(page.getByText("team-alpha")).toBeVisible();
+    await expect(page.getByText("420 requests")).toBeVisible();
+    await expect(page.locator('[data-topology-tooltip="node"]')).toHaveCount(0);
+    await expect(page.locator('[data-topology-tooltip="link"]')).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Sankey" }).click();
+    await expect(page.locator("[data-topology-summary]")).toHaveCount(0);
+    await expect(page.locator('[data-topology-node="team-alpha"]')).toBeVisible();
+    await expect(page.getByRole("button", { name: "Sankey" })).toHaveAttribute("aria-pressed", "true");
+
+    await page.getByRole("button", { name: "Compact" }).click();
+    await expect(page.locator("[data-topology-summary]")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Compact" })).toHaveAttribute("aria-pressed", "true");
   });
 
   test("keeps the empty topology state without rendering tooltip overlays", async ({ page }) => {

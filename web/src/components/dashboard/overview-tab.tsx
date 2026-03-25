@@ -15,6 +15,7 @@ import {
 } from "recharts";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { ChartContainer, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import type { DashboardAnalyticsResponse } from "@/components/dashboard/types";
 
@@ -51,6 +52,11 @@ type TopologyMetrics = {
   total_tokens: number;
 };
 
+type TopologyPresentation = {
+  mode: "sankey" | "summary";
+  note?: string;
+};
+
 type TopologyNodeRendererProps = {
   x?: number;
   y?: number;
@@ -68,6 +74,12 @@ type TopologyLinkRendererProps = {
   targetControlX?: number;
   linkWidth?: number;
   payload?: TopologyLinkPayload;
+};
+
+type TopologyFlowSummaryStats = {
+  totalRequests: number;
+  totalTokens: number;
+  flowCount: number;
 };
 
 type TopologyHoverOverlay =
@@ -148,6 +160,57 @@ function buildTopologyNodeMetrics(
   }
 
   return metrics;
+}
+
+function buildTopologyPresentation(
+  topology: DashboardAnalyticsResponse["topology"]
+): TopologyPresentation {
+  if (topology.render_mode === "summary") {
+    return {
+      mode: "summary",
+      note: "Compact view enabled because this routing graph collapses many nodes into a few middle stages.",
+    };
+  }
+
+  const counts = {
+    team: 0,
+    router: 0,
+    channel: 0,
+    model: 0,
+  };
+
+  for (const node of topology.nodes) {
+    if (node.kind in counts) {
+      counts[node.kind as keyof typeof counts] += 1;
+    }
+  }
+
+  const middleCount = Math.max(Math.max(counts.router, counts.channel), 1);
+  const edgeCount = Math.max(Math.max(counts.team, counts.model), 1);
+  const imbalanceRatio = edgeCount / middleCount;
+  const denseTopology = topology.flows.length >= 8 || topology.links.length >= 12;
+  const severeBottleneck =
+    edgeCount >= 8 && middleCount <= 3 && imbalanceRatio >= 2.5 && denseTopology;
+
+  if (severeBottleneck) {
+    return {
+      mode: "summary",
+      note: "Compact view enabled because this routing graph collapses many nodes into a few middle stages.",
+    };
+  }
+
+  return { mode: "sankey" };
+}
+
+function getTopologyNodePadding(topology: DashboardAnalyticsResponse["topology"]) {
+  const counts = new Map<string, number>();
+
+  for (const node of topology.nodes) {
+    counts.set(node.kind, (counts.get(node.kind) ?? 0) + 1);
+  }
+
+  const maxColumnCount = Math.max(...counts.values(), 1);
+  return Math.max(12, Math.min(28, Math.floor(220 / maxColumnCount)));
 }
 
 function truncateLabel(value: string, maxChars: number) {
@@ -287,6 +350,7 @@ function TopologyNode(props: TopologyNodeRendererProps & {
 function TopologyLink(props: TopologyLinkRendererProps & {
   revision: string;
   onHoverChange?: (tooltip: TopologyHoverOverlay | null) => void;
+  totalRequests?: number;
 }) {
   const {
     sourceX = 0,
@@ -299,6 +363,7 @@ function TopologyLink(props: TopologyLinkRendererProps & {
     payload,
     revision,
     onHoverChange,
+    totalRequests = 0,
   } = props;
   const path = buildTopologyLinkPath({
     sourceX,
@@ -315,10 +380,13 @@ function TopologyLink(props: TopologyLinkRendererProps & {
   const approxChars = Math.floor((span - 24) / 7);
   const { text: fullPathLabel, truncated } = truncateLabel(labelSource, approxChars);
   const summaryLabel = `${formatInteger(payload?.value ?? 0)} req`;
-  const canShowPathLabel = labelSource.length > 0 && linkWidth >= 14 && span >= 220 && approxChars >= 14;
-  const canShowSummary = !canShowPathLabel && linkWidth >= 12 && span >= 132;
+  const canShowPathLabel = labelSource.length > 0 && linkWidth >= 16 && span >= 220 && approxChars >= 14;
+  const canShowSummary = !canShowPathLabel && linkWidth >= 13 && span >= 132;
   const label = canShowPathLabel ? fullPathLabel : canShowSummary ? summaryLabel : "";
   const labelOpacity = truncated ? 0.92 : 1;
+  const share = totalRequests > 0 ? (payload?.value ?? 0) / totalRequests : 0;
+  const baseStrokeOpacity = Math.max(0.28, Math.min(0.96, 0.28 + share * 2.6));
+  const innerStrokeOpacity = Math.max(0.18, Math.min(0.68, 0.18 + share * 1.8));
   const handleMouseEnter = () => {
     if (!labelSource) {
       return;
@@ -350,7 +418,7 @@ function TopologyLink(props: TopologyLinkRendererProps & {
         d={path}
         fill="none"
         stroke="#f4d8b5"
-        strokeOpacity={0.92}
+        strokeOpacity={baseStrokeOpacity}
         strokeWidth={linkWidth}
         strokeLinecap="round"
       />
@@ -358,7 +426,7 @@ function TopologyLink(props: TopologyLinkRendererProps & {
         d={path}
         fill="none"
         stroke="#efc89a"
-        strokeOpacity={0.55}
+        strokeOpacity={innerStrokeOpacity}
         strokeWidth={Math.max(linkWidth - 2, 1)}
         strokeLinecap="round"
       />
@@ -381,8 +449,107 @@ function TopologyLink(props: TopologyLinkRendererProps & {
   );
 }
 
+function buildTopologyFlowSummaryStats(
+  flows: DashboardAnalyticsResponse["topology"]["flows"]
+): TopologyFlowSummaryStats {
+  return flows.reduce(
+    (accumulator, flow) => {
+      accumulator.totalRequests += flow.requests;
+      accumulator.totalTokens += flow.total_tokens;
+      accumulator.flowCount += 1;
+      return accumulator;
+    },
+    { totalRequests: 0, totalTokens: 0, flowCount: 0 }
+  );
+}
+
+function TopologyFlowSummary({
+  flows,
+}: {
+  flows: DashboardAnalyticsResponse["topology"]["flows"];
+}) {
+  const sortedFlows = [...flows].sort((left, right) => {
+    if (right.requests !== left.requests) {
+      return right.requests - left.requests;
+    }
+
+    return right.total_tokens - left.total_tokens;
+  });
+  const visibleFlows = sortedFlows.slice(0, 8);
+  const remainingFlows = sortedFlows.length - visibleFlows.length;
+  const stats = buildTopologyFlowSummaryStats(flows);
+
+  return (
+    <div className="space-y-3" data-topology-summary>
+      <div className="grid gap-3 md:grid-cols-3">
+        <div className="rounded-2xl border border-[#f1dfc3] bg-[#fff8ee] px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#94a3b8]">
+            Flows
+          </div>
+          <div className="mt-2 text-2xl font-semibold text-[#8e3f1d]">{formatInteger(stats.flowCount)}</div>
+        </div>
+        <div className="rounded-2xl border border-[#f1dfc3] bg-[#fff8ee] px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#94a3b8]">
+            Requests
+          </div>
+          <div className="mt-2 text-2xl font-semibold text-[#8e3f1d]">{formatInteger(stats.totalRequests)}</div>
+        </div>
+        <div className="rounded-2xl border border-[#f1dfc3] bg-[#fff8ee] px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#94a3b8]">
+            Tokens
+          </div>
+          <div className="mt-2 text-2xl font-semibold text-[#8e3f1d]">{formatCompact(stats.totalTokens)}</div>
+        </div>
+      </div>
+      <div className="flex items-center justify-between px-1 text-xs text-[#64748b]">
+        <span>Showing the busiest routing paths first.</span>
+        {remainingFlows > 0 ? <span>{`${remainingFlows} more flows hidden`}</span> : null}
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        {visibleFlows.map((flow) => (
+          <div
+            key={`${flow.team_id}:${flow.router}:${flow.channel}:${flow.model}`}
+            className="rounded-[20px] border border-[#e2e8f0] bg-[#fcf7ef] p-4 shadow-[0_6px_18px_rgba(148,85,26,0.06)]"
+          >
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#94a3b8]">
+              Flow
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+              <span className="rounded-full bg-[#fff1db] px-3 py-1 font-medium text-[#8e3f1d]">
+                {flow.team_id}
+              </span>
+              <span className="text-[#c2410c]">→</span>
+              <span className="rounded-full bg-white px-3 py-1 font-medium text-[#475569]">
+                {flow.router}
+              </span>
+              <span className="text-[#c2410c]">→</span>
+              <span className="rounded-full bg-white px-3 py-1 font-medium text-[#475569]">
+                {flow.channel}
+              </span>
+            </div>
+            <div className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-sm text-[#475569]">
+              Model <span className="text-[#c2410c]">·</span> {flow.model}
+            </div>
+            <div className="mt-4 flex items-center justify-between border-t border-[#eadfce] pt-3 text-xs text-[#64748b]">
+              <span>{formatInteger(flow.requests)} requests</span>
+              <span>{formatInteger(flow.total_tokens)} tokens</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function OverviewTab({ analytics }: OverviewTabProps) {
   const [topologyTooltip, setTopologyTooltip] = useState<TopologyHoverOverlay | null>(null);
+  const [topologyViewState, setTopologyViewState] = useState<{
+    revision: string;
+    mode: "sankey" | "summary";
+  } | null>(null);
+  const topologyRevision = analytics
+    ? `${analytics.generated_at}:${analytics.topology.nodes.length}:${analytics.topology.links.length}`
+    : "empty";
 
   if (!analytics) {
     return (
@@ -395,7 +562,12 @@ export function OverviewTab({ analytics }: OverviewTabProps) {
   }
 
   const topologyNodeMetrics = buildTopologyNodeMetrics(analytics.topology.flows);
-  const topologyRevision = `${analytics.generated_at}:${analytics.topology.nodes.length}:${analytics.topology.links.length}`;
+  const topologyPresentation = buildTopologyPresentation(analytics.topology);
+  const topologyNodePadding = getTopologyNodePadding(analytics.topology);
+  const effectiveTopologyMode =
+    topologyViewState?.revision === topologyRevision
+      ? topologyViewState.mode
+      : topologyPresentation.mode;
 
   const kpis = [
     {
@@ -500,85 +672,127 @@ export function OverviewTab({ analytics }: OverviewTabProps) {
               </div>
             ) : (
               <div className="rounded-[24px] border border-[#e2e8f0] bg-white p-4">
-                <div className="grid grid-cols-4 gap-4 px-6 pb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#94a3b8]">
-                  {TOPOLOGY_COLUMNS.map((column) => (
-                    <div key={column} className="text-center">
-                      {column}
-                    </div>
-                  ))}
-                </div>
-                <div className="h-[332px] w-full">
-                  <div className="relative h-full w-full" onMouseLeave={() => setTopologyTooltip(null)}>
-                    {topologyTooltip && topologyTooltip.revision === topologyRevision ? (
-                      <div
-                        className="pointer-events-none absolute z-10 rounded-xl border border-[#d6dde8] bg-white px-3 py-2 shadow-[0_12px_24px_rgba(15,23,42,0.12)]"
-                        data-topology-tooltip={topologyTooltip.type}
-                        style={{
-                          left: `clamp(16px, ${topologyTooltip.x}px, calc(100% - 16px))`,
-                          top: topologyTooltip.y < 72 ? topologyTooltip.y + 16 : topologyTooltip.y,
-                          transform:
-                            topologyTooltip.y < 72
-                              ? "translate(-50%, 0)"
-                              : "translate(-50%, calc(-100% - 12px))",
-                          maxWidth: "min(320px, calc(100% - 32px))",
-                        }}
-                      >
-                        <div className="text-sm font-semibold text-[#17233c]" data-topology-tooltip-title>
-                          {topologyTooltip.title}
-                        </div>
-                        {topologyTooltip.type === "node" ? (
-                          <div
-                            className="mt-1 text-xs uppercase tracking-[0.18em] text-[#94a3b8]"
-                            data-topology-tooltip-kind
-                          >
-                            {formatTopologyKind(topologyTooltip.kind)}
-                          </div>
-                        ) : null}
-                        <div className="mt-2 grid gap-1 text-xs text-[#64748b]">
-                          <div>{formatTopologyValue(topologyTooltip.requests)}</div>
-                          <div>{`${formatInteger(topologyTooltip.total_tokens)} total tokens`}</div>
-                        </div>
-                      </div>
-                    ) : null}
-                  <ResponsiveContainer width="100%" height="100%">
-                    <Sankey
-                      data={{
-                        nodes: analytics.topology.nodes,
-                        links: analytics.topology.links,
-                      }}
-                      node={(nodeProps: TopologyNodeRendererProps) => (
-                        <TopologyNode
-                          {...nodeProps}
-                          metrics={
-                            nodeProps.payload
-                              ? topologyNodeMetrics.get(
-                                  topologyMetricKey(
-                                    nodeProps.payload.kind ?? "team",
-                                    nodeProps.payload.name ?? ""
-                                  )
-                                )
-                              : undefined
-                          }
-                          revision={topologyRevision}
-                          onHoverChange={setTopologyTooltip}
-                        />
-                      )}
-                      link={(linkProps: TopologyLinkRendererProps) => (
-                        <TopologyLink
-                          {...linkProps}
-                          revision={topologyRevision}
-                          onHoverChange={setTopologyTooltip}
-                        />
-                      )}
-                      nodePadding={28}
-                      nodeWidth={14}
-                      linkCurvature={0.52}
-                      margin={{ top: 10, right: 34, bottom: 10, left: 34 }}
-                      sort={false}
-                    />
-                  </ResponsiveContainer>
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div className="text-xs uppercase tracking-[0.16em] text-[#94a3b8]">
+                    View Mode
+                  </div>
+                  <div className="flex items-center gap-2" data-topology-view-toggle>
+                    <Button
+                      size="sm"
+                      variant={effectiveTopologyMode === "sankey" ? "secondary" : "outline"}
+                      onClick={() =>
+                        setTopologyViewState({ revision: topologyRevision, mode: "sankey" })
+                      }
+                      aria-pressed={effectiveTopologyMode === "sankey"}
+                    >
+                      Sankey
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={effectiveTopologyMode === "summary" ? "secondary" : "outline"}
+                      onClick={() =>
+                        setTopologyViewState({ revision: topologyRevision, mode: "summary" })
+                      }
+                      aria-pressed={effectiveTopologyMode === "summary"}
+                    >
+                      Compact
+                    </Button>
                   </div>
                 </div>
+                {effectiveTopologyMode === "sankey" ? (
+                  <>
+                    <div className="grid grid-cols-4 gap-4 px-6 pb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#94a3b8]">
+                      {TOPOLOGY_COLUMNS.map((column) => (
+                        <div key={column} className="text-center">
+                          {column}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="h-[332px] w-full">
+                      <div className="relative h-full w-full" onMouseLeave={() => setTopologyTooltip(null)}>
+                        {topologyTooltip && topologyTooltip.revision === topologyRevision ? (
+                          <div
+                            className="pointer-events-none absolute z-10 rounded-xl border border-[#d6dde8] bg-white px-3 py-2 shadow-[0_12px_24px_rgba(15,23,42,0.12)]"
+                            data-topology-tooltip={topologyTooltip.type}
+                            style={{
+                              left: `clamp(16px, ${topologyTooltip.x}px, calc(100% - 16px))`,
+                              top: topologyTooltip.y < 72 ? topologyTooltip.y + 16 : topologyTooltip.y,
+                              transform:
+                                topologyTooltip.y < 72
+                                  ? "translate(-50%, 0)"
+                                  : "translate(-50%, calc(-100% - 12px))",
+                              maxWidth: "min(320px, calc(100% - 32px))",
+                            }}
+                          >
+                            <div className="text-sm font-semibold text-[#17233c]" data-topology-tooltip-title>
+                              {topologyTooltip.title}
+                            </div>
+                            {topologyTooltip.type === "node" ? (
+                              <div
+                                className="mt-1 text-xs uppercase tracking-[0.18em] text-[#94a3b8]"
+                                data-topology-tooltip-kind
+                              >
+                                {formatTopologyKind(topologyTooltip.kind)}
+                              </div>
+                            ) : null}
+                            <div className="mt-2 grid gap-1 text-xs text-[#64748b]">
+                              <div>{formatTopologyValue(topologyTooltip.requests)}</div>
+                              <div>{`${formatInteger(topologyTooltip.total_tokens)} total tokens`}</div>
+                            </div>
+                          </div>
+                        ) : null}
+                        <ResponsiveContainer width="100%" height="100%">
+                          <Sankey
+                            data={{
+                              nodes: analytics.topology.nodes,
+                              links: analytics.topology.links,
+                            }}
+                            node={(nodeProps: TopologyNodeRendererProps) => (
+                              <TopologyNode
+                                {...nodeProps}
+                                metrics={
+                                  nodeProps.payload
+                                    ? topologyNodeMetrics.get(
+                                        topologyMetricKey(
+                                          nodeProps.payload.kind ?? "team",
+                                          nodeProps.payload.name ?? ""
+                                        )
+                                      )
+                                    : undefined
+                                }
+                                revision={topologyRevision}
+                                onHoverChange={setTopologyTooltip}
+                              />
+                            )}
+                            link={(linkProps: TopologyLinkRendererProps) => (
+                              <TopologyLink
+                                {...linkProps}
+                                revision={topologyRevision}
+                                onHoverChange={setTopologyTooltip}
+                                totalRequests={analytics.overview.total_requests}
+                              />
+                            )}
+                            nodePadding={topologyNodePadding}
+                            nodeWidth={12}
+                            linkCurvature={0.38}
+                            iterations={64}
+                            margin={{ top: 10, right: 34, bottom: 10, left: 34 }}
+                            sort
+                          />
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-4">
+                    {topologyPresentation.mode === "summary" && topologyPresentation.note ? (
+                      <div className="rounded-2xl border border-[#f3e2c7] bg-[#fff8ee] px-4 py-3 text-sm text-[#8e3f1d]">
+                        {topologyPresentation.note}
+                      </div>
+                    ) : null}
+                    <TopologyFlowSummary flows={analytics.topology.flows} />
+                  </div>
+                )}
               </div>
             )}
           </CardContent>
