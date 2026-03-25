@@ -2914,8 +2914,20 @@ mod tests {
         let team_usage = build_team_usage_section(&records);
 
         assert_eq!(team_usage.leaderboard.len(), 10);
-        assert_eq!(team_usage.leaderboard.first().map(|item| item.team_id.as_str()), Some("team-00"));
-        assert_eq!(team_usage.leaderboard.last().map(|item| item.team_id.as_str()), Some("team-09"));
+        assert_eq!(
+            team_usage
+                .leaderboard
+                .first()
+                .map(|item| item.team_id.as_str()),
+            Some("team-00")
+        );
+        assert_eq!(
+            team_usage
+                .leaderboard
+                .last()
+                .map(|item| item.team_id.as_str()),
+            Some("team-09")
+        );
     }
 
     #[tokio::test]
