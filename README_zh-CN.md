@@ -94,11 +94,29 @@ curl http://localhost:12356/v1/chat/completions \
 
 ## 📦 安装 (独立运行)
 
-如果您更喜欢直接运行二进制文件：
+如果您希望直接安装 GitHub Releases 中的预编译包：
 
 ```bash
-cargo install --path .
-apex gateway start
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | bash
+```
+
+安装指定版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --version v0.1.0 /opt/apex
+```
+
+如果您更喜欢从源码构建：
+
+```bash
+cd web
+npm install
+npm run build
+
+cd ..
+cargo build --release --features embedded-web
+./target/release/apex gateway start --config config.json
 ```
 
 ## 📚 文档

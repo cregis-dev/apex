@@ -74,6 +74,8 @@ Initial release of Apex Gateway.
 - Structured logging with tracing subscriber
 - JSON log format option
 - Request timeout configuration
+- Multi-platform GitHub Release packaging for Linux and macOS
+- Prebuilt package installation via `install-release.sh`
 
 #### MCP Resources
 - Configuration resource (`config://config.json`) with read-only access

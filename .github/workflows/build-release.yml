@@ -2,7 +2,7 @@ name: Build Release
 
 on:
   push:
-    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
@@ -88,13 +88,29 @@ jobs:
           retention-days: 5
 
   create-release:
-    if: github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
+      - name: Resolve release tag
+        id: release_meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+
+          if [ -z "$TAG" ]; then
+            echo "Release tag is required"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -103,14 +119,25 @@ jobs:
       - name: Inspect release payload
         run: find artifacts -maxdepth 3 -type f | sort
 
+      - name: Prepare release files
+        shell: bash
+        run: |
+          mkdir -p release
+          find artifacts -type f -name '*.tar.gz' -exec cp {} release/ \;
+          cd release
+          sha256sum *.tar.gz > checksums.txt
+          ls -lh
+
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.event.inputs.tag }}
-          name: ${{ github.event.inputs.tag }}
-          draft: true
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          name: ${{ steps.release_meta.outputs.tag }}
+          draft: false
           fail_on_unmatched_files: true
-          files: artifacts/**/*.tar.gz
+          files: |
+            release/*.tar.gz
+            release/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

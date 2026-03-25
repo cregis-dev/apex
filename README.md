@@ -96,7 +96,20 @@ To use real providers (OpenAI, Anthropic, etc.):
 
 ## 📦 Installation (Standalone)
 
-If you prefer to run the binary directly:
+For packaged installation from GitHub Releases:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | bash
+```
+
+To install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --version v0.1.0 /opt/apex
+```
+
+If you prefer to build from source:
 
 ```bash
 cd web
@@ -108,7 +121,8 @@ cargo build --release --features embedded-web
 ./target/release/apex gateway start --config config.json
 ```
 
-For packaged installation, use [`install.sh`](install.sh). Release binaries built with `embedded-web` do not require shipping a separate `web/` directory.
+For local source-based installation into a target directory, use [`install.sh`](install.sh).
+Release binaries built with `embedded-web` do not require shipping a separate `web/` directory.
 
 ## 📊 Web Dashboard
 
