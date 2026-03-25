@@ -14,6 +14,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PII masking engine for data compliance
 - Team governance features
 
+## [0.1.1] - 2026-03-26
+
+Patch release focused on packaging and compatibility fixes.
+
+### Fixed
+
+- Linux x86_64 release packaging now builds with `x86_64-unknown-linux-musl`
+- Prebuilt Linux packages no longer require newer glibc versions from GitHub runner images
+
+### Changed
+
+- Added a maintainer release runbook in `RELEASE.md`
+- Upgraded GitHub Actions workflow dependencies to newer runtime-compatible versions
+
 ## [0.1.0] - 2026-03-10
 
 Initial release of Apex Gateway.
