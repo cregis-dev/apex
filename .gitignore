@@ -16,6 +16,8 @@ target/
 tests/e2e/manual_config.json
 tests/e2e/server.log
 tests/e2e/generated.e2e.config.json
+tests/e2e/generated.local-gemini3.config.json
+tests/e2e/generated.local-gemini3.env
 .env.e2e
 
 # Python artifacts

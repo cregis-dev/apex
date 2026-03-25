@@ -1166,7 +1166,7 @@ fn build_team_usage_section(records: &[DashboardUsageRecord]) -> DashboardTeamUs
             .cmp(&left.total_tokens)
             .then_with(|| right.total_requests.cmp(&left.total_requests))
     });
-    leaderboard.truncate(5);
+    leaderboard.truncate(10);
 
     let mut model_usage = team_model
         .into_iter()
@@ -2884,6 +2884,38 @@ mod tests {
 
         assert_eq!(team_link.value, 2);
         assert_eq!(team_link.total_tokens, 70);
+    }
+
+    #[test]
+    fn team_usage_leaderboard_is_capped_at_top_ten() {
+        let records = (0..12)
+            .map(|index| DashboardUsageRecord {
+                id: index + 1,
+                timestamp: "2026-03-12 12:00:00".to_string(),
+                request_id: Some(format!("req-{index}")),
+                team_id: format!("team-{index:02}"),
+                router: "default".to_string(),
+                matched_rule: Some("*".to_string()),
+                final_channel: "openai".to_string(),
+                channel: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                input_tokens: 10,
+                output_tokens: 100 - index,
+                latency_ms: Some(100.0),
+                fallback_triggered: false,
+                status: "success".to_string(),
+                status_code: Some(200),
+                error_message: None,
+                provider_trace_id: None,
+                provider_error_body: None,
+            })
+            .collect::<Vec<_>>();
+
+        let team_usage = build_team_usage_section(&records);
+
+        assert_eq!(team_usage.leaderboard.len(), 10);
+        assert_eq!(team_usage.leaderboard.first().map(|item| item.team_id.as_str()), Some("team-00"));
+        assert_eq!(team_usage.leaderboard.last().map(|item| item.team_id.as_str()), Some("team-09"));
     }
 
     #[tokio::test]

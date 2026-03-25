@@ -60,6 +60,7 @@ Initial release of Apex Gateway.
 #### Web Dashboard
 - Next.js 16 App Router architecture
 - Dashboard UI with metrics cards (Total Requests, Total Tokens, Avg Latency, Error Rate)
+- Team leaderboard expanded to top 10 teams by token consumption
 - Usage trends visualization with Recharts Area charts
 - Error trends tracking
 - Model usage rankings (Token Usage by Model)
