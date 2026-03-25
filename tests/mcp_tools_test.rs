@@ -29,6 +29,7 @@ async fn test_mcp_tools() {
                 backoff_ms: 100,
                 retry_on_status: vec![],
             },
+            gemini_replay: apex::config::GeminiReplay::default(),
             enable_mcp: true,
             cors_allowed_origins: vec![],
         },

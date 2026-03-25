@@ -75,7 +75,8 @@
   "listen": "0.0.0.0:12356",
   "auth": { ... },
   "timeouts": { ... },
-  "retries": { ... }
+  "retries": { ... },
+  "gemini_replay": { ... }
 }
 ```
 
@@ -130,6 +131,18 @@
 | `max_attempts` | number | 最大重试次数 |
 | `backoff_ms` | number | 重试间隔（毫秒） |
 | `retry_on_status` | array | 需要重试的 HTTP 状态码 |
+
+### gemini_replay
+
+```json
+"gemini_replay": {
+  "ttl_hours": 24
+}
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `ttl_hours` | number | `24` | Gemini Claude Code 兼容层持久化 replay state 的 TTL，单位为小时。用于恢复 `thought_signature` 和缺失的 tool turn 历史 |
 
 ---
 

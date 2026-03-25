@@ -1,3 +1,4 @@
+use crate::database::Database;
 use axum::body::{Body, Bytes};
 use axum::response::Response;
 use futures::Stream;
@@ -18,6 +19,8 @@ struct ReplayTurn {
 
 pub struct GeminiAnthropicReplayCache {
     turns: Cache<String, Arc<ReplayTurn>>,
+    database: Option<Arc<Database>>,
+    durable_ttl: Duration,
 }
 
 impl Default for GeminiAnthropicReplayCache {
@@ -28,11 +31,21 @@ impl Default for GeminiAnthropicReplayCache {
 
 impl GeminiAnthropicReplayCache {
     pub fn new() -> Self {
+        Self::new_with_store(None, Duration::from_secs(24 * 60 * 60))
+    }
+
+    pub fn with_persistence(database: Arc<Database>, durable_ttl: Duration) -> Self {
+        Self::new_with_store(Some(database), durable_ttl)
+    }
+
+    fn new_with_store(database: Option<Arc<Database>>, durable_ttl: Duration) -> Self {
         Self {
             turns: Cache::builder()
                 .time_to_live(Duration::from_secs(10 * 60))
                 .max_capacity(2_048)
                 .build(),
+            database,
+            durable_ttl,
         }
     }
 
@@ -106,9 +119,9 @@ impl GeminiAnthropicReplayCache {
                     return None;
                 }
                 tool_use_cache_key(team_id, request_model.as_deref(), block)
-                    .and_then(|key| self.turns.get(&key))
+                    .and_then(|key| self.lookup_turn(&key))
                     .or_else(|| {
-                        self.turns.get(&tool_use_id_cache_key(
+                        self.lookup_turn(&tool_use_id_cache_key(
                             team_id,
                             request_model.as_deref(),
                             tool_use_id,
@@ -163,11 +176,11 @@ impl GeminiAnthropicReplayCache {
                     return None;
                 }
                 tool_use_cache_key(team_id, request_model.as_deref(), block)
-                    .and_then(|key| self.turns.get(&key))
+                    .and_then(|key| self.lookup_turn(&key))
             })
             .or_else(|| {
                 referenced_tool_use_ids.iter().find_map(|tool_use_id| {
-                    self.turns.get(&tool_use_id_cache_key(
+                    self.lookup_turn(&tool_use_id_cache_key(
                         team_id,
                         request_model.as_deref(),
                         tool_use_id,
@@ -279,6 +292,14 @@ impl GeminiAnthropicReplayCache {
             prior_messages: prior_messages.to_vec(),
             assistant_content: content.to_vec(),
         });
+        let assistant_content_json = match serde_json::to_string(&replay_turn.assistant_content) {
+            Ok(json) => json,
+            Err(_) => return,
+        };
+        let prior_messages_json = match serde_json::to_string(&replay_turn.prior_messages) {
+            Ok(json) => json,
+            Err(_) => return,
+        };
 
         for block in content.iter().filter(|block| is_tool_use_block(block)) {
             let Some(key) = tool_use_cache_key(team_id, request_model.as_deref(), block) else {
@@ -290,6 +311,23 @@ impl GeminiAnthropicReplayCache {
                     tool_use_id_cache_key(team_id, request_model.as_deref(), tool_use_id),
                     replay_turn.clone(),
                 );
+                self.persist_turn(
+                    team_id,
+                    request_model.as_deref().unwrap_or(""),
+                    tool_use_id,
+                    &assistant_content_json,
+                    &prior_messages_json,
+                    &tool_use_cache_key(team_id, request_model.as_deref(), block)
+                        .unwrap_or_default(),
+                );
+                self.persist_turn(
+                    team_id,
+                    request_model.as_deref().unwrap_or(""),
+                    tool_use_id,
+                    &assistant_content_json,
+                    &prior_messages_json,
+                    &tool_use_id_cache_key(team_id, request_model.as_deref(), tool_use_id),
+                );
                 tracing::info!(
                     team_id,
                     model = request_model.as_deref().unwrap_or(""),
@@ -297,6 +335,48 @@ impl GeminiAnthropicReplayCache {
                     "Gemini replay cache store"
                 );
             }
+        }
+    }
+
+    fn lookup_turn(&self, cache_key: &str) -> Option<Arc<ReplayTurn>> {
+        if let Some(turn) = self.turns.get(cache_key) {
+            return Some(turn);
+        }
+
+        let database = self.database.as_ref()?;
+        let stored = database.get_gemini_replay_turn(cache_key, self.durable_ttl)?;
+        let assistant_content =
+            serde_json::from_str::<Vec<Value>>(&stored.assistant_content_json).ok()?;
+        let prior_messages =
+            serde_json::from_str::<Vec<Value>>(&stored.prior_messages_json).ok()?;
+        let replay_turn = Arc::new(ReplayTurn {
+            prior_messages,
+            assistant_content,
+        });
+        self.turns
+            .insert(cache_key.to_string(), replay_turn.clone());
+        Some(replay_turn)
+    }
+
+    fn persist_turn(
+        &self,
+        team_id: &str,
+        model: &str,
+        tool_use_id: &str,
+        assistant_content_json: &str,
+        prior_messages_json: &str,
+        cache_key: &str,
+    ) {
+        if let Some(database) = &self.database {
+            database.upsert_gemini_replay_turn(
+                cache_key,
+                team_id,
+                model,
+                tool_use_id,
+                assistant_content_json,
+                prior_messages_json,
+                self.durable_ttl,
+            );
         }
     }
 }
@@ -612,6 +692,9 @@ pub fn gemini_replay_missing_signature(body: &Bytes) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::Database;
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     #[test]
     fn augment_request_restores_cached_prefix_and_signature() {
@@ -955,6 +1038,76 @@ mod tests {
         assert_eq!(
             messages[3]["content"][0]["extra_content"]["google"]["thought_signature"],
             "sig_2"
+        );
+    }
+
+    #[test]
+    fn augment_request_recovers_from_persistent_store_after_memory_cache_is_gone() {
+        let dir = tempdir().unwrap();
+        let database =
+            Arc::new(Database::new(Some(dir.path().to_string_lossy().into_owned())).unwrap());
+        let persistent_cache = GeminiAnthropicReplayCache::with_persistence(
+            database.clone(),
+            Duration::from_secs(24 * 60 * 60),
+        );
+        let first_turn_request = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gemini-3.1-pro-preview",
+                "messages": [
+                    {"role": "user", "content": "Use the tool."}
+                ]
+            }))
+            .unwrap(),
+        );
+        let first_turn_response = Bytes::from(
+            serde_json::to_vec(&json!({
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "run_command",
+                        "input": {"cmd": "pwd"},
+                        "extra_content": {
+                            "google": {"thought_signature": "sig_123"}
+                        }
+                    }
+                ]
+            }))
+            .unwrap(),
+        );
+        persistent_cache.store_from_anthropic_response(
+            "team",
+            &first_turn_request,
+            &first_turn_response,
+        );
+
+        let rebuilt_from_database = GeminiAnthropicReplayCache::with_persistence(
+            database,
+            Duration::from_secs(24 * 60 * 60),
+        );
+        let tool_result_only_followup = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gemini-3.1-pro-preview",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+                            {"type": "text", "text": "Continue"}
+                        ]
+                    }
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let rebuilt = rebuilt_from_database.augment_request("team", &tool_result_only_followup);
+        let rebuilt: Value = serde_json::from_slice(&rebuilt).unwrap();
+        let messages = rebuilt["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(
+            messages[1]["content"][0]["extra_content"]["google"]["thought_signature"],
+            "sig_123"
         );
     }
 }

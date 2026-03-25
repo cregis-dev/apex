@@ -3,6 +3,7 @@ use rusqlite::{Connection, params};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 use tracing::info;
 
 pub struct Database {
@@ -113,7 +114,20 @@ impl Database {
                 latency_ms REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS gemini_replay_turns (
+                cache_key TEXT PRIMARY KEY,
+                team_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                tool_use_id TEXT NOT NULL,
+                assistant_content_json TEXT NOT NULL,
+                prior_messages_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_accessed_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics_requests(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_gemini_replay_expires_at ON gemini_replay_turns(expires_at);
             ",
         )?;
 
@@ -240,6 +254,84 @@ impl Database {
                 params![timestamp, route, router, channel, latency_ms],
             );
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_gemini_replay_turn(
+        &self,
+        cache_key: &str,
+        team_id: &str,
+        model: &str,
+        tool_use_id: &str,
+        assistant_content_json: &str,
+        prior_messages_json: &str,
+        ttl: Duration,
+    ) {
+        let now = chrono::Utc::now().timestamp();
+        let expires_at = now.saturating_add(ttl.as_secs().min(i64::MAX as u64) as i64);
+
+        if let Ok(conn) = self.conn.lock() {
+            let _ = conn.execute(
+                "INSERT INTO gemini_replay_turns (
+                    cache_key, team_id, model, tool_use_id, assistant_content_json,
+                    prior_messages_json, created_at, last_accessed_at, expires_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(cache_key) DO UPDATE SET
+                    team_id = excluded.team_id,
+                    model = excluded.model,
+                    tool_use_id = excluded.tool_use_id,
+                    assistant_content_json = excluded.assistant_content_json,
+                    prior_messages_json = excluded.prior_messages_json,
+                    last_accessed_at = excluded.last_accessed_at,
+                    expires_at = excluded.expires_at",
+                params![
+                    cache_key,
+                    team_id,
+                    model,
+                    tool_use_id,
+                    assistant_content_json,
+                    prior_messages_json,
+                    now,
+                    now,
+                    expires_at,
+                ],
+            );
+            let _ = conn.execute(
+                "DELETE FROM gemini_replay_turns WHERE expires_at <= ?1",
+                params![now],
+            );
+        }
+    }
+
+    pub fn get_gemini_replay_turn(
+        &self,
+        cache_key: &str,
+        ttl: Duration,
+    ) -> Option<GeminiReplayTurnRecord> {
+        let now = chrono::Utc::now().timestamp();
+        let expires_at = now.saturating_add(ttl.as_secs().min(i64::MAX as u64) as i64);
+
+        let conn = self.conn.lock().ok()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT assistant_content_json, prior_messages_json
+                 FROM gemini_replay_turns
+                 WHERE cache_key = ?1 AND expires_at > ?2",
+            )
+            .ok()?;
+        let row = stmt
+            .query_row(params![cache_key, now], |row| {
+                Ok(GeminiReplayTurnRecord {
+                    assistant_content_json: row.get(0)?,
+                    prior_messages_json: row.get(1)?,
+                })
+            })
+            .ok()?;
+        let _ = conn.execute(
+            "UPDATE gemini_replay_turns SET last_accessed_at = ?2, expires_at = ?3 WHERE cache_key = ?1",
+            params![cache_key, now, expires_at],
+        );
+        Some(row)
     }
 
     // Query methods for dashboard
@@ -770,6 +862,12 @@ pub struct UsageRecord {
     pub error_message: Option<String>,
     pub provider_trace_id: Option<String>,
     pub provider_error_body: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeminiReplayTurnRecord {
+    pub assistant_content_json: String,
+    pub prior_messages_json: String,
 }
 
 #[allow(dead_code)]

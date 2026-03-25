@@ -155,6 +155,8 @@ pub struct Global {
     pub auth_keys: Vec<String>,
     pub timeouts: Timeouts,
     pub retries: Retries,
+    #[serde(default)]
+    pub gemini_replay: GeminiReplay,
     #[serde(default = "default_true")]
     pub enable_mcp: bool,
     #[serde(default)]
@@ -163,6 +165,24 @@ pub struct Global {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeminiReplay {
+    #[serde(default = "default_gemini_replay_ttl_hours")]
+    pub ttl_hours: u64,
+}
+
+fn default_gemini_replay_ttl_hours() -> u64 {
+    24
+}
+
+impl Default for GeminiReplay {
+    fn default() -> Self {
+        Self {
+            ttl_hours: default_gemini_replay_ttl_hours(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -135,6 +135,7 @@ pub fn build_config(env: &E2eEnv, config_path: &Path) -> Config {
                 backoff_ms: 200,
                 retry_on_status: vec![429, 500, 502, 503, 504],
             },
+            gemini_replay: crate::config::GeminiReplay::default(),
             enable_mcp: env.enable_mcp,
             cors_allowed_origins: vec![],
         },

@@ -12,6 +12,9 @@
       "max_attempts": 3,
       "backoff_ms": 100,
       "retry_on_status": [500, 502, 503, 504]
+    },
+    "gemini_replay": {
+      "ttl_hours": 24
     }
   },
   "logging": {
