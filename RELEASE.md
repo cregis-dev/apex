@@ -18,6 +18,12 @@ Current release automation:
   - `checksums.txt`
 - Installer entrypoint: `install-release.sh`
 
+Linux packaging notes:
+
+- `apex-x86_64-linux.tar.gz` should be built from `x86_64-unknown-linux-musl`
+- this avoids runtime failures on older cloud images with outdated glibc
+- do not switch x86_64 Linux release builds back to `gnu` unless you are intentionally narrowing compatibility
+
 ## Versioning
 
 Apex uses Semantic Versioning, with conservative rules while still in `0.x`.
@@ -219,6 +225,21 @@ Check:
 - artifact names still match platform detection in `install-release.sh`
 - `checksums.txt` contains the uploaded filenames
 - release assets were attached to the correct tag
+
+### Linux runtime fails with `GLIBC_x.y not found`
+
+Cause:
+
+- the Linux binary was built against a newer glibc than the server provides
+
+Preferred fix:
+
+- publish a new release where `apex-x86_64-linux.tar.gz` is built from `x86_64-unknown-linux-musl`
+
+Short-term workaround:
+
+- build from source on the target host, or
+- run Apex in a newer base image with a compatible glibc
 
 ## Maintainer Notes
 
