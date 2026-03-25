@@ -219,20 +219,20 @@ impl UsageTrackerState {
                 .token_total
                 .with_label_values(&[&self.router, &self.channel, &model_lower, "output"])
                 .inc_by(self.output_tokens);
-
-            self.logger.log(
-                self.request_id.as_deref(),
-                &self.team_id,
-                &self.router,
-                self.matched_rule.as_deref(),
-                &self.channel,
-                &self.model,
-                self.input_tokens,
-                self.output_tokens,
-                self.latency_ms,
-                self.fallback_triggered,
-            );
         }
+
+        self.logger.log(
+            self.request_id.as_deref(),
+            &self.team_id,
+            &self.router,
+            self.matched_rule.as_deref(),
+            &self.channel,
+            &self.model,
+            self.input_tokens,
+            self.output_tokens,
+            self.latency_ms,
+            self.fallback_triggered,
+        );
     }
 }
 
@@ -417,6 +417,40 @@ mod tests {
         tracker.extract_usage(&json);
         assert_eq!(tracker.input_tokens, 15);
         assert_eq!(tracker.output_tokens, 1);
+    }
+
+    #[test]
+    fn test_flush_logs_success_even_without_usage_tokens() {
+        let (dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+
+        let tracker = UsageTrackerState::new(
+            "team1".to_string(),
+            Some("req-1".to_string()),
+            "r1".to_string(),
+            Some("gemini-*".to_string()),
+            "gemini_primary".to_string(),
+            "gemini-3.1-pro-preview".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+        );
+
+        tracker.flush();
+
+        let db = Database::new(Some(dir.path().to_string_lossy().to_string())).unwrap();
+        let (records, total) = db
+            .get_usage_records(None, None, None, None, None, None, None, 10, 0)
+            .unwrap();
+
+        assert_eq!(total, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, "success");
+        assert_eq!(records[0].channel, "gemini_primary");
+        assert_eq!(records[0].model, "gemini-3.1-pro-preview");
+        assert_eq!(records[0].input_tokens, 0);
+        assert_eq!(records[0].output_tokens, 0);
     }
 
     #[test]

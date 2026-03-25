@@ -89,15 +89,8 @@ pub fn convert_openai_response_to_anthropic(body: Bytes) -> Bytes {
     }
 
     // Usage
-    if let Some(usage) = val.get("usage") {
-        let mut new_usage = serde_json::Map::new();
-        if let Some(pt) = usage.get("prompt_tokens") {
-            new_usage.insert("input_tokens".to_string(), pt.clone());
-        }
-        if let Some(ct) = usage.get("completion_tokens") {
-            new_usage.insert("output_tokens".to_string(), ct.clone());
-        }
-        new_body.insert("usage".to_string(), Value::Object(new_usage));
+    if let Some(usage) = val.get("usage").and_then(map_openai_usage_to_anthropic) {
+        new_body.insert("usage".to_string(), usage);
     }
 
     match serde_json::to_vec(&new_body) {
@@ -161,15 +154,22 @@ where
                         }
 
                         if !state.sent_message_delta {
+                            let usage = state
+                                .final_usage
+                                .clone()
+                                .unwrap_or_else(|| json!({"input_tokens": 0, "output_tokens": 0}));
                             events.push(format!(
                                 "event: message_delta\ndata: {}\n\n",
                                 serde_json::json!({
                                     "type": "message_delta",
                                     "delta": {
-                                        "stop_reason": "end_turn",
+                                        "stop_reason": state
+                                            .pending_stop_reason
+                                            .clone()
+                                            .unwrap_or_else(|| "end_turn".to_string()),
                                         "stop_sequence": null
                                     },
-                                    "usage": {"output_tokens": 0}
+                                    "usage": usage
                                 })
                             ));
                             state.sent_message_delta = true;
@@ -186,6 +186,12 @@ where
 
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
                         let mut events = Vec::new();
+
+                        if let Some(usage) =
+                            val.get("usage").and_then(map_openai_usage_to_anthropic)
+                        {
+                            state.final_usage = Some(usage);
+                        }
 
                         if !state.sent_message_start {
                             let id = val["id"].as_str().unwrap_or("msg_123");
@@ -354,25 +360,15 @@ where
                                     }
                                 }
 
-                                let stop_reason = match finish_reason {
-                                    "stop" => "end_turn",
-                                    "length" => "max_tokens",
-                                    "tool_calls" => "tool_use",
-                                    _ => "stop_sequence",
-                                };
-
-                                events.push(format!(
-                                    "event: message_delta\ndata: {}\n\n",
-                                    serde_json::json!({
-                                        "type": "message_delta",
-                                        "delta": {
-                                        "stop_reason": stop_reason,
-                                        "stop_sequence": null
-                                    },
-                                         "usage": {"output_tokens": 0}
-                                    })
-                                ));
-                                state.sent_message_delta = true;
+                                state.pending_stop_reason = Some(
+                                    match finish_reason {
+                                        "stop" => "end_turn",
+                                        "length" => "max_tokens",
+                                        "tool_calls" => "tool_use",
+                                        _ => "stop_sequence",
+                                    }
+                                    .to_string(),
+                                );
                             }
                         }
 
@@ -406,11 +402,35 @@ where
 struct StreamConversionState {
     sent_message_start: bool,
     sent_message_delta: bool,
+    pending_stop_reason: Option<String>,
+    final_usage: Option<Value>,
     saw_text_block: bool,
     text_block_started: bool,
     text_block_closed: bool,
     tool_blocks_started: BTreeSet<usize>,
     tool_blocks_closed: BTreeSet<usize>,
+}
+
+fn map_openai_usage_to_anthropic(usage: &Value) -> Option<Value> {
+    let mut mapped = Map::new();
+    if let Some(input_tokens) = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+    {
+        mapped.insert("input_tokens".to_string(), input_tokens.clone());
+    }
+    if let Some(output_tokens) = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+    {
+        mapped.insert("output_tokens".to_string(), output_tokens.clone());
+    }
+
+    if mapped.is_empty() {
+        None
+    } else {
+        Some(Value::Object(mapped))
+    }
 }
 
 /// Converts an Anthropic JSON request body to OpenAI's format.
@@ -1153,6 +1173,40 @@ mod tests {
         assert!(output.contains("event: content_block_start"));
         assert!(output.contains("Hello from stream"));
         assert!(output.contains("event: content_block_stop"));
+        assert!(output.contains("\"stop_reason\":\"end_turn\""));
+        assert!(output.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn test_convert_openai_stream_to_anthropic_preserves_final_usage_chunk() {
+        let chunks = vec![
+            Ok::<Bytes, reqwest::Error>(Bytes::from(concat!(
+                "data: ",
+                "{\"id\":\"chatcmpl-text\",\"model\":\"gemini-3.1-pro-preview\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello from stream\"}}]}\n\n"
+            ))),
+            Ok::<Bytes, reqwest::Error>(Bytes::from(concat!(
+                "data: ",
+                "{\"id\":\"chatcmpl-text\",\"model\":\"gemini-3.1-pro-preview\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+            ))),
+            Ok::<Bytes, reqwest::Error>(Bytes::from(concat!(
+                "data: ",
+                "{\"id\":\"chatcmpl-text\",\"model\":\"gemini-3.1-pro-preview\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n",
+                "data: [DONE]\n\n"
+            ))),
+        ];
+
+        let converted_stream = convert_openai_stream_to_anthropic(stream::iter(chunks));
+        let output = futures::executor::block_on(async move {
+            converted_stream
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+                .collect::<String>()
+        });
+
+        assert!(output.contains("\"input_tokens\":11"));
+        assert!(output.contains("\"output_tokens\":7"));
         assert!(output.contains("\"stop_reason\":\"end_turn\""));
         assert!(output.contains("event: message_stop"));
     }

@@ -325,6 +325,36 @@ fn openai_compatible_body(
     }
 }
 
+fn ensure_openai_stream_usage(body: &Bytes) -> Bytes {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.clone();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body.clone();
+    };
+    if !object
+        .get("stream")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return body.clone();
+    }
+
+    let stream_options = object
+        .entry("stream_options".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(options_object) = stream_options.as_object_mut() else {
+        return body.clone();
+    };
+    options_object
+        .entry("include_usage".to_string())
+        .or_insert(serde_json::Value::Bool(true));
+
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| body.clone())
+}
+
 fn handle_openai_compatible_response(
     route: RouteKind,
     resp: reqwest::Response,
@@ -577,12 +607,14 @@ impl ProviderAdapter for GeminiAdapter {
         body: &Bytes,
         model_map: &Option<HashMap<String, String>>,
     ) -> Bytes {
-        if matches!(route, RouteKind::Anthropic) {
+        let mapped = if matches!(route, RouteKind::Anthropic) {
             let body = convert_anthropic_to_openai(body);
             apply_model_map(&body, model_map)
         } else {
             apply_model_map(body, model_map)
-        }
+        };
+
+        ensure_openai_stream_usage(&mapped)
     }
 
     fn apply_auth_headers(
@@ -1243,6 +1275,41 @@ mod tests {
             "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
         );
         assert_eq!(prepared.headers.get("authorization").unwrap(), "Bearer key");
+    }
+
+    #[test]
+    fn gemini_stream_requests_enable_usage_chunks() {
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+        let body = Bytes::from(
+            r#"{"model":"gemini-3.1-pro-preview","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+        );
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Anthropic,
+            &channel.base_url,
+            "/v1/messages",
+            Some("beta=true"),
+            &headers,
+            &body,
+        )
+        .unwrap();
+
+        let value: serde_json::Value = serde_json::from_slice(&prepared.body).unwrap();
+        assert_eq!(value["stream"], true);
+        assert_eq!(value["stream_options"]["include_usage"], true);
     }
 
     #[test]
