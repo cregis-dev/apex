@@ -224,6 +224,7 @@ pub enum ProviderType {
     Ollama,
     Jina,
     Openrouter,
+    Zai,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,4 +430,18 @@ pub fn save_config(path: &Path, config: &Config) -> anyhow::Result<()> {
     let content = serde_json::to_string_pretty(config)?;
     fs::write(path, content)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderType;
+
+    #[test]
+    fn provider_type_zai_round_trips_as_snake_case() {
+        let serialized = serde_json::to_string(&ProviderType::Zai).unwrap();
+        assert_eq!(serialized, "\"zai\"");
+
+        let parsed: ProviderType = serde_json::from_str("\"zai\"").unwrap();
+        assert_eq!(parsed, ProviderType::Zai);
+    }
 }

@@ -12,12 +12,13 @@ from rich.prompt import Confirm, Prompt
 console = Console()
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+RUNTIME_DIR = ROOT_DIR / ".run" / "e2e"
 ENV_FILE = Path(os.environ.get("APEX_ENV_FILE", ROOT_DIR / ".env.e2e"))
 CONFIG_PATH = Path(
-    os.environ.get("APEX_CONFIG", ROOT_DIR / "tests/e2e/generated.e2e.config.json")
+    os.environ.get("APEX_CONFIG", RUNTIME_DIR / "generated.e2e.config.json")
 )
 SERVER_LOG = Path(
-    os.environ.get("APEX_SERVER_LOG", ROOT_DIR / "tests/e2e/server.log")
+    os.environ.get("APEX_SERVER_LOG", RUNTIME_DIR / "server.log")
 )
 DEFAULT_PROTOCOLS = "openai,anthropic"
 
@@ -72,10 +73,10 @@ def run_server():
             "--bin",
             "apex",
             "--",
-            "--config",
-            str(CONFIG_PATH),
             "gateway",
             "start",
+            "--config",
+            str(CONFIG_PATH),
         ],
         cwd=ROOT_DIR,
         stdout=log_file,

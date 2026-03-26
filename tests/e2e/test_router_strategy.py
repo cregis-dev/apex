@@ -11,8 +11,9 @@ import requests
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 APEX_BIN = ROOT_DIR / "target" / "debug" / "apex"
-CONFIG_PATH = ROOT_DIR / "tests/e2e/temp_router_config.json"
-SERVER_LOG = ROOT_DIR / "tests/e2e/router_strategy_server.log"
+RUNTIME_DIR = ROOT_DIR / ".run" / "e2e" / "router_strategy"
+CONFIG_PATH = RUNTIME_DIR / "temp_router_config.json"
+SERVER_LOG = RUNTIME_DIR / "router_strategy_server.log"
 MOCK_SERVER_SCRIPT = Path(__file__).parent / "mock_server.py"
 
 
@@ -72,7 +73,7 @@ def apex_server(mock_servers):
             "cors_allowed_origins": [],
         },
         "logging": {"level": "info", "dir": None},
-        "data_dir": str((ROOT_DIR / "tests/e2e/router-data").resolve()),
+        "data_dir": str((RUNTIME_DIR / "data").resolve()),
         "web_dir": "target/web",
         "channels": [
             {
@@ -171,10 +172,10 @@ def apex_server(mock_servers):
         proc = subprocess.Popen(
             [
                 str(APEX_BIN),
-                "--config",
-                str(CONFIG_PATH),
                 "gateway",
                 "start",
+                "--config",
+                str(CONFIG_PATH),
             ],
             cwd=ROOT_DIR,
             stdout=log_file,

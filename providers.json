@@ -87,6 +87,14 @@
       "headers": {},
       "model_map": {},
       "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
+    },
+    {
+      "provider_type": "zai",
+      "base_url": "https://api.z.ai/api/paas/v4/",
+      "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "ZAI_API_KEY" },
+      "headers": {},
+      "model_map": {},
+      "timeouts": { "connect_ms": 2000, "request_ms": 30000, "response_ms": 30000 }
     }
   ]
 }

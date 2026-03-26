@@ -132,6 +132,7 @@ impl ProviderRegistry {
         adapters.insert(ProviderType::Ollama, Box::new(OllamaAdapter));
         adapters.insert(ProviderType::Jina, Box::new(DefaultAdapter));
         adapters.insert(ProviderType::Openrouter, Box::new(OpenRouterAdapter));
+        adapters.insert(ProviderType::Zai, Box::new(DefaultAdapter));
 
         Self {
             adapters,
@@ -1390,6 +1391,88 @@ mod tests {
             prepared.url.as_str(),
             "https://openrouter.ai/api/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn zai_openai_route_uses_single_base_url_and_bearer_auth() {
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::Zai,
+            base_url: "https://api.z.ai/api/paas/v4/".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Openai,
+            &channel.base_url,
+            "/v1/chat/completions",
+            None,
+            &headers,
+            &Bytes::from("{}"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://api.z.ai/api/paas/v4/v1/chat/completions"
+        );
+        assert_eq!(prepared.headers.get("authorization").unwrap(), "Bearer key");
+        assert!(prepared.headers.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn zai_anthropic_route_bridges_to_chat_completions_on_same_base_url() {
+        let registry = ProviderRegistry::new();
+        let body = Bytes::from(
+            r#"{"model":"glm-4.6","system":"Be terse","max_tokens":32,"messages":[{"role":"user","content":"Hi"}],"stream":true}"#,
+        );
+        let channel = Channel {
+            name: "c".to_string(),
+            provider_type: ProviderType::Zai,
+            base_url: "https://api.z.ai/api/paas/v4/".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Anthropic,
+            &channel.base_url,
+            "/v1/messages",
+            None,
+            &headers,
+            &body,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://api.z.ai/api/paas/v4/chat/completions"
+        );
+        assert_eq!(prepared.headers.get("authorization").unwrap(), "Bearer key");
+        assert!(prepared.headers.get("x-api-key").is_none());
+
+        let value: serde_json::Value = serde_json::from_slice(&prepared.body).unwrap();
+        assert_eq!(value["model"], "glm-4.6");
+        assert_eq!(value["messages"][0]["role"], "system");
+        assert_eq!(value["messages"][0]["content"], "Be terse");
+        assert_eq!(value["messages"][1]["role"], "user");
+        assert_eq!(value["messages"][1]["content"], "Hi");
+        assert_eq!(value["max_tokens"], 32);
+        assert_eq!(value["stream"], true);
     }
 
     #[test]

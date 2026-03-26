@@ -7,7 +7,7 @@ use std::path::PathBuf;
 struct Args {
     #[arg(long, default_value = ".env.e2e")]
     env_file: PathBuf,
-    #[arg(long, default_value = "tests/e2e/generated.e2e.config.json")]
+    #[arg(long, default_value = ".run/e2e/generated.e2e.config.json")]
     output: PathBuf,
 }
 

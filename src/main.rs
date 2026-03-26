@@ -1145,6 +1145,7 @@ fn parse_provider_type(value: &str) -> anyhow::Result<ProviderType> {
         "ollama" => Ok(ProviderType::Ollama),
         "jina" => Ok(ProviderType::Jina),
         "openrouter" => Ok(ProviderType::Openrouter),
+        "zai" => Ok(ProviderType::Zai),
         _ => bail!("unsupported provider: {}", value),
     }
 }
@@ -1161,6 +1162,7 @@ fn provider_choices() -> Vec<&'static str> {
         "ollama",
         "jina",
         "openrouter",
+        "zai",
     ]
 }
 
@@ -1197,6 +1199,7 @@ fn get_default_base_url(provider: &ProviderType) -> &'static str {
         ProviderType::Ollama => "http://localhost:11434",
         ProviderType::Jina => "https://api.jina.ai/v1",
         ProviderType::Openrouter => "https://openrouter.ai/api/v1",
+        ProviderType::Zai => "https://api.z.ai/api/paas/v4/",
     }
 }
 
@@ -1343,7 +1346,7 @@ mod tests {
     #[test]
     fn provider_choices_count() {
         let choices = provider_choices();
-        assert_eq!(choices.len(), 10);
+        assert_eq!(choices.len(), 11);
     }
 
     #[test]
@@ -1352,6 +1355,23 @@ mod tests {
         assert_eq!(provider, ProviderType::Openai);
         let provider = parse_provider_type("custom_dual").unwrap();
         assert_eq!(provider, ProviderType::CustomDual);
+        let provider = parse_provider_type("zai").unwrap();
+        assert_eq!(provider, ProviderType::Zai);
+    }
+
+    #[test]
+    fn provider_choices_contains_zai() {
+        let choices = provider_choices();
+        assert!(choices.contains(&"zai"));
+    }
+
+    #[test]
+    fn zai_defaults_to_single_base_url_only() {
+        assert_eq!(
+            get_default_base_url(&ProviderType::Zai),
+            "https://api.z.ai/api/paas/v4/"
+        );
+        assert_eq!(get_default_anthropic_base_url(&ProviderType::Zai), None);
     }
 
     #[test]

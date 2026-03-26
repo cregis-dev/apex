@@ -203,7 +203,7 @@ tests/
   - 生成强类型测试输入
 
 - `config_builder.rs`
-  - 复用 Apex 自己的 `Config` 结构生成 `generated.e2e.config.json`
+  - 复用 Apex 自己的 `Config` 结构生成 `.run/e2e/generated.e2e.config.json`
   - 统一生成 `teams`、`routers`、`channels`、`metrics`、`hot_reload`
 
 - `gateway_process.rs`
@@ -295,7 +295,7 @@ cargo test
 - `./scripts/test-local-e2e.sh`
 - `./scripts/test-real-smoke.sh`
 - `./scripts/test-all.sh`
-- `cargo run --bin apex-e2e-config -- --env-file .env.e2e --output tests/e2e/generated.e2e.config.json`
+- `cargo run --bin apex-e2e-config -- --env-file .env.e2e --output .run/e2e/generated.e2e.config.json`
 
 其中：
 

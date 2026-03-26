@@ -10,4 +10,4 @@ if [[ ! -f "${APEX_ENV_FILE:-$ROOT_DIR/.env.e2e}" ]]; then
 fi
 
 echo "[real-smoke] running Python SDK smoke against providers from .env.e2e"
-python3 tests/e2e/run_e2e.py
+PYTHONDONTWRITEBYTECODE=1 python3 tests/e2e/run_e2e.py

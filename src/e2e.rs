@@ -307,6 +307,7 @@ fn parse_provider_type(value: &str) -> anyhow::Result<ProviderType> {
         "ollama" => Ok(ProviderType::Ollama),
         "jina" => Ok(ProviderType::Jina),
         "openrouter" => Ok(ProviderType::Openrouter),
+        "zai" => Ok(ProviderType::Zai),
         other => bail!("unsupported provider type in .env: {other}"),
     }
 }

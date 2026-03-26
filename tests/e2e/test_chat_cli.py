@@ -65,6 +65,7 @@ def configured_protocols() -> List[str]:
         "openrouter",
         "gemini",
         "jina",
+        "zai",
     }
     anthropic_compatible = set(openai_like)
     anthropic_compatible.update({"anthropic", "customdual"})
