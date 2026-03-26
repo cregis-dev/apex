@@ -115,10 +115,10 @@ API Key: sk-ap-XyZ123...
 
 ```bash
 # 前台运行
-apex gateway start
+apex gateway start --config /path/to/config.json
 
 # 后台运行 (Daemon)
-apex gateway start -d
+apex gateway start --config /path/to/config.json -d
 ```
 
 ### 6. 验证调用
@@ -334,7 +334,7 @@ Apex 的 MCP 现在支持 **Streamable HTTP** 传输模式（MCP 协议版本 20
 
 **启动主服务**:
 ```bash
-apex gateway start
+apex gateway start --config /path/to/config.json
 ```
 
 ### 3. 连接指南

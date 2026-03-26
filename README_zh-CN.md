@@ -107,6 +107,13 @@ curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-releas
   bash -s -- --version v0.1.0 /opt/apex
 ```
 
+如需同时写入示例配置文件，请显式指定目标路径：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --version v0.1.1 --config-path /etc/apex/config.json /opt/apex
+```
+
 如果您更喜欢从源码构建：
 
 ```bash
@@ -116,7 +123,7 @@ npm run build
 
 cd ..
 cargo build --release --features embedded-web
-./target/release/apex gateway start --config config.json
+./target/release/apex gateway start --config ./config.json
 ```
 
 ## 📚 文档

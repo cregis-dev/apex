@@ -109,6 +109,13 @@ curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-releas
   bash -s -- --version v0.1.0 /opt/apex
 ```
 
+To also write the packaged example config to an explicit path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --version v0.1.1 --config-path /etc/apex/config.json /opt/apex
+```
+
 If you prefer to build from source:
 
 ```bash
@@ -118,7 +125,7 @@ npm run build
 
 cd ..
 cargo build --release --features embedded-web
-./target/release/apex gateway start --config config.json
+./target/release/apex gateway start --config ./config.json
 ```
 
 For local source-based installation into a target directory, use [`install.sh`](install.sh).
@@ -136,7 +143,7 @@ Apex includes a built-in Web Dashboard for observability and usage analytics:
 
 ### Access the Dashboard
 
-1. Start the gateway: `apex gateway start`
+1. Start the gateway: `apex gateway start --config /path/to/config.json`
 2. Open your browser: `http://localhost:12356/dashboard`
 3. Enter your Team API key when prompted
 

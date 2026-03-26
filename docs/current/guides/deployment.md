@@ -85,6 +85,10 @@ curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-releas
 # 或安装指定版本到 /opt/apex
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
   bash -s -- --version v0.1.0 /opt/apex
+
+# 如需一并写入示例配置到明确路径
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --version v0.1.1 --config-path /opt/apex/config.json /opt/apex
 ```
 
 **2. 移动到系统路径**:
@@ -92,20 +96,15 @@ curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-releas
 sudo ln -sf /opt/apex/apex /usr/local/bin/apex
 ```
 
-**3. 创建配置目录**:
+**3. 准备配置文件**:
 ```bash
 sudo mkdir -p /opt/apex
-sudo mkdir -p /var/log/apex
-sudo mkdir -p /var/lib/apex
-```
-
-**4. 准备配置文件**:
-```bash
-sudo cp /opt/apex/config.example.json /opt/apex/config.json
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  sudo bash -s -- --version v0.1.1 --config-path /opt/apex/config.json /opt/apex
 sudo vi /opt/apex/config.json
 ```
 
-**5. 配置 systemd 服务**:
+**4. 配置 systemd 服务**:
 ```ini
 # /etc/systemd/system/apex.service
 [Unit]
@@ -126,13 +125,13 @@ Environment=RUST_LOG=info
 WantedBy=multi-user.target
 ```
 
-**6. 启动服务**:
+**5. 启动服务**:
 ```bash
 # 创建用户
 sudo useradd -r -s /bin/false apex
 
 # 设置权限
-sudo chown -R apex:apex /opt/apex /var/log/apex /var/lib/apex
+sudo chown -R apex:apex /opt/apex
 
 # 启用服务
 sudo systemctl daemon-reload
@@ -140,7 +139,7 @@ sudo systemctl enable apex
 sudo systemctl start apex
 ```
 
-**7. 验证状态**:
+**6. 验证状态**:
 ```bash
 sudo systemctl status apex
 curl http://localhost:12356/metrics
@@ -153,6 +152,10 @@ curl http://localhost:12356/metrics
 ```bash
 # 一键安装
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | sudo bash -s -- /opt/apex
+
+# 安装并写入示例配置
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  sudo bash -s -- --config-path /opt/apex/config.json /opt/apex
 ```
 
 **安装脚本内容** (`install-release.sh`):
@@ -163,11 +166,11 @@ INSTALL_PATH=${1:-/opt/apex}
 echo "Installing Apex Gateway to $INSTALL_PATH"
 
 # Detect platform and download the matching release archive
-# Preserve existing config.json and regenerate only when requested
-# Install apex, config.example.json, logs/, data/
+# Install only the apex binary by default
+# Write config.example.json only when --config-path is provided
 
 echo "Installation complete!"
-echo "Run: $INSTALL_PATH/apex gateway start --config $INSTALL_PATH/config.json"
+echo "Run: $INSTALL_PATH/apex gateway start --config /path/to/config.json"
 ```
 
 ---

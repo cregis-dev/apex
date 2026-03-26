@@ -69,7 +69,7 @@ fi
 mkdir -p "$FIXTURE_ROOT"
 rm -f "$SERVER_LOG"
 
-"$REPO_ROOT/target/debug/apex" gateway start "$CONFIG_PATH" >"$SERVER_LOG" 2>&1 &
+"$REPO_ROOT/target/debug/apex" gateway start --config "$CONFIG_PATH" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 wait_for_backend

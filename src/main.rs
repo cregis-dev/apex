@@ -31,7 +31,7 @@ use config::{
 #[derive(Parser)]
 #[command(name = "apex", version)]
 struct Cli {
-    #[arg(long, global = true)]
+    #[arg(long)]
     config: Option<String>,
     #[command(subcommand)]
     command: Commands,
@@ -65,7 +65,8 @@ enum Commands {
 #[derive(Subcommand)]
 enum GatewayCommand {
     Start {
-        config: Option<String>,
+        #[arg(long, short = 'c')]
+        config: String,
         #[arg(long, short = 'd')]
         daemon: bool,
     },
@@ -330,7 +331,7 @@ fn main() -> anyhow::Result<()> {
         command: GatewayCommand::Start { daemon, config },
     } = &cli.command
     {
-        (*daemon, config.clone())
+        (*daemon, Some(config.clone()))
     } else {
         (false, None)
     };
@@ -411,7 +412,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Commands::Router { command } => handle_router_command(&cli, command)?,
         Commands::Gateway { command } => match command {
             GatewayCommand::Start { config, daemon: _ } => {
-                let path = resolve_config_path(cli.config.clone().or_else(|| config.clone()));
+                let path = resolve_config_path(Some(config.clone()));
                 server::run_server(path).await?;
             }
             GatewayCommand::Stop => handle_stop_command(&cli)?,

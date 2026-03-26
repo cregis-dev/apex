@@ -64,7 +64,7 @@ cargo run -- --config config.json
 RUST_LOG=debug cargo run -- --config config.json
 
 # 守护进程模式
-cargo run -- gateway start -d
+cargo run -- gateway start --config ./config.json -d
 ```
 
 ### 5. 验证服务

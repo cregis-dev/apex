@@ -5,12 +5,13 @@
 # 功能:
 #   - 根据当前系统和架构，从 GitHub Releases 下载对应预编译包
 #   - 安装 apex 二进制到目标目录
-#   - 保护现有 config.json 不被覆盖
+#   - 可选地将包内示例配置写入指定路径
 #
 # 选项:
 #   --version <tag>      安装指定版本，默认 latest
 #   --repo <owner/repo>  指定 GitHub 仓库，默认 cregis-dev/apex
-#   --force-config       强制重新生成配置文件
+#   --config-path <file> 将包内 config.example.json 写入指定路径
+#   --force-config       当 --config-path 已存在时强制覆盖
 #   --skip-checksum      跳过 SHA256 校验
 #   --help, -h           显示帮助
 
@@ -18,6 +19,7 @@ set -euo pipefail
 
 REPO="${APEX_REPO:-cregis-dev/apex}"
 VERSION="latest"
+CONFIG_PATH=""
 FORCE_CONFIG=false
 SKIP_CHECKSUM=false
 TARGET_DIR="/opt/apex"
@@ -30,13 +32,15 @@ print_usage() {
 选项:
   --version <tag>      安装指定版本，默认 latest
   --repo <owner/repo>  指定 GitHub 仓库，默认 cregis-dev/apex
-  --force-config       强制重新生成配置文件
+  --config-path <file> 将包内 config.example.json 写入指定路径
+  --force-config       当 --config-path 已存在时强制覆盖
   --skip-checksum      跳过 SHA256 校验
   --help, -h           显示此帮助信息
 
 示例:
   ./install-release.sh
   ./install-release.sh /opt/apex
+  ./install-release.sh --config-path /etc/apex/config.json /opt/apex
   ./install-release.sh --version v0.1.1 /opt/apex
   ./install-release.sh --repo your-org/apex --skip-checksum /opt/apex
 EOF
@@ -156,6 +160,19 @@ release_base_url() {
     fi
 }
 
+expand_input_path() {
+    local raw_path="$1"
+    if [[ "$raw_path" == "~" ]]; then
+        printf '%s\n' "${HOME:-$raw_path}"
+        return 0
+    fi
+    if [[ "$raw_path" == ~/* ]]; then
+        printf '%s/%s\n' "${HOME:-}" "${raw_path#~/}"
+        return 0
+    fi
+    printf '%s\n' "$raw_path"
+}
+
 verify_checksum() {
     local archive_path="$1"
     local checksum_path="$2"
@@ -196,6 +213,14 @@ while [ "$#" -gt 0 ]; do
                 exit 1
             fi
             REPO="$2"
+            shift 2
+            ;;
+        --config-path)
+            if [ "$#" -lt 2 ]; then
+                echo "错误：--config-path 需要一个值"
+                exit 1
+            fi
+            CONFIG_PATH="$2"
             shift 2
             ;;
         --force-config)
@@ -240,6 +265,9 @@ echo "仓库：$REPO"
 echo "版本：$VERSION"
 echo "平台包：$ARCHIVE_NAME"
 echo "目标路径：$TARGET_DIR"
+if [ -n "$CONFIG_PATH" ]; then
+    echo "配置文件：$CONFIG_PATH"
+fi
 
 echo ""
 echo "=== 1. 下载发布包 ==="
@@ -283,83 +311,35 @@ if [ "$(uname -s)" = "Darwin" ] && have_command codesign; then
     codesign --force --sign - "$TARGET_DIR/apex"
 fi
 
-mkdir -p "$TARGET_DIR/data" "$TARGET_DIR/logs"
-
-if [ -n "$EXTRACTED_CONFIG_EXAMPLE" ]; then
-    cp "$EXTRACTED_CONFIG_EXAMPLE" "$TARGET_DIR/config.example.json"
-fi
-
 echo ""
 echo "=== 4. 处理配置文件 ==="
-if [ -f "$TARGET_DIR/config.json" ] && [ "$FORCE_CONFIG" = false ]; then
-    if have_command python3; then
-        if ! python3 -c "import json; json.load(open('$TARGET_DIR/config.json'))" 2>/dev/null; then
-            echo "警告：现有配置文件不是有效 JSON，请手工检查"
-        fi
+if [ -n "$CONFIG_PATH" ]; then
+    if [ -z "$EXTRACTED_CONFIG_EXAMPLE" ]; then
+        echo "错误：发布包中未找到 config.example.json，无法写入配置文件"
+        exit 1
     fi
-    echo "配置文件已存在，跳过生成"
+
+    CONFIG_PATH="$(expand_input_path "$CONFIG_PATH")"
+
+    if [ -f "$CONFIG_PATH" ] && [ "$FORCE_CONFIG" = false ]; then
+        echo "错误：配置文件已存在：$CONFIG_PATH"
+        echo "如需覆盖，请追加 --force-config"
+        exit 1
+    fi
+
+    mkdir -p "$(dirname "$CONFIG_PATH")"
+    cp "$EXTRACTED_CONFIG_EXAMPLE" "$CONFIG_PATH"
+    echo "已写入配置文件：$CONFIG_PATH"
 else
-    cat > "$TARGET_DIR/config.json" <<EOF
-{
-  "version": "1.0",
-  "logging": {
-    "level": "info",
-    "dir": "$TARGET_DIR/logs"
-  },
-  "data_dir": "$TARGET_DIR/data",
-  "global": {
-    "listen": "0.0.0.0:12356",
-    "auth_keys": ["replace-with-dashboard-admin-key"],
-    "timeouts": {
-      "connect_ms": 10000,
-      "request_ms": 120000,
-      "response_ms": 300000
-    },
-    "retries": {
-      "max_attempts": 3,
-      "backoff_ms": 100,
-      "retry_on_status": [429, 500, 502, 503, 504]
-    },
-    "enable_mcp": true,
-    "cors_allowed_origins": []
-  },
-  "metrics": {
-    "enabled": true,
-    "path": "/metrics"
-  },
-  "hot_reload": {
-    "config_path": "$TARGET_DIR/config.json",
-    "watch": false
-  },
-  "teams": [
-    {
-      "id": "demo-team",
-      "api_key": "replace-with-team-api-key",
-      "policy": {
-        "allowed_routers": []
-      }
-    }
-  ],
-  "channels": [],
-  "routers": [],
-  "prompts": []
-}
-EOF
-    echo "已生成示例配置文件：$TARGET_DIR/config.json"
-    echo "启动前请至少修改："
-    echo "  - global.auth_keys"
-    echo "  - teams[0].api_key"
-    echo "  - channels"
-    echo "  - routers"
+    echo "未请求写入配置文件，跳过"
 fi
 
 echo ""
 echo "=== 安装完成 ==="
 echo "目录结构:"
-echo "  $TARGET_DIR/apex                - 主程序"
-echo "  $TARGET_DIR/config.json         - 当前运行配置"
-echo "  $TARGET_DIR/config.example.json - 随包示例配置"
-echo "  $TARGET_DIR/data                - SQLite/运行数据"
-echo "  $TARGET_DIR/logs                - 日志目录"
+echo "  $TARGET_DIR/apex - 主程序"
+if [ -n "$CONFIG_PATH" ]; then
+    echo "  $CONFIG_PATH - 用户指定配置文件"
+fi
 echo ""
-echo "运行：$TARGET_DIR/apex gateway start --config $TARGET_DIR/config.json"
+echo "运行示例：$TARGET_DIR/apex gateway start --config /path/to/config.json"

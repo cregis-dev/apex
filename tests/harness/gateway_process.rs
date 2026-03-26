@@ -24,10 +24,10 @@ impl GatewayProcess {
             .with_context(|| format!("failed to clone log file: {}", log_path.display()))?;
 
         let child = Command::new(env!("CARGO_BIN_EXE_apex"))
-            .arg("--config")
-            .arg(config_path)
             .arg("gateway")
             .arg("start")
+            .arg("--config")
+            .arg(config_path)
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_err))
             .spawn()
