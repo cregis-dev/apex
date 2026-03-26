@@ -14,6 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PII masking engine for data compliance
 - Team governance features
 
+## [0.1.2] - 2026-03-26
+
+Patch release focused on installer behavior and explicit runtime configuration.
+
+### Changed
+
+- `install-release.sh` now installs only the Apex binary by default
+- `install-release.sh` writes the packaged example config only when `--config-path` is explicitly provided
+- `install-release.sh` no longer creates `data/` or `logs/` directories during install
+- `apex gateway start` now requires an explicit `--config` or `-c` argument
+
+### Fixed
+
+- Updated local E2E and dashboard smoke scripts to use the explicit `gateway start --config ...` invocation
+
 ## [0.1.1] - 2026-03-26
 
 Patch release focused on packaging and compatibility fixes.
