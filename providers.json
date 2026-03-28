@@ -90,7 +90,8 @@
     },
     {
       "provider_type": "zai",
-      "base_url": "https://api.z.ai/api/paas/v4/",
+      "base_url": "https://api.z.ai/api/coding/paas/v4",
+      "anthropic_base_url": "https://api.z.ai/api/anthropic",
       "auth": { "header": "Authorization", "prefix": "Bearer ", "key_env": "ZAI_API_KEY" },
       "headers": {},
       "model_map": {},

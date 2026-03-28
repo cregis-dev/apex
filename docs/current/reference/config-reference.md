@@ -186,7 +186,7 @@ Channels 定义上游 LLM 提供商的连接配置。
 | `provider_type` | string | 是 | 提供商类型：`openai`, `anthropic`, `gemini`, `deepseek`, `moonshot`, `minimax`, `ollama`, `jina`, `openrouter`, `zai` |
 | `base_url` | string | 是 | API 基础 URL |
 | `api_key` | string | 是 | API Key，支持环境变量 `${VAR_NAME}` |
-| `anthropic_base_url` | string | 否 | 该 provider 在 Anthropic 协议下使用的基础 URL。适用于原生同时支持 OpenAI / Anthropic 协议的 provider，如 `deepseek`, `moonshot`, `minimax`, `ollama`, `openrouter`。`zai` 不需要该字段，Anthropic 客户端请求会通过网关转换后复用 `https://api.z.ai/api/paas/v4/` |
+| `anthropic_base_url` | string | 否 | 该 provider 在 Anthropic 协议下使用的基础 URL。适用于原生同时支持 OpenAI / Anthropic 协议的 provider，如 `deepseek`, `moonshot`, `minimax`, `ollama`, `openrouter`, `zai`。`zai` 推荐使用 OpenAI URL `https://api.z.ai/api/coding/paas/v4` 和 Anthropic URL `https://api.z.ai/api/anthropic` |
 | `headers` | object | 否 | 自定义 HTTP 头 |
 | `model_map` | object | 否 | 模型映射：key = 请求模型名，value = 实际提供商模型 |
 | `timeouts` | object | 否 | 通道级别超时覆盖 |

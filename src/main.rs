@@ -1199,7 +1199,7 @@ fn get_default_base_url(provider: &ProviderType) -> &'static str {
         ProviderType::Ollama => "http://localhost:11434",
         ProviderType::Jina => "https://api.jina.ai/v1",
         ProviderType::Openrouter => "https://openrouter.ai/api/v1",
-        ProviderType::Zai => "https://api.z.ai/api/paas/v4/",
+        ProviderType::Zai => "https://api.z.ai/api/coding/paas/v4",
     }
 }
 
@@ -1211,6 +1211,7 @@ fn get_default_anthropic_base_url(provider: &ProviderType) -> Option<&'static st
         ProviderType::Minimax => Some("https://api.minimax.io/anthropic"),
         ProviderType::Ollama => Some("http://localhost:11434"),
         ProviderType::Anthropic => Some("https://api.anthropic.com/v1"),
+        ProviderType::Zai => Some("https://api.z.ai/api/anthropic"),
         _ => None,
     }
 }
@@ -1369,9 +1370,12 @@ mod tests {
     fn zai_defaults_to_single_base_url_only() {
         assert_eq!(
             get_default_base_url(&ProviderType::Zai),
-            "https://api.z.ai/api/paas/v4/"
+            "https://api.z.ai/api/coding/paas/v4"
         );
-        assert_eq!(get_default_anthropic_base_url(&ProviderType::Zai), None);
+        assert_eq!(
+            get_default_anthropic_base_url(&ProviderType::Zai),
+            Some("https://api.z.ai/api/anthropic")
+        );
     }
 
     #[test]

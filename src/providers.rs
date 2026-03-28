@@ -132,7 +132,7 @@ impl ProviderRegistry {
         adapters.insert(ProviderType::Ollama, Box::new(OllamaAdapter));
         adapters.insert(ProviderType::Jina, Box::new(DefaultAdapter));
         adapters.insert(ProviderType::Openrouter, Box::new(OpenRouterAdapter));
-        adapters.insert(ProviderType::Zai, Box::new(DefaultAdapter));
+        adapters.insert(ProviderType::Zai, Box::new(CustomDualAdapter));
 
         Self {
             adapters,
@@ -1399,9 +1399,9 @@ mod tests {
         let channel = Channel {
             name: "c".to_string(),
             provider_type: ProviderType::Zai,
-            base_url: "https://api.z.ai/api/paas/v4/".to_string(),
+            base_url: "https://api.z.ai/api/coding/paas/v4".to_string(),
             api_key: "key".to_string(),
-            anthropic_base_url: None,
+            anthropic_base_url: Some("https://api.z.ai/api/anthropic".to_string()),
             headers: None,
             model_map: None,
             timeouts: None,
@@ -1422,24 +1422,24 @@ mod tests {
 
         assert_eq!(
             prepared.url.as_str(),
-            "https://api.z.ai/api/paas/v4/v1/chat/completions"
+            "https://api.z.ai/api/coding/paas/v4/v1/chat/completions"
         );
         assert_eq!(prepared.headers.get("authorization").unwrap(), "Bearer key");
         assert!(prepared.headers.get("x-api-key").is_none());
     }
 
     #[test]
-    fn zai_anthropic_route_bridges_to_chat_completions_on_same_base_url() {
+    fn zai_anthropic_route_uses_native_messages_endpoint() {
         let registry = ProviderRegistry::new();
         let body = Bytes::from(
-            r#"{"model":"glm-4.6","system":"Be terse","max_tokens":32,"messages":[{"role":"user","content":"Hi"}],"stream":true}"#,
+            r#"{"model":"glm-4.6","max_tokens":32,"messages":[{"role":"user","content":"Hi"}]}"#,
         );
         let channel = Channel {
             name: "c".to_string(),
             provider_type: ProviderType::Zai,
-            base_url: "https://api.z.ai/api/paas/v4/".to_string(),
+            base_url: "https://api.z.ai/api/coding/paas/v4".to_string(),
             api_key: "key".to_string(),
-            anthropic_base_url: None,
+            anthropic_base_url: Some("https://api.z.ai/api/anthropic".to_string()),
             headers: None,
             model_map: None,
             timeouts: None,
@@ -1460,19 +1460,20 @@ mod tests {
 
         assert_eq!(
             prepared.url.as_str(),
-            "https://api.z.ai/api/paas/v4/chat/completions"
+            "https://api.z.ai/api/anthropic/v1/messages"
         );
-        assert_eq!(prepared.headers.get("authorization").unwrap(), "Bearer key");
-        assert!(prepared.headers.get("x-api-key").is_none());
-
-        let value: serde_json::Value = serde_json::from_slice(&prepared.body).unwrap();
-        assert_eq!(value["model"], "glm-4.6");
-        assert_eq!(value["messages"][0]["role"], "system");
-        assert_eq!(value["messages"][0]["content"], "Be terse");
-        assert_eq!(value["messages"][1]["role"], "user");
-        assert_eq!(value["messages"][1]["content"], "Hi");
-        assert_eq!(value["max_tokens"], 32);
-        assert_eq!(value["stream"], true);
+        assert_eq!(prepared.body, body);
+        assert_eq!(prepared.headers.get("x-api-key").unwrap(), "key");
+        assert_eq!(
+            prepared
+                .headers
+                .get("anthropic-version")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "2023-06-01"
+        );
+        assert!(prepared.headers.get("authorization").is_none());
     }
 
     #[test]

@@ -211,7 +211,7 @@ fn test_custom_dual_channel_add() {
 }
 
 #[test]
-fn test_zai_channel_add_persists_provider_and_base_url() {
+fn test_zai_channel_add_persists_dual_protocol_urls() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("apex.json");
     let config_str = config_path.to_str().unwrap();
@@ -226,7 +226,9 @@ fn test_zai_channel_add_persists_provider_and_base_url() {
         .arg("--provider")
         .arg("zai")
         .arg("--base-url")
-        .arg("https://api.z.ai/api/paas/v4/")
+        .arg("https://api.z.ai/api/coding/paas/v4")
+        .arg("--anthropic-base-url")
+        .arg("https://api.z.ai/api/anthropic")
         .arg("--api-key")
         .arg("sk-zai")
         .assert()
@@ -240,8 +242,14 @@ fn test_zai_channel_add_persists_provider_and_base_url() {
     assert_eq!(channels.len(), 1);
     assert_eq!(channels[0]["name"], "zai-main");
     assert_eq!(channels[0]["provider_type"], "zai");
-    assert_eq!(channels[0]["base_url"], "https://api.z.ai/api/paas/v4/");
-    assert!(channels[0]["anthropic_base_url"].is_null());
+    assert_eq!(
+        channels[0]["base_url"],
+        "https://api.z.ai/api/coding/paas/v4"
+    );
+    assert_eq!(
+        channels[0]["anthropic_base_url"],
+        "https://api.z.ai/api/anthropic"
+    );
 }
 
 #[test]

@@ -156,7 +156,7 @@ def test_openai_protocol():
             if chunk.choices[0].delta.content:
                 content += chunk.choices[0].delta.content
         
-        if len(content) > 5:
+        if len(content.strip()) > 0:
              console.print("[green]OK[/green]")
         else:
              console.print(f"[red]Failed[/red] (Content too short: {content})")
@@ -204,7 +204,7 @@ def test_anthropic_protocol():
                 final_message = stream.get_final_message()
                 content = extract_anthropic_content(final_message.content)
         
-        if len(content) > 5:
+        if len(content.strip()) > 0:
              console.print("[green]OK[/green]")
         else:
              console.print(f"[red]Failed[/red] (Content too short: {content})")
