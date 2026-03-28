@@ -14,6 +14,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PII masking engine for data compliance
 - Team governance features
 
+## [0.2.0] - 2026-03-28
+
+Minor release focused on `z.ai` provider support and E2E runtime hygiene.
+
+### Added
+
+- Added `zai` as a first-class provider option in shared config, CLI scaffolding, and generated provider templates
+- Added native dual-protocol support for `z.ai`, with OpenAI requests routed to `https://api.z.ai/api/coding/paas/v4` and Anthropic requests routed to `https://api.z.ai/api/anthropic`
+
+### Changed
+
+- Real E2E config generation now fills in provider-specific default `anthropic_base_url` values, including `z.ai`
+- E2E smoke assertions now accept non-empty streaming content from real providers instead of requiring arbitrarily long responses
+
+### Fixed
+
+- Test runtime artifacts such as generated config, logs, router outputs, and SQLite data now stay under `.run/e2e/` instead of polluting `tests/`
+- `z.ai` Anthropic requests no longer rely on OpenAI-compat bridging and now use the provider's native messages endpoint
+- Real smoke and local E2E flows now align with the current `apex gateway start --config ...` CLI contract
+
 ## [0.1.2] - 2026-03-26
 
 Patch release focused on installer behavior and explicit runtime configuration.
