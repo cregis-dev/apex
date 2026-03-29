@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+use std::process::Output;
 use tempfile::TempDir;
 
 // Helper to run apex with a custom config path
@@ -8,6 +9,10 @@ fn apex_cmd(config_path: &str) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_apex"));
     cmd.arg("--config").arg(config_path);
     cmd
+}
+
+fn stdout_json(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON")
 }
 
 #[test]
@@ -172,6 +177,66 @@ fn test_channel_lifecycle() {
 }
 
 #[test]
+fn test_channel_add_defaults_base_url_without_prompt() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+
+    apex_cmd(config_str)
+        .arg("channel")
+        .arg("add")
+        .arg("--name")
+        .arg("defaulted-openai")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--api-key")
+        .arg("sk-test")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已添加 channel: defaulted-openai"));
+
+    let content = fs::read_to_string(&config_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let channel = &json["channels"][0];
+    assert_eq!(channel["name"], "defaulted-openai");
+    assert_eq!(channel["base_url"], "https://api.openai.com/v1");
+}
+
+#[test]
+fn test_dual_protocol_channel_add_uses_default_anthropic_url_without_prompt() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+
+    apex_cmd(config_str)
+        .arg("channel")
+        .arg("add")
+        .arg("--name")
+        .arg("minimax-defaults")
+        .arg("--provider")
+        .arg("minimax")
+        .arg("--api-key")
+        .arg("sk-mm")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已添加 channel: minimax-defaults"));
+
+    let content = fs::read_to_string(&config_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let channel = &json["channels"][0];
+    assert_eq!(channel["name"], "minimax-defaults");
+    assert_eq!(channel["base_url"], "https://api.minimax.io/v1");
+    assert_eq!(
+        channel["anthropic_base_url"],
+        "https://api.minimax.io/anthropic"
+    );
+}
+
+#[test]
 fn test_custom_dual_channel_add() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("apex.json");
@@ -308,6 +373,401 @@ fn test_router_lifecycle() {
     let content = fs::read_to_string(&config_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert_eq!(json["routers"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn test_router_update_with_explicit_args_is_noninteractive() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+
+    for (name, key) in [("c1", "k1"), ("c2", "k2")] {
+        apex_cmd(config_str)
+            .arg("channel")
+            .arg("add")
+            .arg("--name")
+            .arg(name)
+            .arg("--provider")
+            .arg("openai")
+            .arg("--api-key")
+            .arg(key)
+            .assert()
+            .success();
+    }
+
+    apex_cmd(config_str)
+        .arg("router")
+        .arg("add")
+        .arg("--name")
+        .arg("r1")
+        .arg("--channels")
+        .arg("c1")
+        .assert()
+        .success();
+
+    apex_cmd(config_str)
+        .arg("router")
+        .arg("update")
+        .arg("--name")
+        .arg("r1")
+        .arg("--channels")
+        .arg("c2")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已更新 router: r1"));
+
+    let content = fs::read_to_string(&config_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let routers = json["routers"].as_array().unwrap();
+    assert_eq!(routers.len(), 1);
+    assert_eq!(routers[0]["channels"][0]["name"], "c2");
+}
+
+#[test]
+fn test_team_lifecycle_is_noninteractive() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+
+    apex_cmd(config_str)
+        .arg("team")
+        .arg("add")
+        .arg("--id")
+        .arg("demo-team")
+        .arg("--routers")
+        .arg("default-router")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Team 'demo-team' added successfully.",
+        ));
+
+    apex_cmd(config_str)
+        .arg("team")
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo-team"));
+
+    apex_cmd(config_str)
+        .arg("team")
+        .arg("remove")
+        .arg("demo-team")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Team 'demo-team' removed successfully.",
+        ));
+
+    let content = fs::read_to_string(&config_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(json["teams"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn test_channel_list_json_contract() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+    apex_cmd(config_str)
+        .arg("channel")
+        .arg("add")
+        .arg("--name")
+        .arg("json-openai")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--api-key")
+        .arg("sk-json")
+        .assert()
+        .success();
+
+    let output = apex_cmd(config_str)
+        .arg("channel")
+        .arg("list")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let body = stdout_json(&output);
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["command"], "channel.list");
+    assert_eq!(body["meta"]["resource"], "channel");
+    assert_eq!(body["meta"]["action"], "list");
+    assert!(body["errors"].as_array().unwrap().is_empty());
+    assert_eq!(body["data"][0]["name"], "json-openai");
+    assert_eq!(body["data"][0]["has_api_key"], true);
+    assert!(body["data"][0].get("api_key").is_none());
+}
+
+#[test]
+fn test_channel_add_json_error_contract() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+    apex_cmd(config_str)
+        .arg("channel")
+        .arg("add")
+        .arg("--name")
+        .arg("json-openai")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--api-key")
+        .arg("sk-json")
+        .assert()
+        .success();
+
+    let output = apex_cmd(config_str)
+        .arg("channel")
+        .arg("add")
+        .arg("--name")
+        .arg("json-openai")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--api-key")
+        .arg("sk-json-2")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+
+    let body = stdout_json(&output);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["command"], "channel.add");
+    assert_eq!(body["meta"]["resource"], "channel");
+    assert_eq!(body["meta"]["action"], "add");
+    assert!(body["data"].is_null());
+    assert_eq!(body["errors"][0]["code"], "already_exists");
+}
+
+#[test]
+fn test_channel_add_json_validation_error_contract() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+
+    let output = apex_cmd(config_str)
+        .arg("channel")
+        .arg("add")
+        .arg("--name")
+        .arg("bad-provider")
+        .arg("--provider")
+        .arg("not-real")
+        .arg("--api-key")
+        .arg("sk-json")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+
+    let body = stdout_json(&output);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["command"], "channel.add");
+    assert_eq!(body["meta"]["resource"], "channel");
+    assert_eq!(body["meta"]["action"], "add");
+    assert!(body["data"].is_null());
+    assert_eq!(body["errors"][0]["code"], "invalid_input");
+}
+
+#[test]
+fn test_router_add_json_contract() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+    apex_cmd(config_str)
+        .arg("channel")
+        .arg("add")
+        .arg("--name")
+        .arg("json-channel")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--api-key")
+        .arg("sk-json")
+        .assert()
+        .success();
+
+    let output = apex_cmd(config_str)
+        .arg("router")
+        .arg("add")
+        .arg("--name")
+        .arg("json-router")
+        .arg("--channels")
+        .arg("json-channel")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let body = stdout_json(&output);
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["command"], "router.add");
+    assert_eq!(body["meta"]["resource"], "router");
+    assert_eq!(body["meta"]["action"], "add");
+    assert_eq!(body["data"]["name"], "json-router");
+    assert!(body["errors"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn test_router_delete_json_error_contract() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+
+    let output = apex_cmd(config_str)
+        .arg("router")
+        .arg("delete")
+        .arg("missing-router")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+
+    let body = stdout_json(&output);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["command"], "router.delete");
+    assert_eq!(body["meta"]["resource"], "router");
+    assert_eq!(body["meta"]["action"], "delete");
+    assert!(body["data"].is_null());
+    assert_eq!(body["errors"][0]["code"], "not_found");
+}
+
+#[test]
+fn test_router_add_json_validation_error_contract() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+    apex_cmd(config_str)
+        .arg("channel")
+        .arg("add")
+        .arg("--name")
+        .arg("json-channel")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--api-key")
+        .arg("sk-json")
+        .assert()
+        .success();
+
+    let output = apex_cmd(config_str)
+        .arg("router")
+        .arg("add")
+        .arg("--name")
+        .arg("bad-router")
+        .arg("--channels")
+        .arg("json-channel")
+        .arg("--match")
+        .arg("missing-equals")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+
+    let body = stdout_json(&output);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["command"], "router.add");
+    assert_eq!(body["meta"]["resource"], "router");
+    assert_eq!(body["meta"]["action"], "add");
+    assert!(body["data"].is_null());
+    assert_eq!(body["errors"][0]["code"], "invalid_input");
+}
+
+#[test]
+fn test_team_add_json_contract_includes_generated_key() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+
+    let output = apex_cmd(config_str)
+        .arg("team")
+        .arg("add")
+        .arg("--id")
+        .arg("json-team")
+        .arg("--routers")
+        .arg("default-router")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let body = stdout_json(&output);
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["command"], "team.add");
+    assert_eq!(body["meta"]["resource"], "team");
+    assert_eq!(body["meta"]["action"], "add");
+    assert_eq!(body["data"]["id"], "json-team");
+    assert!(
+        body["data"]["api_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("sk-ap-")
+    );
+}
+
+#[test]
+fn test_team_remove_json_error_contract() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+
+    let output = apex_cmd(config_str)
+        .arg("team")
+        .arg("remove")
+        .arg("missing-team")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+
+    let body = stdout_json(&output);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["command"], "team.remove");
+    assert_eq!(body["meta"]["resource"], "team");
+    assert_eq!(body["meta"]["action"], "remove");
+    assert!(body["data"].is_null());
+    assert_eq!(body["errors"][0]["code"], "not_found");
+}
+
+#[test]
+fn test_json_missing_config_error_contract() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("missing.json");
+    let config_str = config_path.to_str().unwrap();
+
+    let output = apex_cmd(config_str)
+        .arg("channel")
+        .arg("list")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+
+    let body = stdout_json(&output);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["command"], "channel.list");
+    assert_eq!(body["meta"]["resource"], "channel");
+    assert_eq!(body["meta"]["action"], "list");
+    assert!(body["data"].is_null());
+    assert_eq!(body["errors"][0]["code"], "not_found");
 }
 
 #[test]
