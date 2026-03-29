@@ -24,8 +24,6 @@ pub struct Config {
     #[serde(default)]
     pub teams: Arc<Vec<Team>>,
     #[serde(default)]
-    pub prompts: Arc<Vec<Prompt>>,
-    #[serde(default)]
     pub compliance: Option<Compliance>,
 }
 
@@ -37,36 +35,6 @@ fn default_data_dir() -> String {
 
 fn default_web_dir() -> String {
     "target/web".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Prompt {
-    pub name: String,
-    pub description: Option<String>,
-    #[serde(default)]
-    pub arguments: Vec<PromptArgument>,
-    pub messages: Vec<PromptMessage>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PromptArgument {
-    pub name: String,
-    pub description: Option<String>,
-    #[serde(default)]
-    pub required: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PromptMessage {
-    pub role: String,
-    pub content: PromptContent,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum PromptContent {
-    Text { text: String },
-    // Simplified for now, can be extended
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,14 +125,8 @@ pub struct Global {
     pub retries: Retries,
     #[serde(default)]
     pub gemini_replay: GeminiReplay,
-    #[serde(default = "default_true")]
-    pub enable_mcp: bool,
     #[serde(default)]
     pub cors_allowed_origins: Vec<String>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

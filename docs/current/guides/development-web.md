@@ -91,10 +91,6 @@ const nextConfig = {
         source: '/api/:path*',
         destination: 'http://localhost:12356/api/:path*',
       },
-      {
-        source: '/mcp/:path*',
-        destination: 'http://localhost:12356/mcp/:path*',
-      },
     ];
   },
 };

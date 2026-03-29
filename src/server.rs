@@ -46,16 +46,11 @@ pub struct AppState {
     pub gemini_replay: Arc<GeminiAnthropicReplayCache>,
     pub client: reqwest::Client,
     pub usage_logger: Arc<UsageLogger>,
-    pub mcp_server: Arc<McpServer>,
     pub database: Arc<Database>,
     pub web_dir: String,
 }
 
 pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 10 * 1024 * 1024;
-
-use crate::mcp::server::{McpServer, streamable_http_handler};
-
-// MCP is integrated into main server, controlled by global.enable_mcp config
 
 pub async fn run_server(path: PathBuf) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(&path)?;
@@ -165,9 +160,6 @@ async fn watch_config(path: PathBuf, state: Arc<AppState>) -> notify::Result<()>
                 // Invalidate router cache
                 state.selector.invalidate_cache();
 
-                // Notify MCP clients about config change
-                state.mcp_server.update_config().await;
-
                 info!("Config reloaded successfully");
             }
             Err(e) => {
@@ -202,7 +194,6 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
     let usage_logger = Arc::new(UsageLogger::new(database.clone()));
     let web_dir = config.web_dir.clone();
     let config_arc = Arc::new(RwLock::new(config));
-    let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
 
     Ok(Arc::new(AppState {
         config: config_arc,
@@ -218,7 +209,6 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
         )),
         client,
         usage_logger,
-        mcp_server,
         database,
         web_dir,
     }))
@@ -226,7 +216,6 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
 
 pub fn build_app(state: Arc<AppState>) -> Router {
     let config = state.config.read().unwrap();
-    let mcp_enabled = config.global.enable_mcp;
     let metrics_enabled = config.metrics.enabled;
     let cors_allowed_origins = config.global.cors_allowed_origins.clone();
     drop(config);
@@ -259,25 +248,6 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             team_auth,
         ));
 
-    // MCP Routes (Protected by Global API Key) - Streamable HTTP Transport (MCP 2025-11-25)
-    let mcp_routes = if mcp_enabled {
-        Some(
-            Router::new()
-                .route(
-                    "/mcp",
-                    get(streamable_http_handler)
-                        .post(streamable_http_handler)
-                        .delete(streamable_http_handler),
-                )
-                .layer(axum::middleware::from_fn_with_state(
-                    state.mcp_server.as_ref().clone(),
-                    crate::mcp::server::mcp_auth_guard,
-                )),
-        )
-    } else {
-        None
-    };
-
     // Admin/System Routes (no auth required)
     let admin_routes = Router::new()
         .route("/admin/teams", get(handle_admin_teams))
@@ -309,10 +279,6 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 
     // Combine all routes using merge (each has its own middleware)
     let mut app = model_routes.merge(admin_routes);
-
-    if let Some(mcp) = mcp_routes {
-        app = app.merge(mcp);
-    }
 
     if let Some(metrics) = metrics_routes {
         app = app.merge(metrics);
@@ -2576,7 +2542,6 @@ mod tests {
                     retry_on_status: vec![],
                 },
                 gemini_replay: crate::config::GeminiReplay::default(),
-                enable_mcp: true,
                 cors_allowed_origins: vec![],
             },
             data_dir: "/tmp".to_string(),
@@ -2594,7 +2559,6 @@ mod tests {
                 dir: None,
             },
             teams: Arc::new(vec![]),
-            prompts: Arc::new(vec![]),
             compliance: None,
             channels: Arc::new(vec![
                 crate::config::Channel {
@@ -2691,7 +2655,6 @@ mod tests {
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
         let (_dir, database) = create_test_database();
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -2705,7 +2668,6 @@ mod tests {
             gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
-            mcp_server,
             database,
             web_dir: "target/web".to_string(),
         });
@@ -2729,7 +2691,6 @@ mod tests {
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
         let (_dir, database) = create_test_database();
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -2743,7 +2704,6 @@ mod tests {
             gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
-            mcp_server,
             database,
             web_dir: "target/web".to_string(),
         });
@@ -2966,7 +2926,6 @@ mod tests {
         let config_arc = Arc::new(RwLock::new(config));
 
         let (_dir, database) = create_test_database();
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -2980,7 +2939,6 @@ mod tests {
             gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
-            mcp_server,
             database,
             web_dir: "target/web".to_string(),
         });
@@ -3019,7 +2977,6 @@ mod tests {
         let config_arc = Arc::new(RwLock::new(config));
 
         let (_dir, database) = create_test_database();
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -3033,7 +2990,6 @@ mod tests {
             gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
-            mcp_server,
             database,
             web_dir: "target/web".to_string(),
         });

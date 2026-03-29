@@ -10,7 +10,6 @@
 - [Channels 通道定义](#channels-通道定义)
 - [Routers 路由规则](#routers-路由规则)
 - [Teams 团队配置](#teams-团队配置)
-- [Prompts 提示词模板](#prompts-提示词模板)
 - [Metrics 指标配置](#metrics-指标配置)
 - [Hot Reload 热重载](#hot-reload-热重载)
 
@@ -28,7 +27,6 @@
   "channels": [ ... ],
   "routers": [ ... ],
   "teams": [ ... ],
-  "prompts": [ ... ],
   "metrics": { ... },
   "hot_reload": { ... }
 }
@@ -44,7 +42,6 @@
 | `channels` | array | 否 | 通道列表，默认为空 |
 | `routers` | array | 否 | 路由规则列表，默认为空 |
 | `teams` | array | 否 | 团队列表，默认为空 |
-| `prompts` | array | 否 | MCP 提示词模板 |
 | `metrics` | object | 是 | 指标配置 |
 | `hot_reload` | object | 是 | 热重载配置 |
 
@@ -276,35 +273,6 @@ Teams 实现多租户路由和策略控制。
 | `allowed_routers` | array | 允许使用的路由 |
 | `allowed_models` | array | 允许使用的模型（null = 允许所有） |
 | `rate_limit` | object | 速率限制 |
-
----
-
-## Prompts 提示词模板
-
-MCP 协议的预定义提示词模板。
-
-```json
-"prompts": [
-  {
-    "name": "code-review",
-    "description": "Generate a code review",
-    "arguments": [
-      { "name": "language", "description": "Programming language", "required": true }
-    ],
-    "messages": [
-      { "role": "system", "content": { "text": "You are an expert code reviewer." } },
-      { "role": "user", "content": { "text": "Review this {{language}} code.\n\n```\n{{diff}}\n```" } }
-    ]
-  }
-]
-```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `name` | string | 提示词名称 |
-| `description` | string | 提示词描述 |
-| `arguments` | array | 参数列表 |
-| `messages` | array | 消息列表（支持 `{{variable}}` 占位符） |
 
 ---
 

@@ -2,14 +2,14 @@
 
 **Date:** 2026-03-10
 **Type:** Backend (Rust) + Web (Next.js)
-**Architecture:** AI API Gateway with MCP Server
+**Architecture:** AI API Gateway with Dashboard and CLI Automation
 
 ## Executive Summary
 
 Apex Gateway 是一个使用 Rust 编写的高性能 AI API 网关服务，旨在统一企业内部的大模型访问入口。它屏蔽了多家模型提供商（OpenAI, Anthropic, Gemini, DeepSeek 等）的接口差异，提供统一的鉴权、路由、重试与监控能力。
 
 项目包含两个主要部分：
-1. **Backend (Rust)**: 核心网关服务，支持多租户、智能路由、MCP 协议
+1. **Backend (Rust)**: 核心网关服务，支持多租户、智能路由、鉴权和可观测性
 2. **Web Dashboard (Next.js)**: 可观测性仪表板，展示 Usage 记录和 Metrics 指标
 
 ## Project Classification
@@ -90,12 +90,6 @@ This project consists of 2 distinct parts:
 - Jina (Embedding)
 - OpenRouter (聚合平台)
 
-### MCP Server
-- **协议**: MCP/JSON-RPC 2.0
-- **传输**: SSE (Server-Sent Events)
-- **功能**: Resources, Prompts, Tools
-- **认证**: 与网关共用 API Key 体系
-
 ### Observability
 - **Prometheus 指标**: `/metrics` 端点
 - **SQLite 存储**: Usage 记录和 Metrics 事件
@@ -112,7 +106,7 @@ Client Apps → [Apex Gateway] → Provider Adapters → LLM Providers
                  │
                  ├── Auth & Rate Limit
                  ├── Smart Router
-                 ├── MCP Server
+                 ├── CLI / Future Admin Control Plane
                  └── Metrics & Usage Logger
 ```
 
@@ -202,7 +196,6 @@ apex/
 │   ├── compliance.rs         # 合规性检查
 │   ├── logs.rs               # 日志配置
 │   ├── converters.rs         # 协议转换
-│   ├── mcp/                  # MCP 服务器模块
 │   └── middleware/           # HTTP 中间件
 │       ├── auth.rs           # 认证中间件
 │       └── ratelimit.rs      # 限流中间件

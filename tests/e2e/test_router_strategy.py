@@ -69,7 +69,6 @@ def apex_server(mock_servers):
                 "backoff_ms": 100,
                 "retry_on_status": [429, 500, 502, 503, 504],
             },
-            "enable_mcp": True,
             "cors_allowed_origins": [],
         },
         "logging": {"level": "info", "dir": None},
@@ -160,7 +159,6 @@ def apex_server(mock_servers):
                 },
             }
         ],
-        "prompts": [],
         "compliance": None,
     }
 
