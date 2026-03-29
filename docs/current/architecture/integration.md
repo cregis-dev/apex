@@ -24,7 +24,6 @@
 │  │                    Axum Router                             │  │
 │  │  /v1/*        → LLM Proxy Handlers                        │  │
 │  │  /api/*       → Observability API Handlers                │  │
-│  │  /mcp/*       → MCP Server Handlers                       │  │
 │  │  /dashboard/* → Static Asset Layer                        │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────────┐  │
@@ -242,7 +241,6 @@ pub async fn auth_middleware(
 │  │   Port: 12356                 │  │
 │  │                               │  │
 │  │   - API Endpoints             │  │
-│  │   - MCP Server                │  │
 │  │   - Static Files (Dashboard)  │  │
 │  │   - SQLite Database           │  │
 │  └───────────────────────────────┘  │
@@ -308,26 +306,9 @@ spec:
 | `/api/metrics` | GET | Metrics 汇总 |
 | `/dashboard/*` | GET | 静态文件 |
 
-### MCP (SSE)
+### 控制与配置自动化
 
-```
-Client                          Server
-  │                               │
-  │ GET /mcp/sse                  │
-  ├──────────────────────────────>│
-  │                               │
-  │ event: endpoint               │
-  │ data: /mcp/messages?sid=xxx   │
-  │<──────────────────────────────┤
-  │                               │
-  │ POST /mcp/messages            │
-  │ { "method": "tools/list" }    │
-  ├──────────────────────────────>│
-  │                               │
-  │ event: message                │
-  │ { "result": {...} }           │
-  │<──────────────────────────────┤
-```
+远程 HTTP MCP 控制面已经退役。当前配置自动化以本地 CLI 为主，后续远程管理能力由 Admin Control Plane 承接。
 
 ---
 
@@ -354,18 +335,6 @@ pub fn start_hot_reload(config_path: &str, tx: Sender<Config>) {
     watcher.watch(Path::new(config_path), RecursiveMode::NonRecursive).unwrap();
 }
 ```
-
-**MCP 通知** (`src/mcp/session.rs`):
-```rust
-// 配置变更时通知客户端
-pub fn notify_config_change(session: &Session) {
-    session.send_notification("notifications/resources/updated", json!({
-        "uris": ["config://config.json"]
-    }));
-}
-```
-
----
 
 ## 安全模型
 

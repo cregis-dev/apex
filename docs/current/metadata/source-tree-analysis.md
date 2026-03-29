@@ -42,15 +42,6 @@ src/
 ├── compliance.rs           # 数据合规性检查
 ├── logs.rs                 # 日志配置和高亮
 ├── utils.rs                # 通用工具函数
-├── mcp/                    # MCP 服务器模块
-│   ├── mod.rs              # 模块入口
-│   ├── server.rs           # MCP 服务器实现
-│   ├── protocol.rs         # MCP 协议定义 (JSON-RPC 2.0)
-│   ├── session.rs          # 会话管理
-│   ├── transport.rs        # 传输层 (SSE)
-│   ├── capabilities.rs     # 能力声明和协商
-│   ├── analytics.rs        # MCP 分析
-│   └── capabilities.rs     # MCP 能力
 └── middleware/             # HTTP 中间件
     ├── mod.rs              # 模块入口
     ├── auth.rs             # API Key 认证中间件
@@ -68,10 +59,6 @@ tests/
 ├── team_test.rs            # Team 管理测试
 ├── e04_observability_test.rs  # 可观测性测试
 ├── e05_routing_test.rs     # 路由功能测试
-├── mcp_session_test.rs     # MCP 会话测试
-├── mcp_resources_test.rs   # MCP 资源测试
-├── mcp_tools_test.rs       # MCP 工具测试
-├── mcp_prompts_test.rs     # MCP 提示词测试
 ├── benchmark_test.rs       # 性能基准测试
 ├── hot_reload_test.rs      # 热重载测试
 └── common/                 # 测试工具
@@ -204,7 +191,7 @@ target/
 
 **职责:**
 - HTTP 服务器启动和配置
-- 路由注册 (OpenAI, Anthropic, MCP, Dashboard)
+- 路由注册 (OpenAI, Anthropic, Dashboard)
 - 中间件链组装
 - API 端点实现
 
@@ -213,7 +200,6 @@ target/
 /v1/chat/completions  → OpenAI 兼容接口
 /v1/messages          → Anthropic 兼容接口
 /v1/models            → 模型列表
-/mcp/sse              → MCP SSE 端点
 /api/usage            → Usage API
 /api/metrics          → Metrics API
 /dashboard/*          → Web Dashboard 静态文件
@@ -250,22 +236,6 @@ target/
 - struct HotReload      # 热重载配置
 ```
 
-### `src/mcp/server.rs` (约 500 行)
-
-**职责:**
-- MCP 服务器实现
-- JSON-RPC 2.0 消息处理
-- Resources/Prompts/Tools 支持
-
-**主要方法:**
-```rust
-- fn initialize()       # 初始化握手
-- fn list_resources()   # 列出资源
-- fn list_prompts()     # 列出提示词
-- fn list_tools()       # 列出工具
-- fn call_tool()        # 调用工具
-```
-
 ## 数据流分析
 
 ### 请求处理流程
@@ -296,23 +266,9 @@ Client Request
 Client Response
 ```
 
-### MCP 会话流程
+### 说明
 
-```
-MCP Client
-    ↓
-[SSE Connection] → /mcp/sse
-    ↓
-[Session Manager] → 创建 Session
-    ↓
-[JSON-RPC Handler]
-    ├── list_resources() → 读取 config.json (脱敏)
-    ├── list_prompts()   → 返回配置的 prompts
-    ├── list_tools()     → 返回可用工具
-    └── call_tool()      → 执行工具逻辑
-    ↓
-[SSE Events] → 推送通知和响应
-```
+该分析文档原先包含 HTTP MCP 模块与专项测试清单。当前产品方向已移除该表面能力，自动化入口以 CLI 和后续 Admin Control Plane 为准。
 
 ## 代码规模统计
 

@@ -32,7 +32,6 @@ pub fn base_config() -> Config {
                 retry_on_status: vec![500, 502, 503, 504],
             },
             gemini_replay: apex::config::GeminiReplay::default(),
-            enable_mcp: true,
             cors_allowed_origins: vec![],
         },
         metrics: Metrics {
@@ -52,7 +51,6 @@ pub fn base_config() -> Config {
         teams: std::sync::Arc::new(vec![]),
         channels: std::sync::Arc::new(vec![]),
         routers: std::sync::Arc::new(vec![]),
-        prompts: std::sync::Arc::new(vec![]),
         compliance: None,
     }
 }

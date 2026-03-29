@@ -111,14 +111,106 @@ API Key: sk-ap-XyZ123...
 ```
 请妥善保存生成的 API Key。
 
+### 面向自动化 / AI Skills 的 CLI 使用约定
+
+对 `channel`、`router`、`team` 这三个命令族，Apex 当前的 v1 自动化范围如下：
+
+- `channel`: `add`, `update`, `delete`, `show`, `list`
+- `router`: `add`, `update`, `delete`, `list`
+- `team`: `add`, `remove`, `list`
+
+以下动作当前**不应被假定为可用**，除非后续版本显式增加：
+
+- `router show`
+- `team show`
+- `team update`
+
+当必需参数已经通过命令参数提供时，这些命令可以直接用于本地自动化或 AI skills，不需要依赖交互式输入。
+
+如果同时传入 `--json`，`channel`、`router`、`team` 将返回稳定的机器可读结构。v1 顶层字段为：
+
+- `ok`
+- `command`
+- `message`
+- `data`
+- `errors`
+- `meta`
+
+```bash
+# 非交互式 channel 创建
+apex channel add \
+  --name openai-main \
+  --provider openai \
+  --api-key sk-xxx
+```
+
+```bash
+# 非交互式 router 创建
+apex router add \
+  --name default-openai \
+  --channels openai-main \
+  --strategy round_robin
+```
+
+```bash
+# 非交互式 team 创建
+apex team add \
+  --id demo-team \
+  --routers default-openai
+```
+
+```bash
+# 机器可读 JSON 输出
+apex channel list --json
+apex router add --name default-openai --channels openai-main --json
+apex team remove demo-team --json
+```
+
+JSON 成功响应示例：
+
+```json
+{
+  "ok": true,
+  "command": "channel.list",
+  "message": "Channels listed successfully.",
+  "data": [],
+  "errors": [],
+  "meta": {
+    "resource": "channel",
+    "action": "list"
+  }
+}
+```
+
+JSON 错误响应示例：
+
+```json
+{
+  "ok": false,
+  "command": "team.remove",
+  "message": "Team 'missing-team' not found",
+  "data": null,
+  "errors": [
+    {
+      "code": "not_found",
+      "message": "Team 'missing-team' not found"
+    }
+  ],
+  "meta": {
+    "resource": "team",
+    "action": "remove"
+  }
+}
+```
+
 ### 5. 启动服务
 
 ```bash
 # 前台运行
-apex gateway start
+apex gateway start --config /path/to/config.json
 
 # 后台运行 (Daemon)
-apex gateway start -d
+apex gateway start --config /path/to/config.json -d
 ```
 
 ### 6. 验证调用
@@ -190,7 +282,7 @@ apex team add \
 #### 管理命令
 
 - **查看所有团队**: `apex team list`
-- **删除团队**: `apex team remove --id <team-id>`
+- **删除团队**: `apex team remove <team-id>`
 
 参数说明：
 - `--routers`: (必填) 允许访问的路由列表，逗号分隔。
@@ -302,116 +394,19 @@ apex channel add \
 
 ### 常用命令
 - `apex team list`: 查看团队及 Key
+- `apex team remove <team-id>`: 删除团队
 - `apex channel list`: 查看 Channel
+- `apex channel show <name>`: 查看单个 Channel 详情
 - `apex router list`: 查看 Router
 - `apex status`: 查看服务状态
 - `apex logs`: 查看日志
 
-## MCP 使用与管理 (MCP Usage & Management)
+## 控制面说明
 
-Apex 内置了 Model Context Protocol (MCP) Server，支持通过 MCP 协议向客户端（如 Claude Desktop, Cursor, AI IDEs）暴露配置、提示词 (Prompts) 和工具 (Tools)。
+Apex 已不再提供 HTTP MCP 产品表面，`/mcp` 路由和 `global.enable_mcp` 配置项均已退役。
 
-### 1. 启用 MCP
+当前推荐的运维与自动化入口：
 
-MCP 服务在 `config.json` 中通过 `global.enable_mcp` 配置项控制，默认为 `true`。
-
-```json
-{
-  "global": {
-    "enable_mcp": true
-  }
-}
-```
-
-启动网关后，MCP Server 会自动在以下端点可用：
-
-- **MCP 端点**: `/mcp` (与网关共用端口，默认 12356)
-- **支持方法**: GET, POST, DELETE
-
-### 2. 运行模式
-
-Apex 的 MCP 现在支持 **Streamable HTTP** 传输模式（MCP 协议版本 2025-11-25）。
-
-**启动主服务**:
-```bash
-apex gateway start
-```
-
-### 3. 连接指南
-
-如果您的 Apex 部署在 `https://gateway.cregis.ai`，MCP Client 连接配置如下：
-
-- **MCP URL**: `https://gateway.cregis.ai/mcp`
-- **Auth**: 需要提供 API Key（与 OpenAI/Anthropic 接口共用 Team/Global Key）
-
-**认证方式**:
-- `Authorization: Bearer sk-your-team-key` (推荐)
-- `x-api-key: sk-your-team-key` (推荐)
-- Query Param: `?api_key=sk-your-team-key` (遗留支持)
-
-**协议头**:
-- `MCP-Protocol-Version: 2025-11-25` (可选)
-- `MCP-Session-Id: <uuid>` (初始化后必须携带)
-
-**注意**:
-- 初始化请求会返回 `MCP-Session-Id` 头，后续请求必须携带此头
-- 所有的 MCP 交互（List Tools, Call Tool 等）都受相同的 Team Policy 控制
-- POST 请求默认返回 JSON 响应，也可通过 `Accept: text/event-stream` 请求流式响应
-- 确保您的 API Key 具有访问权限。
-- 客户端会自动接收 `endpoint` 事件，指向 `/mcp/messages?session_id=...`（客户端需处理相对路径或追加到 Base URL）。
-- 所有的 MCP 交互（List Tools, Call Tool 等）都受相同的 Team Policy 控制。
-
-### 5. 功能特性 (Features)
-
-#### 资源 (Resources)
-Apex 通过 `resources` 暴露配置文件的只读访问，支持 `config://` 协议。
-
-*   `config://config.json`: 完整配置文件（敏感信息如 API Key 会被自动脱敏）。
-*   `config://teams`: 团队配置列表。
-*   `config://routers`: 路由配置列表。
-*   `config://channels`: 通道配置列表。
-
-**使用示例**:
-在 Client 中输入 `@apex-gateway/config.json` 即可读取当前网关配置。
-
-#### 提示词 (Prompts)
-在 `config.json` 中定义 `prompts`，Client 可直接调用。
-
-**配置示例**:
-```json
-{
-  "prompts": [
-    {
-      "name": "code-review",
-      "description": "标准代码审查模板",
-      "arguments": [
-        { "name": "code", "description": "待审查代码", "required": true }
-      ],
-      "messages": [
-        {
-          "role": "user",
-          "content": {
-            "type": "text",
-            "text": "请审查以下代码并提供改进建议：\n\n{{code}}"
-          }
-        }
-      ]
-    }
-  ]
-}
-```
-
-#### 工具 (Tools)
-Apex 提供内置工具供 Agent 调用进行诊断或查询。
-
-*   `list_models`: 列出当前所有 Channel 支持的模型映射关系。
-*   `echo`: 测试工具，原样返回输入。
-
-**使用示例**:
-Agent 可以调用 `list_models` 来查询当前网关可用的模型列表，以便智能选择模型。
-
-### 6. 热重载 (Hot Reload)
-修改 `config.json` 后，Apex 会自动检测变更并通过 MCP 协议通知客户端刷新 Resources, Prompts 和 Tools 列表，无需重启服务或客户端。
-
-### 7. 故障排查
-*   **连接失败**: 检查 MCP 是否在配置中启用 (`global.enable_mcp: true`)，确认 API Key 是否正确。
+- 本地配置与脚本化操作：使用 `apex channel`、`apex router`、`apex team`
+- AI/skills 自动化：优先使用 CLI 参数化输入和 `--json` 输出
+- 远程管理能力：后续由 Admin Control Plane 承接
