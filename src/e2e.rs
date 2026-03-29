@@ -19,7 +19,6 @@ pub struct E2eEnv {
     pub router_name: String,
     pub router_strategy: String,
     pub test_model: String,
-    pub enable_mcp: bool,
     pub metrics_path: String,
     pub upstreams: Vec<UpstreamConfig>,
 }
@@ -58,7 +57,6 @@ impl FromStr for E2eEnv {
         let router_strategy =
             get_or_default(&values, "APEX_E2E_ROUTER_STRATEGY", "priority").to_lowercase();
         let test_model = get_or_default(&values, "APEX_E2E_TEST_MODEL", "apex-test-chat");
-        let enable_mcp = parse_bool_with_default(&values, "APEX_E2E_ENABLE_MCP", true)?;
         let metrics_path = get_or_default(&values, "APEX_E2E_METRICS_PATH", "/metrics");
         let upstreams = parse_upstreams(&values, &test_model)?;
 
@@ -74,7 +72,6 @@ impl FromStr for E2eEnv {
             router_name,
             router_strategy,
             test_model,
-            enable_mcp,
             metrics_path,
             upstreams,
         })
@@ -136,7 +133,6 @@ pub fn build_config(env: &E2eEnv, config_path: &Path) -> Config {
                 retry_on_status: vec![429, 500, 502, 503, 504],
             },
             gemini_replay: crate::config::GeminiReplay::default(),
-            enable_mcp: env.enable_mcp,
             cors_allowed_origins: vec![],
         },
         logging: Logging {
@@ -177,7 +173,6 @@ pub fn build_config(env: &E2eEnv, config_path: &Path) -> Config {
                 rate_limit: None,
             },
         }]),
-        prompts: Arc::new(vec![]),
         compliance: None,
     }
 }
@@ -212,7 +207,8 @@ fn parse_upstreams(
         let base_url = require(values, &format!("APEX_UPSTREAM_{index}_BASE_URL"))?;
         let api_key = get_or_default(values, &format!("APEX_UPSTREAM_{index}_API_KEY"), "");
         let anthropic_base_url =
-            optional(values, &format!("APEX_UPSTREAM_{index}_ANTHROPIC_BASE_URL"));
+            optional(values, &format!("APEX_UPSTREAM_{index}_ANTHROPIC_BASE_URL"))
+                .or_else(|| default_anthropic_base_url(&provider_type).map(str::to_string));
         let headers =
             parse_optional_json_object(values, &format!("APEX_UPSTREAM_{index}_HEADERS_JSON"))?;
         let model_map = parse_model_map(values, index, test_model)?;
@@ -307,7 +303,20 @@ fn parse_provider_type(value: &str) -> anyhow::Result<ProviderType> {
         "ollama" => Ok(ProviderType::Ollama),
         "jina" => Ok(ProviderType::Jina),
         "openrouter" => Ok(ProviderType::Openrouter),
+        "zai" => Ok(ProviderType::Zai),
         other => bail!("unsupported provider type in .env: {other}"),
+    }
+}
+
+fn default_anthropic_base_url(provider_type: &ProviderType) -> Option<&'static str> {
+    match provider_type {
+        ProviderType::Anthropic => Some("https://api.anthropic.com/v1"),
+        ProviderType::Deepseek => Some("https://api.deepseek.com/anthropic"),
+        ProviderType::Moonshot => Some("https://api.moonshot.cn/anthropic"),
+        ProviderType::Minimax => Some("https://api.minimax.io/anthropic"),
+        ProviderType::Ollama => Some("http://localhost:11434"),
+        ProviderType::Zai => Some("https://api.z.ai/api/anthropic"),
+        _ => None,
     }
 }
 

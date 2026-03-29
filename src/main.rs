@@ -1,7 +1,8 @@
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
 use rand::{Rng, distributions::Alphanumeric};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::PathBuf;
@@ -13,7 +14,6 @@ mod converters;
 mod database;
 mod gemini_compat;
 mod logs;
-mod mcp;
 mod metrics;
 mod middleware;
 mod providers;
@@ -28,10 +28,129 @@ use config::{
     Timeouts,
 };
 
+#[derive(Debug, Serialize)]
+struct CliJsonResponse {
+    ok: bool,
+    command: String,
+    message: String,
+    data: Option<Value>,
+    errors: Vec<CliJsonError>,
+    meta: CliJsonMeta,
+}
+
+#[derive(Debug, Serialize)]
+struct CliJsonError {
+    code: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CliJsonMeta {
+    resource: String,
+    action: String,
+}
+
+fn print_json_success(
+    resource: &str,
+    action: &str,
+    message: &str,
+    data: Value,
+) -> anyhow::Result<()> {
+    let response = CliJsonResponse {
+        ok: true,
+        command: format!("{resource}.{action}"),
+        message: message.to_string(),
+        data: Some(data),
+        errors: Vec::new(),
+        meta: CliJsonMeta {
+            resource: resource.to_string(),
+            action: action.to_string(),
+        },
+    };
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+fn error_code_for_message(message: &str) -> (&'static str, Option<&'static str>) {
+    let lower = message.to_lowercase();
+    if lower.contains("already exists") {
+        ("already_exists", None)
+    } else if lower.contains("not found") {
+        ("not_found", None)
+    } else if lower.contains("invalid") || lower.contains("unsupported") {
+        ("invalid_input", None)
+    } else if lower.contains("required") {
+        ("missing_required_field", None)
+    } else {
+        ("command_failed", None)
+    }
+}
+
+fn exit_with_json_error(resource: &str, action: &str, err: &anyhow::Error) -> ! {
+    let message = err.to_string();
+    let (code, field) = error_code_for_message(&message);
+    let response = CliJsonResponse {
+        ok: false,
+        command: format!("{resource}.{action}"),
+        message: message.clone(),
+        data: None,
+        errors: vec![CliJsonError {
+            code: code.to_string(),
+            message,
+            field: field.map(str::to_string),
+        }],
+        meta: CliJsonMeta {
+            resource: resource.to_string(),
+            action: action.to_string(),
+        },
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{\"ok\":false}".to_string())
+    );
+    std::process::exit(1);
+}
+
+fn return_or_exit_json<T>(
+    resource: &str,
+    action: &str,
+    json_output: bool,
+    result: anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            if json_output {
+                exit_with_json_error(resource, action, &err);
+            }
+            Err(err)
+        }
+    }
+}
+
+fn channel_public_json(channel: &Channel) -> Value {
+    json!({
+        "name": channel.name,
+        "provider_type": channel.provider_type,
+        "base_url": channel.base_url,
+        "anthropic_base_url": channel.anthropic_base_url,
+        "has_api_key": !channel.api_key.is_empty(),
+        "headers": channel.headers,
+        "model_map": channel.model_map,
+        "timeouts": channel.timeouts,
+    })
+}
+
+fn channels_public_json(channels: &[Channel]) -> Value {
+    Value::Array(channels.iter().map(channel_public_json).collect())
+}
+
 #[derive(Parser)]
 #[command(name = "apex", version)]
 struct Cli {
-    #[arg(long, global = true)]
+    #[arg(long)]
     config: Option<String>,
     #[command(subcommand)]
     command: Commands,
@@ -65,7 +184,8 @@ enum Commands {
 #[derive(Subcommand)]
 enum GatewayCommand {
     Start {
-        config: Option<String>,
+        #[arg(long, short = 'c')]
+        config: String,
         #[arg(long, short = 'd')]
         daemon: bool,
     },
@@ -75,8 +195,15 @@ enum GatewayCommand {
 #[derive(Subcommand)]
 enum TeamCommand {
     Add(TeamAddArgs),
-    Remove { id: String },
-    List,
+    Remove {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -91,16 +218,23 @@ struct TeamAddArgs {
     rpm: Option<i32>,
     #[arg(long)]
     tpm: Option<i32>,
+    #[arg(long)]
+    json: bool,
 }
 
 fn handle_team_command(cli: &Cli, command: &TeamCommand) -> anyhow::Result<()> {
     let config_path = resolve_config_path(cli.config.clone());
-    let mut config = config::load_config(&config_path)?;
 
     match command {
         TeamCommand::Add(args) => {
+            let mut config =
+                return_or_exit_json("team", "add", args.json, load_config_or_exit(&config_path))?;
             if config.teams.iter().any(|t| t.id == args.id) {
-                bail!("Team '{}' already exists", args.id);
+                let err = anyhow::anyhow!("Team '{}' already exists", args.id);
+                if args.json {
+                    exit_with_json_error("team", "add", &err);
+                }
+                return Err(err);
             }
 
             // Generate API Key: sk-ap-xxxx
@@ -128,22 +262,65 @@ fn handle_team_command(cli: &Cli, command: &TeamCommand) -> anyhow::Result<()> {
                 },
             };
 
-            std::sync::Arc::make_mut(&mut config.teams).push(team);
-            config::save_config(&config_path, &config)?;
-            println!("Team '{}' added successfully.", args.id);
-            println!("API Key: {}", api_key);
-        }
-        TeamCommand::Remove { id } => {
-            if let Some(index) = config.teams.iter().position(|t| t.id == *id) {
-                std::sync::Arc::make_mut(&mut config.teams).remove(index);
-                config::save_config(&config_path, &config)?;
-                println!("Team '{}' removed successfully.", id);
+            std::sync::Arc::make_mut(&mut config.teams).push(team.clone());
+            return_or_exit_json(
+                "team",
+                "add",
+                args.json,
+                config::save_config(&config_path, &config),
+            )?;
+            if args.json {
+                print_json_success(
+                    "team",
+                    "add",
+                    "Team added successfully.",
+                    serde_json::to_value(&team)?,
+                )?;
             } else {
-                bail!("Team '{}' not found", id);
+                println!("Team '{}' added successfully.", args.id);
+                println!("API Key: {}", api_key);
             }
         }
-        TeamCommand::List => {
-            if config.teams.is_empty() {
+        TeamCommand::Remove { id, json } => {
+            let mut config =
+                return_or_exit_json("team", "remove", *json, load_config_or_exit(&config_path))?;
+            if let Some(index) = config.teams.iter().position(|t| t.id == *id) {
+                let removed = std::sync::Arc::make_mut(&mut config.teams).remove(index);
+                return_or_exit_json(
+                    "team",
+                    "remove",
+                    *json,
+                    config::save_config(&config_path, &config),
+                )?;
+                if *json {
+                    print_json_success(
+                        "team",
+                        "remove",
+                        "Team removed successfully.",
+                        serde_json::to_value(&removed)?,
+                    )?;
+                } else {
+                    println!("Team '{}' removed successfully.", id);
+                }
+            } else {
+                let err = anyhow::anyhow!("Team '{}' not found", id);
+                if *json {
+                    exit_with_json_error("team", "remove", &err);
+                }
+                return Err(err);
+            }
+        }
+        TeamCommand::List { json } => {
+            let config =
+                return_or_exit_json("team", "list", *json, load_config_or_exit(&config_path))?;
+            if *json {
+                print_json_success(
+                    "team",
+                    "list",
+                    "Teams listed successfully.",
+                    serde_json::to_value(&*config.teams)?,
+                )?;
+            } else if config.teams.is_empty() {
                 println!("No teams configured.");
             } else {
                 println!("{:<20} {:<45} {:<20}", "ID", "API Key", "Allowed Routers");
@@ -213,9 +390,13 @@ enum ChannelCommand {
     Update(ChannelUpdateArgs),
     Delete {
         name: String,
+        #[arg(long)]
+        json: bool,
     },
     Show {
         name: String,
+        #[arg(long)]
+        json: bool,
     },
     List {
         #[arg(long)]
@@ -229,6 +410,8 @@ enum RouterCommand {
     Update(RouterUpdateArgs),
     Delete {
         name: String,
+        #[arg(long)]
+        json: bool,
     },
     List {
         #[arg(long)]
@@ -258,6 +441,8 @@ struct ChannelAddArgs {
     request_ms: Option<u64>,
     #[arg(long)]
     response_ms: Option<u64>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -290,6 +475,8 @@ struct ChannelUpdateArgs {
     request_ms: Option<u64>,
     #[arg(long)]
     response_ms: Option<u64>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -304,6 +491,8 @@ struct RouterAddArgs {
     model_matchers: Vec<String>,
     #[arg(long = "fallback", value_delimiter = ',', num_args = 0..)]
     fallback_channels: Vec<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -320,6 +509,8 @@ struct RouterUpdateArgs {
     fallback_channels: Vec<String>,
     #[arg(long)]
     clear_fallbacks: bool,
+    #[arg(long)]
+    json: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -330,7 +521,7 @@ fn main() -> anyhow::Result<()> {
         command: GatewayCommand::Start { daemon, config },
     } = &cli.command
     {
-        (*daemon, config.clone())
+        (*daemon, Some(config.clone()))
     } else {
         (false, None)
     };
@@ -411,7 +602,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Commands::Router { command } => handle_router_command(&cli, command)?,
         Commands::Gateway { command } => match command {
             GatewayCommand::Start { config, daemon: _ } => {
-                let path = resolve_config_path(cli.config.clone().or_else(|| config.clone()));
+                let path = resolve_config_path(Some(config.clone()));
                 server::run_server(path).await?;
             }
             GatewayCommand::Stop => handle_stop_command(&cli)?,
@@ -630,7 +821,6 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
                 retry_on_status: vec![429, 500, 502, 503, 504],
             },
             gemini_replay: crate::config::GeminiReplay::default(),
-            enable_mcp: true,
             cors_allowed_origins: vec![],
         },
         channels: std::sync::Arc::new(Vec::new()),
@@ -652,7 +842,6 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
             .unwrap_or_else(|| "~/.apex/data".to_string()),
         web_dir: "web".to_string(),
         teams: std::sync::Arc::new(Vec::new()),
-        prompts: std::sync::Arc::new(Vec::new()),
         compliance: None,
     };
     config::save_config(path, &config)
@@ -663,9 +852,10 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
 
 fn load_config_or_exit(path: &std::path::Path) -> anyhow::Result<Config> {
     if !path.exists() {
-        eprintln!("Config file not found at {:?}", path);
-        eprintln!("Run 'apex init' to create a default configuration.");
-        std::process::exit(1);
+        bail!(
+            "Config file not found at {}. Run 'apex init' to create a default configuration.",
+            path.display()
+        );
     }
     config::load_config(path).with_context(|| format!("failed to load config: {}", path.display()))
 }
@@ -674,9 +864,14 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
     let path = resolve_config_path(cli.config.clone());
     match command {
         ChannelCommand::Add(args) => {
-            let mut config = load_config_or_exit(&path)?;
+            let mut config =
+                return_or_exit_json("channel", "add", args.json, load_config_or_exit(&path))?;
             if config.channels.iter().any(|c| c.name == args.name) {
-                bail!("channel already exists: {}", args.name);
+                let err = anyhow::anyhow!("channel already exists: {}", args.name);
+                if args.json {
+                    exit_with_json_error("channel", "add", &err);
+                }
+                return Err(err);
             }
 
             let templates = load_provider_templates().unwrap_or_default();
@@ -686,7 +881,12 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                 Some(value) => value.clone(),
                 None => prompt_provider_select()?,
             };
-            let provider = parse_provider_type(&provider_value)?;
+            let provider = return_or_exit_json(
+                "channel",
+                "add",
+                args.json,
+                parse_provider_type(&provider_value),
+            )?;
 
             let template = templates.iter().find(|t| t.provider_type == provider_value);
 
@@ -695,34 +895,17 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                 .map(|t| t.base_url.clone())
                 .unwrap_or_else(|| get_default_base_url(&provider).to_string());
 
-            let base_url = match &args.base_url {
-                Some(url) => url.clone(),
-                None => inquire::Text::new("OpenAI Base URL")
-                    .with_default(&default_base_url)
-                    .prompt()?,
-            };
+            let base_url = args
+                .base_url
+                .clone()
+                .unwrap_or_else(|| default_base_url.clone());
 
             // 3. Anthropic Base URL
-            let anthropic_base_url = match &args.anthropic_base_url {
-                Some(url) => Some(url.clone()),
-                None => {
-                    let default_anthropic = template
-                        .and_then(|t| t.anthropic_base_url.clone())
-                        .or_else(|| {
-                            get_default_anthropic_base_url(&provider).map(|s| s.to_string())
-                        });
-
-                    if let Some(default) = default_anthropic {
-                        Some(
-                            inquire::Text::new("Anthropic Base URL")
-                                .with_default(&default)
-                                .prompt()?,
-                        )
-                    } else {
-                        None
-                    }
-                }
-            };
+            let anthropic_base_url = args.anthropic_base_url.clone().or_else(|| {
+                template
+                    .and_then(|t| t.anthropic_base_url.clone())
+                    .or_else(|| get_default_anthropic_base_url(&provider).map(|s| s.to_string()))
+            });
 
             // 4. Input API Key
             let api_key = match &args.api_key {
@@ -732,8 +915,18 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                     .prompt()?,
             };
 
-            let headers = parse_optional_map(&args.headers)?;
-            let model_map = parse_optional_map(&args.model_map)?;
+            let headers = return_or_exit_json(
+                "channel",
+                "add",
+                args.json,
+                parse_optional_map(&args.headers),
+            )?;
+            let model_map = return_or_exit_json(
+                "channel",
+                "add",
+                args.json,
+                parse_optional_map(&args.model_map),
+            )?;
             let timeouts = build_timeouts(
                 &config.global.timeouts,
                 args.connect_ms,
@@ -751,23 +944,52 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                 model_map,
                 timeouts,
             };
-            std::sync::Arc::make_mut(&mut config.channels).push(channel);
-            config::save_config(&path, &config)?;
-            println!("✅ 已添加 channel: {}", args.name);
+            std::sync::Arc::make_mut(&mut config.channels).push(channel.clone());
+            return_or_exit_json(
+                "channel",
+                "add",
+                args.json,
+                config::save_config(&path, &config),
+            )?;
+            if args.json {
+                print_json_success(
+                    "channel",
+                    "add",
+                    "Channel added successfully.",
+                    channel_public_json(&channel),
+                )?;
+            } else {
+                println!("✅ 已添加 channel: {}", args.name);
+            }
         }
         ChannelCommand::Update(args) => {
-            let mut config = load_config_or_exit(&path)?;
+            let mut config =
+                return_or_exit_json("channel", "update", args.json, load_config_or_exit(&path))?;
             let channel_idx = config
                 .channels
                 .iter()
                 .position(|c| c.name == args.name)
-                .ok_or_else(|| anyhow::anyhow!("channel not found: {}", args.name))?;
+                .ok_or_else(|| anyhow::anyhow!("channel not found: {}", args.name));
+            let channel_idx = match channel_idx {
+                Ok(index) => index,
+                Err(err) => {
+                    if args.json {
+                        exit_with_json_error("channel", "update", &err);
+                    }
+                    return Err(err);
+                }
+            };
 
             let templates = load_provider_templates().unwrap_or_default();
             let mut new_provider_value: Option<String> = None;
 
             if let Some(provider_val) = &args.provider {
-                let p = parse_provider_type(provider_val)?;
+                let p = return_or_exit_json(
+                    "channel",
+                    "update",
+                    args.json,
+                    parse_provider_type(provider_val),
+                )?;
                 std::sync::Arc::make_mut(&mut config.channels)[channel_idx].provider_type = p;
                 new_provider_value = Some(provider_val.clone());
             }
@@ -783,11 +1005,8 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                             get_default_base_url(&config.channels[channel_idx].provider_type)
                                 .to_string()
                         });
-
-                    let new_url = inquire::Text::new("OpenAI Base URL")
-                        .with_default(&default_base_url)
-                        .prompt()?;
-                    std::sync::Arc::make_mut(&mut config.channels)[channel_idx].base_url = new_url;
+                    std::sync::Arc::make_mut(&mut config.channels)[channel_idx].base_url =
+                        default_base_url;
                 }
 
                 // Anthropic Base URL
@@ -802,11 +1021,8 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                         });
 
                     if let Some(default) = default_anthropic {
-                        let new_url = inquire::Text::new("Anthropic Base URL")
-                            .with_default(&default)
-                            .prompt()?;
                         std::sync::Arc::make_mut(&mut config.channels)[channel_idx]
-                            .anthropic_base_url = Some(new_url);
+                            .anthropic_base_url = Some(default);
                     }
                 }
             }
@@ -827,12 +1043,22 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
             if args.clear_headers {
                 channel.headers = None;
             } else if !args.headers.is_empty() {
-                channel.headers = parse_optional_map(&args.headers)?;
+                channel.headers = return_or_exit_json(
+                    "channel",
+                    "update",
+                    args.json,
+                    parse_optional_map(&args.headers),
+                )?;
             }
             if args.clear_model_map {
                 channel.model_map = None;
             } else if !args.model_map.is_empty() {
-                channel.model_map = parse_optional_map(&args.model_map)?;
+                channel.model_map = return_or_exit_json(
+                    "channel",
+                    "update",
+                    args.json,
+                    parse_optional_map(&args.model_map),
+                )?;
             }
             if args.clear_timeouts {
                 channel.timeouts = None;
@@ -848,16 +1074,39 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                     args.response_ms,
                 ));
             }
-            config::save_config(&path, &config)?;
-            println!("✅ 已更新 channel: {}", args.name);
-        }
-        ChannelCommand::Delete { name } => {
-            let mut config = load_config_or_exit(&path)?;
-            let original_len = config.channels.len();
-            std::sync::Arc::make_mut(&mut config.channels).retain(|c| c.name != *name);
-            if config.channels.len() == original_len {
-                bail!("channel not found: {}", name);
+            return_or_exit_json(
+                "channel",
+                "update",
+                args.json,
+                config::save_config(&path, &config),
+            )?;
+            let updated = config.channels[channel_idx].clone();
+            if args.json {
+                print_json_success(
+                    "channel",
+                    "update",
+                    "Channel updated successfully.",
+                    channel_public_json(&updated),
+                )?;
+            } else {
+                println!("✅ 已更新 channel: {}", args.name);
             }
+        }
+        ChannelCommand::Delete { name, json } => {
+            let mut config =
+                return_or_exit_json("channel", "delete", *json, load_config_or_exit(&path))?;
+            let removed = config.channels.iter().find(|c| c.name == *name).cloned();
+            let removed = match removed {
+                Some(channel) => channel,
+                None => {
+                    let err = anyhow::anyhow!("channel not found: {}", name);
+                    if *json {
+                        exit_with_json_error("channel", "delete", &err);
+                    }
+                    return Err(err);
+                }
+            };
+            std::sync::Arc::make_mut(&mut config.channels).retain(|c| c.name != *name);
 
             // Remove channel from all routers' channel lists
             for router in std::sync::Arc::make_mut(&mut config.routers) {
@@ -867,42 +1116,75 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
             // Remove routers that have no channels left
             std::sync::Arc::make_mut(&mut config.routers).retain(|r| !r.channels.is_empty());
 
-            config::save_config(&path, &config)?;
-            println!("✅ 已删除 channel: {}", name);
+            return_or_exit_json(
+                "channel",
+                "delete",
+                *json,
+                config::save_config(&path, &config),
+            )?;
+            if *json {
+                print_json_success(
+                    "channel",
+                    "delete",
+                    "Channel deleted successfully.",
+                    channel_public_json(&removed),
+                )?;
+            } else {
+                println!("✅ 已删除 channel: {}", name);
+            }
         }
-        ChannelCommand::Show { name } => {
-            let config = load_config_or_exit(&path)?;
-            let channel = config
-                .channels
-                .iter()
-                .find(|c| c.name == *name)
-                .ok_or_else(|| anyhow::anyhow!("channel not found: {}", name))?;
+        ChannelCommand::Show { name, json } => {
+            let config = return_or_exit_json("channel", "show", *json, load_config_or_exit(&path))?;
+            let channel = config.channels.iter().find(|c| c.name == *name).cloned();
+            let channel = match channel {
+                Some(channel) => channel,
+                None => {
+                    let err = anyhow::anyhow!("channel not found: {}", name);
+                    if *json {
+                        exit_with_json_error("channel", "show", &err);
+                    }
+                    return Err(err);
+                }
+            };
 
-            println!("Channel Details:");
-            println!("  Name:               {}", channel.name);
-            println!("  Provider:           {:?}", channel.provider_type);
-            println!("  Base URL:           {}", channel.base_url);
-            println!(
-                "  Anthropic Base URL: {}",
-                channel.anthropic_base_url.as_deref().unwrap_or("N/A")
-            );
-            println!("  Has API Key:        {}", !channel.api_key.is_empty());
+            if *json {
+                print_json_success(
+                    "channel",
+                    "show",
+                    "Channel shown successfully.",
+                    channel_public_json(&channel),
+                )?;
+            } else {
+                println!("Channel Details:");
+                println!("  Name:               {}", channel.name);
+                println!("  Provider:           {:?}", channel.provider_type);
+                println!("  Base URL:           {}", channel.base_url);
+                println!(
+                    "  Anthropic Base URL: {}",
+                    channel.anthropic_base_url.as_deref().unwrap_or("N/A")
+                );
+                println!("  Has API Key:        {}", !channel.api_key.is_empty());
 
-            if let Some(headers) = &channel.headers {
-                println!("  Headers:            {:?}", headers);
-            }
-            if let Some(models) = &channel.model_map {
-                println!("  Model Map:          {:?}", models);
-            }
-            if let Some(timeouts) = &channel.timeouts {
-                println!("  Timeouts:           {:?}", timeouts);
+                if let Some(headers) = &channel.headers {
+                    println!("  Headers:            {:?}", headers);
+                }
+                if let Some(models) = &channel.model_map {
+                    println!("  Model Map:          {:?}", models);
+                }
+                if let Some(timeouts) = &channel.timeouts {
+                    println!("  Timeouts:           {:?}", timeouts);
+                }
             }
         }
         ChannelCommand::List { json } => {
-            let config = load_config_or_exit(&path)?;
+            let config = return_or_exit_json("channel", "list", *json, load_config_or_exit(&path))?;
             if *json {
-                let output = serde_json::to_string_pretty(&config.channels)?;
-                println!("{output}");
+                print_json_success(
+                    "channel",
+                    "list",
+                    "Channels listed successfully.",
+                    channels_public_json(&config.channels),
+                )?;
             } else {
                 print_channel_table(&config.channels);
             }
@@ -930,12 +1212,22 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
     let path = resolve_config_path(cli.config.clone());
     match command {
         RouterCommand::Add(args) => {
-            let mut config = load_config_or_exit(&path)?;
+            let mut config =
+                return_or_exit_json("router", "add", args.json, load_config_or_exit(&path))?;
             if config.routers.iter().any(|r| r.name == args.name) {
-                bail!("router already exists: {}", args.name);
+                let err = anyhow::anyhow!("router already exists: {}", args.name);
+                if args.json {
+                    exit_with_json_error("router", "add", &err);
+                }
+                return Err(err);
             }
 
-            let mut target_channels = parse_target_channels(&args.channels)?;
+            let mut target_channels = return_or_exit_json(
+                "router",
+                "add",
+                args.json,
+                parse_target_channels(&args.channels),
+            )?;
 
             // If no explicit channels list, prompt
             if target_channels.is_empty() {
@@ -949,8 +1241,18 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             // Verify all channels exist
             let channel_names: Vec<String> =
                 target_channels.iter().map(|c| c.name.clone()).collect();
-            ensure_channels_exist(&config, &channel_names)?;
-            ensure_channels_exist(&config, &args.fallback_channels)?;
+            return_or_exit_json(
+                "router",
+                "add",
+                args.json,
+                ensure_channels_exist(&config, &channel_names),
+            )?;
+            return_or_exit_json(
+                "router",
+                "add",
+                args.json,
+                ensure_channels_exist(&config, &args.fallback_channels),
+            )?;
 
             // Build rules from args
             let mut rules = Vec::new();
@@ -960,12 +1262,21 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                 for matcher in &args.model_matchers {
                     let parts: Vec<&str> = matcher.splitn(2, '=').collect();
                     if parts.len() != 2 {
-                        anyhow::bail!("invalid matcher format: {}", matcher);
+                        let err = anyhow::anyhow!("invalid matcher format: {}", matcher);
+                        if args.json {
+                            exit_with_json_error("router", "add", &err);
+                        }
+                        return Err(err);
                     }
                     let pattern = parts[0].to_string();
                     let channel_name = parts[1].to_string();
 
-                    ensure_channels_exist(&config, std::slice::from_ref(&channel_name))?;
+                    return_or_exit_json(
+                        "router",
+                        "add",
+                        args.json,
+                        ensure_channels_exist(&config, std::slice::from_ref(&channel_name)),
+                    )?;
                     rules.push(config::RouterRule {
                         match_spec: config::MatchSpec {
                             models: vec![pattern],
@@ -999,18 +1310,42 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                 metadata: None,
                 fallback_channels: args.fallback_channels.clone(),
             };
-            std::sync::Arc::make_mut(&mut config.routers).push(router);
-            config::save_config(&path, &config)?;
-            println!("✅ 已添加 router: {}", args.name);
+            std::sync::Arc::make_mut(&mut config.routers).push(router.clone());
+            return_or_exit_json(
+                "router",
+                "add",
+                args.json,
+                config::save_config(&path, &config),
+            )?;
+            if args.json {
+                print_json_success(
+                    "router",
+                    "add",
+                    "Router added successfully.",
+                    serde_json::to_value(&router)?,
+                )?;
+            } else {
+                println!("✅ 已添加 router: {}", args.name);
+            }
         }
         RouterCommand::Update(args) => {
-            let mut config = load_config_or_exit(&path)?;
+            let mut config =
+                return_or_exit_json("router", "update", args.json, load_config_or_exit(&path))?;
 
             let router_idx = config
                 .routers
                 .iter()
                 .position(|r| r.name == args.name)
-                .ok_or_else(|| anyhow::anyhow!("router not found: {}", args.name))?;
+                .ok_or_else(|| anyhow::anyhow!("router not found: {}", args.name));
+            let router_idx = match router_idx {
+                Ok(index) => index,
+                Err(err) => {
+                    if args.json {
+                        exit_with_json_error("router", "update", &err);
+                    }
+                    return Err(err);
+                }
+            };
 
             // Check if we are in "interactive mode" (no explicit updates)
             let is_interactive = args.channels.is_empty()
@@ -1019,7 +1354,12 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                 && args.strategy.is_none()
                 && args.model_matchers.is_empty();
 
-            let mut new_channels = parse_target_channels(&args.channels)?;
+            let mut new_channels = return_or_exit_json(
+                "router",
+                "update",
+                args.json,
+                parse_target_channels(&args.channels),
+            )?;
 
             if is_interactive {
                 println!("进入交互式更新模式 (按 Ctrl+C 取消)...");
@@ -1048,17 +1388,37 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             if !new_channels.is_empty() {
                 // verify
                 let names: Vec<String> = new_channels.iter().map(|c| c.name.clone()).collect();
-                ensure_channels_exist(&config, &names)?;
+                return_or_exit_json(
+                    "router",
+                    "update",
+                    args.json,
+                    ensure_channels_exist(&config, &names),
+                )?;
             }
 
             if !args.fallback_channels.is_empty() {
-                ensure_channels_exist(&config, &args.fallback_channels)?;
+                return_or_exit_json(
+                    "router",
+                    "update",
+                    args.json,
+                    ensure_channels_exist(&config, &args.fallback_channels),
+                )?;
             }
 
             // Verify matcher targets
-            if let Some(map) = parse_optional_map(&args.model_matchers)? {
+            if let Some(map) = return_or_exit_json(
+                "router",
+                "update",
+                args.json,
+                parse_optional_map(&args.model_matchers),
+            )? {
                 let targets: Vec<String> = map.values().cloned().collect();
-                ensure_channels_exist(&config, &targets)?;
+                return_or_exit_json(
+                    "router",
+                    "update",
+                    args.json,
+                    ensure_channels_exist(&config, &targets),
+                )?;
             }
 
             let router = &mut std::sync::Arc::make_mut(&mut config.routers)[router_idx];
@@ -1071,7 +1431,12 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                 router.strategy = strategy.clone();
             }
 
-            if let Some(map) = parse_optional_map(&args.model_matchers)? {
+            if let Some(map) = return_or_exit_json(
+                "router",
+                "update",
+                args.json,
+                parse_optional_map(&args.model_matchers),
+            )? {
                 let mut current_matchers = router
                     .metadata
                     .as_ref()
@@ -1088,24 +1453,65 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             } else if !args.fallback_channels.is_empty() {
                 router.fallback_channels = args.fallback_channels.clone();
             }
-            config::save_config(&path, &config)?;
-            println!("✅ 已更新 router: {}", args.name);
-        }
-        RouterCommand::Delete { name } => {
-            let mut config = load_config_or_exit(&path)?;
-            let original_len = config.routers.len();
-            std::sync::Arc::make_mut(&mut config.routers).retain(|r| r.name != *name);
-            if config.routers.len() == original_len {
-                bail!("router not found: {}", name);
+            return_or_exit_json(
+                "router",
+                "update",
+                args.json,
+                config::save_config(&path, &config),
+            )?;
+            let updated = config.routers[router_idx].clone();
+            if args.json {
+                print_json_success(
+                    "router",
+                    "update",
+                    "Router updated successfully.",
+                    serde_json::to_value(&updated)?,
+                )?;
+            } else {
+                println!("✅ 已更新 router: {}", args.name);
             }
-            config::save_config(&path, &config)?;
-            println!("✅ 已删除 router: {}", name);
+        }
+        RouterCommand::Delete { name, json } => {
+            let mut config =
+                return_or_exit_json("router", "delete", *json, load_config_or_exit(&path))?;
+            let removed = config.routers.iter().find(|r| r.name == *name).cloned();
+            let removed = match removed {
+                Some(router) => router,
+                None => {
+                    let err = anyhow::anyhow!("router not found: {}", name);
+                    if *json {
+                        exit_with_json_error("router", "delete", &err);
+                    }
+                    return Err(err);
+                }
+            };
+            std::sync::Arc::make_mut(&mut config.routers).retain(|r| r.name != *name);
+            return_or_exit_json(
+                "router",
+                "delete",
+                *json,
+                config::save_config(&path, &config),
+            )?;
+            if *json {
+                print_json_success(
+                    "router",
+                    "delete",
+                    "Router deleted successfully.",
+                    serde_json::to_value(&removed)?,
+                )?;
+            } else {
+                println!("✅ 已删除 router: {}", name);
+            }
         }
         RouterCommand::List { json } => {
-            let config = load_config_or_exit(&path)?;
+            let config = return_or_exit_json("router", "list", *json, load_config_or_exit(&path))?;
             if *json {
-                let output = serde_json::to_string_pretty(&config.routers)?;
-                println!("{output}");
+                print_json_success(
+                    "router",
+                    "list",
+                    "Routers listed successfully.",
+                    serde_json::to_value(&*config.routers)?,
+                )?;
             } else {
                 print_router_table(&config.routers);
             }
@@ -1144,6 +1550,7 @@ fn parse_provider_type(value: &str) -> anyhow::Result<ProviderType> {
         "ollama" => Ok(ProviderType::Ollama),
         "jina" => Ok(ProviderType::Jina),
         "openrouter" => Ok(ProviderType::Openrouter),
+        "zai" => Ok(ProviderType::Zai),
         _ => bail!("unsupported provider: {}", value),
     }
 }
@@ -1160,6 +1567,7 @@ fn provider_choices() -> Vec<&'static str> {
         "ollama",
         "jina",
         "openrouter",
+        "zai",
     ]
 }
 
@@ -1196,6 +1604,7 @@ fn get_default_base_url(provider: &ProviderType) -> &'static str {
         ProviderType::Ollama => "http://localhost:11434",
         ProviderType::Jina => "https://api.jina.ai/v1",
         ProviderType::Openrouter => "https://openrouter.ai/api/v1",
+        ProviderType::Zai => "https://api.z.ai/api/coding/paas/v4",
     }
 }
 
@@ -1207,6 +1616,7 @@ fn get_default_anthropic_base_url(provider: &ProviderType) -> Option<&'static st
         ProviderType::Minimax => Some("https://api.minimax.io/anthropic"),
         ProviderType::Ollama => Some("http://localhost:11434"),
         ProviderType::Anthropic => Some("https://api.anthropic.com/v1"),
+        ProviderType::Zai => Some("https://api.z.ai/api/anthropic"),
         _ => None,
     }
 }
@@ -1342,7 +1752,7 @@ mod tests {
     #[test]
     fn provider_choices_count() {
         let choices = provider_choices();
-        assert_eq!(choices.len(), 10);
+        assert_eq!(choices.len(), 11);
     }
 
     #[test]
@@ -1351,6 +1761,26 @@ mod tests {
         assert_eq!(provider, ProviderType::Openai);
         let provider = parse_provider_type("custom_dual").unwrap();
         assert_eq!(provider, ProviderType::CustomDual);
+        let provider = parse_provider_type("zai").unwrap();
+        assert_eq!(provider, ProviderType::Zai);
+    }
+
+    #[test]
+    fn provider_choices_contains_zai() {
+        let choices = provider_choices();
+        assert!(choices.contains(&"zai"));
+    }
+
+    #[test]
+    fn zai_defaults_to_single_base_url_only() {
+        assert_eq!(
+            get_default_base_url(&ProviderType::Zai),
+            "https://api.z.ai/api/coding/paas/v4"
+        );
+        assert_eq!(
+            get_default_anthropic_base_url(&ProviderType::Zai),
+            Some("https://api.z.ai/api/anthropic")
+        );
     }
 
     #[test]

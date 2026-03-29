@@ -4,7 +4,6 @@ pub mod converters;
 pub mod database;
 pub mod e2e;
 pub mod gemini_compat;
-pub mod mcp;
 pub mod metrics;
 pub mod middleware;
 pub mod providers;

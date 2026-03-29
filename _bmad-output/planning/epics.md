@@ -59,7 +59,7 @@ Description: Expand routing with multi-channel configuration, caching, routing s
 
 Source: `_bmad-output/planning/epics/e03-cli-management.md`
 
-Description: Provide CLI workflows for project setup and gateway management.
+Description: Provide CLI workflows for project setup, gateway management, and AI-friendly local automation.
 
 ### Story 3.1: CLI Infrastructure
 
@@ -76,6 +76,14 @@ Description: Provide CLI workflows for project setup and gateway management.
 ### Story 3.4: Gateway Control
 
 - Add CLI commands for gateway runtime control.
+
+### Story 3.5: AI-Friendly Non-Interactive CLI Inputs
+
+- Make `channel`, `router`, and `team` CLI commands fully argument-driven for skill and automation use.
+
+### Story 3.6: Machine-Readable JSON Output for Automation
+
+- Add stable JSON output mode for `channel`, `router`, and `team` CLI commands.
 
 ## Epic 4: Observability
 
@@ -153,32 +161,10 @@ Description: Protect sensitive user data before sending requests to upstream LLM
 
 Source: `_bmad-output/planning/epics/e08-mcp-server.md`
 
-Description: Provide MCP transport, lifecycle, resources, prompts, tools, and analytics support in Apex Gateway.
+Description: Superseded. The previous HTTP MCP scope is no longer an active delivery stream.
 
-### Story 8.1: MCP Protocol Transport
+Superseded note: This epic remains only as historical planning context. Active scope has moved toward AI-friendly CLI operations and future Admin Control Plane alignment, so these MCP stories should not be treated as current implementation commitments.
 
-- Add MCP protocol handling and transport support.
+### Story 8.8: Remove HTTP MCP Surface
 
-### Story 8.2: Session Lifecycle
-
-- Implement session lifecycle, capability negotiation, and cleanup.
-
-### Story 8.3: MCP Resources
-
-- Expose MCP resources backed by gateway configuration.
-
-### Story 8.4: Resource Listing Key Masking
-
-- Mask sensitive values in resource listings and config views.
-
-### Story 8.5: Analytics Reporting
-
-- Expose MCP analytics and reporting output.
-
-### Story 8.6: MCP Prompts
-
-- Expose prompt templates through MCP prompts APIs.
-
-### Story 8.7: MCP Tools
-
-- Expose tool discovery and execution through MCP tools APIs.
+- Retire the previously delivered HTTP MCP route/config/doc/test surface so the product no longer advertises a legacy remote control path.

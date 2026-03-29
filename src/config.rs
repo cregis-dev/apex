@@ -24,8 +24,6 @@ pub struct Config {
     #[serde(default)]
     pub teams: Arc<Vec<Team>>,
     #[serde(default)]
-    pub prompts: Arc<Vec<Prompt>>,
-    #[serde(default)]
     pub compliance: Option<Compliance>,
 }
 
@@ -37,36 +35,6 @@ fn default_data_dir() -> String {
 
 fn default_web_dir() -> String {
     "target/web".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Prompt {
-    pub name: String,
-    pub description: Option<String>,
-    #[serde(default)]
-    pub arguments: Vec<PromptArgument>,
-    pub messages: Vec<PromptMessage>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PromptArgument {
-    pub name: String,
-    pub description: Option<String>,
-    #[serde(default)]
-    pub required: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PromptMessage {
-    pub role: String,
-    pub content: PromptContent,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum PromptContent {
-    Text { text: String },
-    // Simplified for now, can be extended
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,14 +125,8 @@ pub struct Global {
     pub retries: Retries,
     #[serde(default)]
     pub gemini_replay: GeminiReplay,
-    #[serde(default = "default_true")]
-    pub enable_mcp: bool,
     #[serde(default)]
     pub cors_allowed_origins: Vec<String>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,6 +186,7 @@ pub enum ProviderType {
     Ollama,
     Jina,
     Openrouter,
+    Zai,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,4 +392,18 @@ pub fn save_config(path: &Path, config: &Config) -> anyhow::Result<()> {
     let content = serde_json::to_string_pretty(config)?;
     fs::write(path, content)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderType;
+
+    #[test]
+    fn provider_type_zai_round_trips_as_snake_case() {
+        let serialized = serde_json::to_string(&ProviderType::Zai).unwrap();
+        assert_eq!(serialized, "\"zai\"");
+
+        let parsed: ProviderType = serde_json::from_str("\"zai\"").unwrap();
+        assert_eq!(parsed, ProviderType::Zai);
+    }
 }

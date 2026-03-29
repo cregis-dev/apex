@@ -22,7 +22,7 @@ mode: "system-level"
 
 Apex 是一个协议网关，而不是单纯的业务 CRUD 服务。它的核心风险集中在以下几个方面：
 
-- OpenAI / Anthropic / MCP 等协议兼容性可能在重构中悄悄漂移
+- OpenAI / Anthropic 等协议兼容性可能在重构中悄悄漂移
 - 路由、fallback、限流、team policy、timeout、retry 等规则组合非常多
 - provider adapter 对请求和响应的转换逻辑容易被局部修改破坏
 - 真实 provider 有外网、费用、限流和可用性波动，不能作为默认回归基础
@@ -94,7 +94,6 @@ L0  Config and Rule Matrix
 - auth middleware
 - rate limit middleware
 - metrics endpoint
-- MCP prompts / tools / resources / session
 - usage 记录与数据存储
 
 设计原则：
@@ -203,7 +202,7 @@ tests/
   - 生成强类型测试输入
 
 - `config_builder.rs`
-  - 复用 Apex 自己的 `Config` 结构生成 `generated.e2e.config.json`
+  - 复用 Apex 自己的 `Config` 结构生成 `.run/e2e/generated.e2e.config.json`
   - 统一生成 `teams`、`routers`、`channels`、`metrics`、`hot_reload`
 
 - `gateway_process.rs`
@@ -295,7 +294,7 @@ cargo test
 - `./scripts/test-local-e2e.sh`
 - `./scripts/test-real-smoke.sh`
 - `./scripts/test-all.sh`
-- `cargo run --bin apex-e2e-config -- --env-file .env.e2e --output tests/e2e/generated.e2e.config.json`
+- `cargo run --bin apex-e2e-config -- --env-file .env.e2e --output .run/e2e/generated.e2e.config.json`
 
 其中：
 
@@ -336,7 +335,6 @@ cargo test
 - `tests/system.rs`
 - `tests/e05_routing_test.rs`
 - `tests/hot_reload_test.rs`
-- `tests/mcp_*`
 - `tests/team_test.rs`
 - `tests/e04_observability_test.rs`
 - `tests/e07_compliance_test.rs`

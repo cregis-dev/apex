@@ -79,31 +79,32 @@ docker run -d \
 
 **1. 下载二进制文件**:
 ```bash
-# 从 GitHub Releases 下载
-wget https://github.com/cregis-dev/apex/releases/download/v0.1.0/apex-x86_64-unknown-linux-musl.tar.gz
-tar -xzf apex-*.tar.gz
+# 直接安装最新版本
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | bash
+
+# 或安装指定版本到 /opt/apex
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --version v0.1.0 /opt/apex
+
+# 如需一并写入示例配置到明确路径
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --version v0.1.1 --config-path /opt/apex/config.json /opt/apex
 ```
 
 **2. 移动到系统路径**:
 ```bash
-sudo mv apex /usr/local/bin/
-chmod +x /usr/local/bin/apex
+sudo ln -sf /opt/apex/apex /usr/local/bin/apex
 ```
 
-**3. 创建配置目录**:
+**3. 准备配置文件**:
 ```bash
 sudo mkdir -p /opt/apex
-sudo mkdir -p /var/log/apex
-sudo mkdir -p /var/lib/apex
-```
-
-**4. 准备配置文件**:
-```bash
-sudo cp config.example.json /opt/apex/config.json
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  sudo bash -s -- --version v0.1.1 --config-path /opt/apex/config.json /opt/apex
 sudo vi /opt/apex/config.json
 ```
 
-**5. 配置 systemd 服务**:
+**4. 配置 systemd 服务**:
 ```ini
 # /etc/systemd/system/apex.service
 [Unit]
@@ -124,13 +125,13 @@ Environment=RUST_LOG=info
 WantedBy=multi-user.target
 ```
 
-**6. 启动服务**:
+**5. 启动服务**:
 ```bash
 # 创建用户
 sudo useradd -r -s /bin/false apex
 
 # 设置权限
-sudo chown -R apex:apex /opt/apex /var/log/apex /var/lib/apex
+sudo chown -R apex:apex /opt/apex
 
 # 启用服务
 sudo systemctl daemon-reload
@@ -138,7 +139,7 @@ sudo systemctl enable apex
 sudo systemctl start apex
 ```
 
-**7. 验证状态**:
+**6. 验证状态**:
 ```bash
 sudo systemctl status apex
 curl http://localhost:12356/metrics
@@ -150,30 +151,26 @@ curl http://localhost:12356/metrics
 
 ```bash
 # 一键安装
-curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install.sh | sudo bash -s -- /opt/apex
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | sudo bash -s -- /opt/apex
+
+# 安装并写入示例配置
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  sudo bash -s -- --config-path /opt/apex/config.json /opt/apex
 ```
 
-**安装脚本内容** (`install.sh`):
+**安装脚本内容** (`install-release.sh`):
 ```bash
 #!/bin/bash
 INSTALL_PATH=${1:-/opt/apex}
 
 echo "Installing Apex Gateway to $INSTALL_PATH"
 
-# Create directories
-mkdir -p $INSTALL_PATH
-mkdir -p $INSTALL_PATH/logs
-mkdir -p $INSTALL_PATH/data
-
-# Copy binary
-cp apex $INSTALL_PATH/apex
-chmod +x $INSTALL_PATH/apex
-
-# Copy config
-cp config.example.json $INSTALL_PATH/config.json
+# Detect platform and download the matching release archive
+# Install only the apex binary by default
+# Write config.example.json only when --config-path is provided
 
 echo "Installation complete!"
-echo "Run: $INSTALL_PATH/apex gateway start --config $INSTALL_PATH/config.json"
+echo "Run: $INSTALL_PATH/apex gateway start --config /path/to/config.json"
 ```
 
 ---
@@ -201,7 +198,6 @@ echo "Run: $INSTALL_PATH/apex gateway start --config $INSTALL_PATH/config.json"
       "backoff_ms": 500,
       "retry_on_status": [429, 500, 502, 503, 504]
     },
-    "enable_mcp": true,
     "cors_allowed_origins": ["https://dashboard.example.com"]
   },
   "logging": {
