@@ -150,7 +150,7 @@ fn channels_public_json(channels: &[Channel]) -> Value {
 #[derive(Parser)]
 #[command(name = "apex", version)]
 struct Cli {
-    #[arg(long)]
+    #[arg(long, global = true)]
     config: Option<String>,
     #[command(subcommand)]
     command: Commands,
@@ -158,9 +158,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Init {
-        config: Option<String>,
-    },
+    Init,
     Channel {
         #[command(subcommand)]
         command: ChannelCommand,
@@ -184,8 +182,6 @@ enum Commands {
 #[derive(Subcommand)]
 enum GatewayCommand {
     Start {
-        #[arg(long, short = 'c')]
-        config: String,
         #[arg(long, short = 'd')]
         daemon: bool,
     },
@@ -517,17 +513,17 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Check for daemon mode in Gateway Start command
-    let (is_daemon, start_config) = if let Commands::Gateway {
-        command: GatewayCommand::Start { daemon, config },
+    let is_daemon = if let Commands::Gateway {
+        command: GatewayCommand::Start { daemon },
     } = &cli.command
     {
-        (*daemon, Some(config.clone()))
+        *daemon
     } else {
-        (false, None)
+        false
     };
 
     // Load config to get log level and dir
-    let config_path = resolve_config_path(cli.config.clone().or(start_config));
+    let config_path = resolve_config_path(cli.config.clone());
     let config = config::load_config(&config_path).ok();
 
     let log_level = config
@@ -594,15 +590,15 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main(cli: Cli) -> anyhow::Result<()> {
     match &cli.command {
-        Commands::Init { config } => {
-            let path = resolve_config_path(cli.config.clone().or_else(|| config.clone()));
+        Commands::Init => {
+            let path = resolve_config_path(cli.config.clone());
             init_config(&path)?;
         }
         Commands::Channel { command } => handle_channel_command(&cli, command)?,
         Commands::Router { command } => handle_router_command(&cli, command)?,
         Commands::Gateway { command } => match command {
-            GatewayCommand::Start { config, daemon: _ } => {
-                let path = resolve_config_path(Some(config.clone()));
+            GatewayCommand::Start { daemon: _ } => {
+                let path = resolve_config_path(cli.config.clone());
                 server::run_server(path).await?;
             }
             GatewayCommand::Stop => handle_stop_command(&cli)?,
