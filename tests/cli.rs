@@ -10,6 +10,10 @@ fn apex_cmd(config_path: &str) -> Command {
     cmd
 }
 
+fn raw_apex_cmd() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_apex"))
+}
+
 #[test]
 fn test_router_multichannel() {
     let temp_dir = TempDir::new().unwrap();
@@ -308,6 +312,43 @@ fn test_router_lifecycle() {
     let content = fs::read_to_string(&config_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert_eq!(json["routers"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn test_team_subcommand_accepts_global_config_after_subcommand() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    apex_cmd(config_str).arg("init").assert().success();
+    apex_cmd(config_str)
+        .arg("team")
+        .arg("add")
+        .arg("--id")
+        .arg("custom-config-team")
+        .arg("--routers")
+        .arg("default-router")
+        .assert()
+        .success();
+
+    raw_apex_cmd()
+        .arg("team")
+        .arg("list")
+        .arg("--config")
+        .arg(config_str)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("custom-config-team"));
+}
+
+#[test]
+fn test_team_help_shows_global_config_option() {
+    raw_apex_cmd()
+        .arg("team")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--config"));
 }
 
 #[test]
