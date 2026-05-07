@@ -15,6 +15,7 @@ target/
 # E2E Test artifacts
 tests/e2e/manual_config.json
 .env.e2e
+.env.gemini-native
 
 # Python artifacts
 __pycache__/

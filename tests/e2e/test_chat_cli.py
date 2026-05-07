@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import argparse
+import urllib.error
+import urllib.request
 from typing import Callable, List, Dict, Any, Optional
 from openai import OpenAI
 from anthropic import Anthropic
@@ -76,6 +78,8 @@ def configured_protocols() -> List[str]:
             protocols.append("openai")
         if provider_type in anthropic_compatible and "anthropic" not in protocols:
             protocols.append("anthropic")
+        if provider_type == "gemini" and "gemini_native" not in protocols:
+            protocols.append("gemini_native")
 
     if not protocols:
         protocols.append("openai")
@@ -269,6 +273,53 @@ def test_anthropic_protocol():
         
     return True
 
+def test_gemini_native_protocol():
+    console.print("[bold blue]Testing Gemini Native Protocol...[/bold blue]")
+    api_key = load_api_key("gemini")
+    if not api_key:
+        console.print("[red]Error: no Apex team API key configured[/red]")
+        return False
+
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": "Reply with a short greeting."}]}
+        ],
+        "tools": [{"google_search": {}}],
+    }
+    url = (
+        f"{BASE_URL_OPENAI.rstrip('/')}/gemini/v1beta/models/"
+        f"{TEST_MODEL}:generateContent"
+    )
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        console.print("  - Sending native generateContent request...", end=" ")
+        with urllib.request.urlopen(request, timeout=120) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        console.print(f"[red]HTTP {e.code}: {error_body}[/red]")
+        return False
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        return False
+
+    candidates = body.get("candidates") or []
+    if candidates:
+        console.print("[green]OK[/green]")
+        return True
+
+    console.print(f"[red]Failed[/red] (Response: {body})")
+    return False
+
 def run_auto_mode(protocols: List[str]) -> int:
     configured = configured_protocols()
     console.print(f"[bold blue]Target Protocols:[/bold blue] {', '.join(protocols)}")
@@ -277,6 +328,7 @@ def run_auto_mode(protocols: List[str]) -> int:
     protocol_runners: Dict[str, Callable[[], bool]] = {
         "openai": test_openai_protocol,
         "anthropic": test_anthropic_protocol,
+        "gemini_native": test_gemini_native_protocol,
     }
 
     for protocol in protocols:
@@ -348,7 +400,11 @@ def run_interactive_mode(protocol="openai"):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["auto", "interactive"], default="auto")
-    parser.add_argument("--protocol", choices=["openai", "anthropic"], default="openai")
+    parser.add_argument(
+        "--protocol",
+        choices=["openai", "anthropic", "gemini_native"],
+        default="openai",
+    )
     parser.add_argument(
         "--protocols",
         default=os.environ.get("APEX_E2E_PROTOCOLS", ",".join(DEFAULT_PROTOCOLS)),

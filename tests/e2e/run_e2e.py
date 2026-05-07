@@ -59,7 +59,10 @@ def load_generated_runtime():
     team_key = teams[0]["api_key"] if teams else None
     allowed_models = teams[0].get("policy", {}).get("allowed_models") if teams else None
     test_model = allowed_models[0] if allowed_models else "apex-test-chat"
-    return host, int(port_text), team_key, test_model
+    protocols = ["openai", "anthropic"]
+    if any(channel.get("provider_type") == "gemini" for channel in config.get("channels", [])):
+        protocols.append("gemini_native")
+    return host, int(port_text), team_key, test_model, ",".join(protocols)
 
 
 def run_server():
@@ -97,7 +100,7 @@ def wait_for_server(host: str, port: int, timeout: int = 10) -> bool:
 
 def main():
     generate_config()
-    host, port, team_key, test_model = load_generated_runtime()
+    host, port, team_key, test_model, protocols = load_generated_runtime()
     base_url = f"http://{host}:{port}"
 
     server_proc = run_server()
@@ -111,7 +114,7 @@ def main():
             if team_key:
                 env.setdefault("APEX_TEAM_KEY", team_key)
             env.setdefault("APEX_TEST_MODEL", test_model)
-            env.setdefault("APEX_E2E_PROTOCOLS", DEFAULT_PROTOCOLS)
+            env.setdefault("APEX_E2E_PROTOCOLS", protocols or DEFAULT_PROTOCOLS)
 
             console.print("\n[bold yellow]Running Automated Tests...[/bold yellow]")
             ret = subprocess.call(

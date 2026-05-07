@@ -1,8 +1,9 @@
 use anyhow::Context;
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
@@ -58,6 +59,35 @@ impl MockProvider {
             .route("/openai/chat/completions", post(chat_completions))
             .route("/v1/messages", post(messages))
             .route("/messages", post(messages))
+            .route("/v1beta/models", get(gemini_native_models))
+            .route("/v1beta/models/*model_action", get(gemini_native_model))
+            .route("/v1beta/models/*model_action", post(gemini_native_generate))
+            .route("/v1beta/fileSearchStores", get(gemini_native_resource))
+            .route("/v1beta/fileSearchStores", post(gemini_native_resource))
+            .route(
+                "/v1beta/fileSearchStores/*path",
+                get(gemini_native_resource),
+            )
+            .route(
+                "/v1beta/fileSearchStores/*path",
+                post(gemini_native_resource),
+            )
+            .route(
+                "/v1beta/fileSearchStores/*path",
+                delete(gemini_native_resource),
+            )
+            .route(
+                "/upload/v1beta/fileSearchStores/*path",
+                post(gemini_native_resource),
+            )
+            .route(
+                "/v1beta/interactions",
+                post(gemini_native_interaction_create),
+            )
+            .route(
+                "/v1beta/interactions/*interaction",
+                get(gemini_native_interaction_get),
+            )
             .with_state(state);
 
         let handle = tokio::spawn(async move {
@@ -214,4 +244,120 @@ async fn messages(State(state): State<MockState>, Json(body): Json<Value>) -> Re
         "stop_reason": "end_turn",
     }))
     .into_response()
+}
+
+async fn gemini_native_models(State(state): State<MockState>, headers: HeaderMap) -> Response {
+    Json(json!({
+        "models": [
+            {
+                "name": format!("models/{}-native-model", state.name),
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]
+            }
+        ],
+        "auth": gemini_native_auth_snapshot(&headers)
+    }))
+    .into_response()
+}
+
+async fn gemini_native_model(
+    State(state): State<MockState>,
+    headers: HeaderMap,
+    axum::extract::Path(model_action): axum::extract::Path<String>,
+) -> Response {
+    Json(json!({
+        "name": format!("models/{}", model_action),
+        "provider": state.name,
+        "auth": gemini_native_auth_snapshot(&headers)
+    }))
+    .into_response()
+}
+
+async fn gemini_native_generate(
+    State(state): State<MockState>,
+    headers: HeaderMap,
+    axum::extract::Path(model_action): axum::extract::Path<String>,
+    body: Bytes,
+) -> Response {
+    let body_json = serde_json::from_slice::<Value>(&body).unwrap_or_else(|_| json!(null));
+    if model_action.ends_with(":streamGenerateContent") {
+        let mut response = Response::new(axum::body::Body::from(format!(
+            "data: {}\n\n",
+            json!({
+                "candidates": [{"content": {"parts": [{"text": format!("stream from {}", state.name)}], "role": "model"}, "groundingMetadata": {"searchEntryPoint": {"renderedContent": "mock-rendered"}}}],
+                "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 7, "totalTokenCount": 18},
+                "auth": gemini_native_auth_snapshot(&headers),
+                "request": body_json
+            })
+        )));
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        return response;
+    }
+
+    Json(json!({
+        "candidates": [{"content": {"parts": [{"text": format!("response from {}", state.name)}, {"executableCode": {"language": "PYTHON", "code": "print('ok')"}}, {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "ok"}}], "role": "model"}, "groundingMetadata": {"searchEntryPoint": {"renderedContent": "mock-rendered"}}, "urlContextMetadata": {"urlMetadata": [{"retrievedUrl": "https://example.com"}]}}],
+        "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 7, "totalTokenCount": 18},
+        "auth": gemini_native_auth_snapshot(&headers),
+        "modelAction": model_action,
+        "request": body_json
+    }))
+    .into_response()
+}
+
+async fn gemini_native_resource(
+    State(state): State<MockState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    Json(json!({
+        "name": format!("fileSearchStores/{}", state.name),
+        "done": true,
+        "auth": gemini_native_auth_snapshot(&headers),
+        "contentType": headers.get(axum::http::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()),
+        "uploadProtocol": headers.get("x-goog-upload-protocol").and_then(|value| value.to_str().ok()),
+        "body": String::from_utf8_lossy(&body)
+    }))
+    .into_response()
+}
+
+async fn gemini_native_interaction_create(
+    State(state): State<MockState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let body_json = serde_json::from_slice::<Value>(&body).unwrap_or_else(|_| json!(null));
+    Json(json!({
+        "id": format!("interactions/{}-research-1", state.name),
+        "status": "in_progress",
+        "agent": body_json.get("agent").cloned().unwrap_or_else(|| json!("deep-research-pro-preview")),
+        "auth": gemini_native_auth_snapshot(&headers),
+        "request": body_json
+    }))
+    .into_response()
+}
+
+async fn gemini_native_interaction_get(
+    State(state): State<MockState>,
+    headers: HeaderMap,
+    axum::extract::Path(interaction): axum::extract::Path<String>,
+) -> Response {
+    Json(json!({
+        "id": interaction,
+        "status": "completed",
+        "outputs": [{"type": "text", "text": format!("research from {}", state.name)}],
+        "auth": gemini_native_auth_snapshot(&headers)
+    }))
+    .into_response()
+}
+
+fn gemini_native_auth_snapshot(headers: &HeaderMap) -> Value {
+    json!({
+        "xGoogApiKey": headers.get("x-goog-api-key").and_then(|value| value.to_str().ok()),
+        "authorization": headers.get("authorization").and_then(|value| value.to_str().ok()),
+        "xApiKey": headers.get("x-api-key").and_then(|value| value.to_str().ok()),
+        "customGoogHeader": headers.get("x-goog-fieldmask").and_then(|value| value.to_str().ok())
+    })
 }
