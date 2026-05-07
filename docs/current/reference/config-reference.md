@@ -191,6 +191,17 @@ Channels 定义上游 LLM 提供商的连接配置。
 | `model_map` | object | 否 | 模型映射：key = 请求模型名，value = 实际提供商模型 |
 | `timeouts` | object | 否 | 通道级别超时覆盖 |
 
+### Gemini native pass-through
+
+`provider_type: "gemini"` 同时支持两类入口：
+
+- OpenAI/Anthropic 兼容入口：`/v1/chat/completions`, `/v1/messages` 等，仍使用 Gemini 的 OpenAI compatibility surface。
+- Gemini 原生入口：`/gemini/v1beta/...` 和 `/gemini/upload/v1beta/...`，Apex 只做鉴权、路由、观测、重试和上游 `x-goog-api-key` 注入，不改写 Gemini 原生 JSON 字段。
+
+原生入口会从路径模型名路由，例如 `/gemini/v1beta/models/gemini-3-flash-preview:generateContent` 使用 `gemini-3-flash-preview` 做 router/team policy 匹配。模型列表和 File Search Store 这类无模型资源使用合成路由键 `gemini-native`；严格配置 `allowed_models` 的团队需要加入 `gemini-native` 或使用通配符。
+
+Gemini channel 的 `base_url` 可以是 `https://generativelanguage.googleapis.com/v1beta`，也可以保留旧的 `https://generativelanguage.googleapis.com/v1beta/openai`；原生入口会在转发前去掉末尾 `/openai`。
+
 ---
 
 ## Routers 路由规则

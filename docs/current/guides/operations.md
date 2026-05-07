@@ -57,6 +57,22 @@ Apex 使用 **Team (团队)** 作为鉴权和治理的核心单元。
 - **Router**: 流量入口，负责将请求分发给后端 Channel。
 - **Channel**: 上游 Provider 的连接通道 (包含 API Key, Base URL 等)。
 
+### Gemini 原生工具入口
+
+当 channel 配置为 `provider_type: "gemini"` 时，同一个 channel 可同时服务 OpenAI/Anthropic 兼容入口和 Gemini 原生入口。原生入口使用 `/gemini/...` 前缀，例如：
+
+```bash
+curl http://127.0.0.1:12356/gemini/v1beta/models/gemini-3-flash-preview:generateContent \
+  -H "Authorization: Bearer sk-ap-team" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [{"role": "user", "parts": [{"text": "Search and summarize the current docs."}]}],
+    "tools": [{"google_search": {}}, {"url_context": {}}, {"code_execution": {}}]
+  }'
+```
+
+Apex 会剥离客户端的 gateway 鉴权头，向上游注入 channel 的 `x-goog-api-key`，并保留 Gemini 原生字段，例如 `tools`, `toolConfig`, `generationConfig`, `groundingMetadata`, URL Context 元数据和 Code Execution parts。模型列表和 File Search Store 资源路由使用合成模型键 `gemini-native`，因此严格限制模型的团队需要把 `gemini-native` 加入 `allowed_models`。
+
 ## 使用流程
 
 ### 1. 初始化配置

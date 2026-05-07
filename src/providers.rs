@@ -21,6 +21,8 @@ pub enum RouteKind {
     Openai,
     /// Client expects Anthropic format
     Anthropic,
+    /// Client expects Gemini native REST payloads and responses
+    GeminiNative,
 }
 
 /// Represents a request prepared for sending to the upstream provider.
@@ -108,6 +110,7 @@ pub trait ProviderAdapter: Send + Sync {
 /// Registry for all available provider adapters.
 pub struct ProviderRegistry {
     adapters: HashMap<ProviderType, Box<dyn ProviderAdapter>>,
+    gemini_native: Box<dyn ProviderAdapter>,
     fallback: Box<dyn ProviderAdapter>,
 }
 
@@ -136,11 +139,22 @@ impl ProviderRegistry {
 
         Self {
             adapters,
+            gemini_native: Box::new(GeminiNativeAdapter),
             fallback: Box::new(DefaultAdapter),
         }
     }
 
+    #[allow(dead_code)]
     pub fn adapter(&self, channel: &Channel) -> &dyn ProviderAdapter {
+        self.adapter_for(channel, RouteKind::Openai)
+    }
+
+    pub fn adapter_for(&self, channel: &Channel, route: RouteKind) -> &dyn ProviderAdapter {
+        if channel.provider_type == ProviderType::Gemini && matches!(route, RouteKind::GeminiNative)
+        {
+            return self.gemini_native.as_ref();
+        }
+
         self.adapters
             .get(&channel.provider_type)
             .map(|item| item.as_ref())
@@ -160,12 +174,16 @@ pub fn prepare_request(
     headers: &HeaderMap,
     body: &Bytes,
 ) -> anyhow::Result<PreparedRequest> {
+    if matches!(route, RouteKind::GeminiNative) {
+        return prepare_gemini_native_request(channel, base_url, path, query, headers, body);
+    }
+
     let base_url = if matches!(route, RouteKind::Anthropic) {
         channel.anthropic_base_url.as_deref().unwrap_or(base_url)
     } else {
         base_url
     };
-    let adapter = registry.adapter(channel);
+    let adapter = registry.adapter_for(channel, route);
     let normalized_path = path.trim_start_matches('/').to_string();
     let mapped_path = adapter.map_path(route, base_url, &normalized_path);
     let mapped_query = adapter.map_query(route, query);
@@ -174,6 +192,32 @@ pub fn prepare_request(
     let mut headers = build_headers(headers, channel);
     adapter.apply_auth_headers(route, &mut headers, &channel.api_key, base_url);
     Ok(PreparedRequest { url, body, headers })
+}
+
+pub fn prepare_gemini_native_request(
+    channel: &Channel,
+    base_url: &str,
+    path: &str,
+    query: Option<&str>,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> anyhow::Result<PreparedRequest> {
+    let native_base = gemini_native_base_url(base_url);
+    let normalized_path = path
+        .trim_start_matches('/')
+        .strip_prefix("gemini/")
+        .unwrap_or_else(|| path.trim_start_matches('/'));
+    let mapped_path = map_gemini_native_model_path(normalized_path, &channel.model_map);
+    let target_base = gemini_native_target_base(&native_base, &mapped_path);
+    let url = build_url(&target_base, &mapped_path, query)?;
+    let mut headers = build_headers(headers, channel);
+    apply_bearer_auth(&mut headers, &channel.api_key, "x-goog-api-key");
+
+    Ok(PreparedRequest {
+        url,
+        body: body.clone(),
+        headers,
+    })
 }
 
 // --- Helper Functions ---
@@ -239,6 +283,44 @@ fn should_forward_header(name: &HeaderName) -> bool {
         && !lower.starts_with("x-stainless-")
 }
 
+pub fn gemini_native_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    trimmed
+        .strip_suffix("/openai")
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn gemini_native_target_base(native_base: &str, mapped_path: &str) -> String {
+    let base = native_base.trim_end_matches('/');
+    if mapped_path.starts_with("upload/v1beta/")
+        && let Some(root) = base.strip_suffix("/v1beta")
+    {
+        return root.to_string();
+    }
+
+    base.to_string()
+}
+
+fn map_gemini_native_model_path(path: &str, model_map: &Option<HashMap<String, String>>) -> String {
+    let Some(model_map) = model_map else {
+        return path.to_string();
+    };
+
+    let Some(rest) = path.strip_prefix("v1beta/models/") else {
+        return path.to_string();
+    };
+    let Some(model_end) = rest.find(':').or_else(|| rest.find('/')) else {
+        let mapped = model_map.get(rest).map(String::as_str).unwrap_or(rest);
+        return format!("v1beta/models/{mapped}");
+    };
+
+    let model = &rest[..model_end];
+    let suffix = &rest[model_end..];
+    let mapped = model_map.get(model).map(String::as_str).unwrap_or(model);
+    format!("v1beta/models/{mapped}{suffix}")
+}
+
 fn build_url(base: &str, path: &str, query: Option<&str>) -> anyhow::Result<Url> {
     let base = if base.ends_with('/') {
         base.to_string()
@@ -248,8 +330,11 @@ fn build_url(base: &str, path: &str, query: Option<&str>) -> anyhow::Result<Url>
     let mut url = Url::parse(&base)?;
 
     // Deduplicate 'v1' if base ends with it and path starts with it
-    let path = if base.trim_end_matches('/').ends_with("/v1") && path.starts_with("v1/") {
+    let base_trimmed = base.trim_end_matches('/');
+    let path = if base_trimmed.ends_with("/v1") && path.starts_with("v1/") {
         &path[3..]
+    } else if base_trimmed.ends_with("/v1beta") && path.starts_with("v1beta/") {
+        &path[7..]
     } else {
         path
     };
@@ -531,7 +616,9 @@ impl ProviderAdapter for CustomDualAdapter {
                     headers.insert(name, value);
                 }
             }
-            RouteKind::Openai => apply_bearer_auth(headers, api_key, "authorization"),
+            RouteKind::Openai | RouteKind::GeminiNative => {
+                apply_bearer_auth(headers, api_key, "authorization")
+            }
         }
     }
 }
@@ -639,6 +726,37 @@ impl ProviderAdapter for GeminiAdapter {
     }
 }
 
+/// Adapter for Gemini native REST pass-through routes.
+struct GeminiNativeAdapter;
+
+impl ProviderAdapter for GeminiNativeAdapter {
+    fn map_path(&self, _route: RouteKind, _base_url: &str, path: &str) -> String {
+        path.trim_start_matches('/')
+            .strip_prefix("gemini/")
+            .unwrap_or_else(|| path.trim_start_matches('/'))
+            .to_string()
+    }
+
+    fn transform_body(
+        &self,
+        _route: RouteKind,
+        body: &Bytes,
+        _model_map: &Option<HashMap<String, String>>,
+    ) -> Bytes {
+        body.clone()
+    }
+
+    fn apply_auth_headers(
+        &self,
+        _route: RouteKind,
+        headers: &mut HeaderMap,
+        api_key: &str,
+        _base_url: &str,
+    ) {
+        apply_bearer_auth(headers, api_key, "x-goog-api-key");
+    }
+}
+
 /// Adapter for OpenRouter.
 ///
 /// OpenRouter supports both OpenAI-compatible routes and Anthropic-compatible
@@ -716,7 +834,9 @@ impl ProviderAdapter for OllamaAdapter {
                     headers.insert(name, value);
                 }
             }
-            RouteKind::Openai => apply_bearer_auth(headers, api_key, "authorization"),
+            RouteKind::Openai | RouteKind::GeminiNative => {
+                apply_bearer_auth(headers, api_key, "authorization")
+            }
         }
     }
 }
@@ -750,7 +870,7 @@ impl DualProtocolAdapter {
                     base.to_string()
                 }
             }
-            RouteKind::Openai => {
+            RouteKind::Openai | RouteKind::GeminiNative => {
                 if let Some(prefix) = base.strip_suffix("/anthropic") {
                     format!("{}/v1", prefix)
                 } else {
@@ -767,7 +887,9 @@ impl ProviderAdapter for DualProtocolAdapter {
 
         let suffix = match route {
             RouteKind::Anthropic => self.anthropic.map_path(route, &target_base, path),
-            _ => self.openai.map_path(route, &target_base, path),
+            RouteKind::Openai | RouteKind::GeminiNative => {
+                self.openai.map_path(route, &target_base, path)
+            }
         };
 
         // If we modified the base URL, we must return an absolute URL to override the original base
@@ -817,7 +939,9 @@ impl ProviderAdapter for DualProtocolAdapter {
         // Use native adapter for the route
         match route {
             RouteKind::Anthropic => self.anthropic.transform_body(route, body, model_map),
-            _ => self.openai.transform_body(route, body, model_map),
+            RouteKind::Openai | RouteKind::GeminiNative => {
+                self.openai.transform_body(route, body, model_map)
+            }
         }
     }
 
@@ -832,7 +956,7 @@ impl ProviderAdapter for DualProtocolAdapter {
             RouteKind::Anthropic => self
                 .anthropic
                 .apply_auth_headers(route, headers, api_key, base_url),
-            _ => self
+            RouteKind::Openai | RouteKind::GeminiNative => self
                 .openai
                 .apply_auth_headers(route, headers, api_key, base_url),
         }
@@ -1311,6 +1435,118 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&prepared.body).unwrap();
         assert_eq!(value["stream"], true);
         assert_eq!(value["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn gemini_native_strips_openai_base_and_injects_google_api_key() {
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "gemini".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai/".to_string(),
+            api_key: "gemini-key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+        let body = Bytes::from_static(br#"{"contents":[]}"#);
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::GeminiNative,
+            &channel.base_url,
+            "/gemini/v1beta/models/gemini-test:generateContent",
+            Some("alt=sse"),
+            &headers,
+            &body,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent?alt=sse"
+        );
+        assert_eq!(prepared.body, body);
+        assert_eq!(
+            prepared
+                .headers
+                .get("x-goog-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("gemini-key")
+        );
+        assert!(!prepared.headers.contains_key("authorization"));
+    }
+
+    #[test]
+    fn gemini_native_model_map_rewrites_only_path_model() {
+        let registry = ProviderRegistry::new();
+        let mut model_map = HashMap::new();
+        model_map.insert("apex-gemini".to_string(), "gemini-test".to_string());
+        let channel = Channel {
+            name: "gemini".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            api_key: "gemini-key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: Some(model_map),
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+        let body = Bytes::from_static(br#"{"contents":[],"model":"leave-alone"}"#);
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::GeminiNative,
+            &channel.base_url,
+            "/gemini/v1beta/models/apex-gemini:generateContent",
+            None,
+            &headers,
+            &body,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent"
+        );
+        assert_eq!(prepared.body, body);
+    }
+
+    #[test]
+    fn gemini_native_upload_targets_upload_root_when_base_has_v1beta() {
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "gemini".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+            api_key: "gemini-key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        };
+        let headers = HeaderMap::new();
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::GeminiNative,
+            &channel.base_url,
+            "/gemini/upload/v1beta/fileSearchStores/store-1:uploadToFileSearchStore",
+            None,
+            &headers,
+            &Bytes::from_static(b"upload-body"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://generativelanguage.googleapis.com/upload/v1beta/fileSearchStores/store-1:uploadToFileSearchStore"
+        );
     }
 
     #[test]

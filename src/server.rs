@@ -17,9 +17,11 @@ use crate::web_assets::{WebAssetError, load_web_asset};
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{OriginalUri, State};
-use axum::http::{HeaderMap, HeaderValue, Request, Response as HttpResponse, StatusCode, Uri};
+use axum::http::{
+    HeaderMap, HeaderValue, Method, Request, Response as HttpResponse, StatusCode, Uri,
+};
 use axum::response::{Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use chrono::{Duration as ChronoDuration, Local, NaiveDateTime};
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::json;
@@ -46,16 +48,11 @@ pub struct AppState {
     pub gemini_replay: Arc<GeminiAnthropicReplayCache>,
     pub client: reqwest::Client,
     pub usage_logger: Arc<UsageLogger>,
-    pub mcp_server: Arc<McpServer>,
     pub database: Arc<Database>,
     pub web_dir: String,
 }
 
 pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 10 * 1024 * 1024;
-
-use crate::mcp::server::{McpServer, streamable_http_handler};
-
-// MCP is integrated into main server, controlled by global.enable_mcp config
 
 pub async fn run_server(path: PathBuf) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(&path)?;
@@ -165,9 +162,6 @@ async fn watch_config(path: PathBuf, state: Arc<AppState>) -> notify::Result<()>
                 // Invalidate router cache
                 state.selector.invalidate_cache();
 
-                // Notify MCP clients about config change
-                state.mcp_server.update_config().await;
-
                 info!("Config reloaded successfully");
             }
             Err(e) => {
@@ -202,7 +196,6 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
     let usage_logger = Arc::new(UsageLogger::new(database.clone()));
     let web_dir = config.web_dir.clone();
     let config_arc = Arc::new(RwLock::new(config));
-    let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
 
     Ok(Arc::new(AppState {
         config: config_arc,
@@ -218,7 +211,6 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
         )),
         client,
         usage_logger,
-        mcp_server,
         database,
         web_dir,
     }))
@@ -226,7 +218,6 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
 
 pub fn build_app(state: Arc<AppState>) -> Router {
     let config = state.config.read().unwrap();
-    let mcp_enabled = config.global.enable_mcp;
     let metrics_enabled = config.metrics.enabled;
     let cors_allowed_origins = config.global.cors_allowed_origins.clone();
     drop(config);
@@ -259,24 +250,18 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             team_auth,
         ));
 
-    // MCP Routes (Protected by Global API Key) - Streamable HTTP Transport (MCP 2025-11-25)
-    let mcp_routes = if mcp_enabled {
-        Some(
-            Router::new()
-                .route(
-                    "/mcp",
-                    get(streamable_http_handler)
-                        .post(streamable_http_handler)
-                        .delete(streamable_http_handler),
-                )
-                .layer(axum::middleware::from_fn_with_state(
-                    state.mcp_server.as_ref().clone(),
-                    crate::mcp::server::mcp_auth_guard,
-                )),
-        )
-    } else {
-        None
-    };
+    let gemini_native_routes = Router::new()
+        .route("/gemini/*path", get(handle_gemini_native))
+        .route("/gemini/*path", post(handle_gemini_native))
+        .route("/gemini/*path", delete(handle_gemini_native))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            team_policy,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            team_auth,
+        ));
 
     // Admin/System Routes (no auth required)
     let admin_routes = Router::new()
@@ -308,11 +293,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     };
 
     // Combine all routes using merge (each has its own middleware)
-    let mut app = model_routes.merge(admin_routes);
-
-    if let Some(mcp) = mcp_routes {
-        app = app.merge(mcp);
-    }
+    let mut app = model_routes.merge(gemini_native_routes).merge(admin_routes);
 
     if let Some(metrics) = metrics_routes {
         app = app.merge(metrics);
@@ -1552,6 +1533,34 @@ async fn handle_anthropic(
     process_request(state, req, RouteKind::Anthropic, None, None).await
 }
 
+async fn handle_gemini_native(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(path): axum::extract::Path<String>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let route = match validate_gemini_native_route(req.method(), &path) {
+        Some(route) => route,
+        None => {
+            return gemini_native_error_response(
+                StatusCode::NOT_FOUND,
+                "Gemini native endpoint is not allowlisted",
+                "NOT_FOUND",
+            );
+        }
+    };
+
+    let (mut parts, body) = req.into_parts();
+    let routing_model = route.routing_model;
+    parts
+        .extensions
+        .insert(OriginalModelName(routing_model.clone()));
+    let req = Request::from_parts(parts, body);
+    if route.direct_pass {
+        return process_gemini_native_direct_pass(state, req, routing_model).await;
+    }
+    process_request(state, req, RouteKind::GeminiNative, None, None).await
+}
+
 async fn handle_models(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response<Body> {
     let (parts, _body) = req.into_parts();
     let headers = &parts.headers;
@@ -1748,8 +1757,134 @@ pub(crate) fn error_response(status: StatusCode, message: &str) -> Response<Body
         .unwrap()
 }
 
+struct GeminiNativeRoute {
+    routing_model: String,
+    direct_pass: bool,
+}
+
+fn validate_gemini_native_route(method: &Method, path: &str) -> Option<GeminiNativeRoute> {
+    let path = path.trim_start_matches('/');
+    let segments = path.split('/').collect::<Vec<_>>();
+
+    match (method, segments.as_slice()) {
+        (&Method::GET, ["v1beta", "models"]) => Some(gemini_native_resource_route()),
+        (&Method::GET, ["v1beta", "models", model]) if !model.contains(':') => {
+            Some(gemini_native_model_route(model))
+        }
+        (&Method::POST, ["v1beta", "models", model_action])
+            if model_action.ends_with(":generateContent")
+                || model_action.ends_with(":streamGenerateContent") =>
+        {
+            model_action
+                .split_once(':')
+                .filter(|(model, _)| !model.is_empty())
+                .map(|(model, _)| gemini_native_model_route(model))
+        }
+        (&Method::GET, ["v1beta", "fileSearchStores"])
+        | (&Method::POST, ["v1beta", "fileSearchStores"]) => Some(gemini_native_resource_route()),
+        (&Method::GET, ["v1beta", "fileSearchStores", store])
+        | (&Method::DELETE, ["v1beta", "fileSearchStores", store])
+            if !store.contains(':') =>
+        {
+            Some(gemini_native_resource_route())
+        }
+        (&Method::POST, ["v1beta", "fileSearchStores", store_action])
+        | (&Method::POST, ["upload", "v1beta", "fileSearchStores", store_action])
+            if store_action.ends_with(":uploadToFileSearchStore") =>
+        {
+            Some(GeminiNativeRoute {
+                routing_model: "gemini-native".to_string(),
+                direct_pass: true,
+            })
+        }
+        (&Method::GET, ["v1beta", "fileSearchStores", store, "operations", operation])
+        | (
+            &Method::GET,
+            [
+                "v1beta",
+                "fileSearchStores",
+                store,
+                "upload",
+                "operations",
+                operation,
+            ],
+        ) if !store.is_empty() && !operation.is_empty() => Some(gemini_native_resource_route()),
+        (&Method::POST, ["v1beta", "interactions"]) => Some(gemini_native_direct_pass_route()),
+        (&Method::GET, ["v1beta", "interactions", interaction]) if !interaction.is_empty() => {
+            Some(gemini_native_direct_pass_route())
+        }
+        _ => None,
+    }
+}
+
+fn gemini_native_resource_route() -> GeminiNativeRoute {
+    GeminiNativeRoute {
+        routing_model: "gemini-native".to_string(),
+        direct_pass: false,
+    }
+}
+
+fn gemini_native_direct_pass_route() -> GeminiNativeRoute {
+    GeminiNativeRoute {
+        routing_model: "gemini-native".to_string(),
+        direct_pass: true,
+    }
+}
+
+fn gemini_native_model_route(model: &str) -> GeminiNativeRoute {
+    GeminiNativeRoute {
+        routing_model: model.to_string(),
+        direct_pass: false,
+    }
+}
+
+fn gemini_native_resource_router_is_deterministic(
+    router: &crate::config::Router,
+    model: &str,
+) -> bool {
+    router.rules.iter().any(|rule| {
+        crate::config::TeamPolicy {
+            allowed_routers: Vec::new(),
+            allowed_models: Some(rule.match_spec.models.clone()),
+            rate_limit: None,
+        }
+        .is_model_allowed(model)
+            && rule.strategy == "priority"
+            && rule.channels.len() == 1
+    })
+}
+
+fn gemini_native_error_response(
+    status: StatusCode,
+    message: &str,
+    gemini_status: &str,
+) -> Response<Body> {
+    let body = json!({
+        "error": {
+            "code": status.as_u16(),
+            "message": message,
+            "status": gemini_status,
+        }
+    });
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 fn protocol_error_response(route: RouteKind, status: StatusCode, message: &str) -> Response<Body> {
-    if matches!(route, RouteKind::Anthropic) {
+    if matches!(route, RouteKind::GeminiNative) {
+        let gemini_status = match status {
+            StatusCode::NOT_FOUND => "NOT_FOUND",
+            StatusCode::FORBIDDEN => "PERMISSION_DENIED",
+            StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
+            StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
+            StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
+            _ => "INVALID_ARGUMENT",
+        };
+        gemini_native_error_response(status, message, gemini_status)
+    } else if matches!(route, RouteKind::Anthropic) {
         let body = json!({
             "type": "error",
             "error": {
@@ -1904,7 +2039,7 @@ async fn process_request(
         Ok(b) => b,
         Err(e) => {
             tracing::error!("Request Failed: Failed to read body: {}", e);
-            return error_response(StatusCode::BAD_REQUEST, &e.to_string());
+            return protocol_error_response(route, StatusCode::BAD_REQUEST, &e.to_string());
         }
     };
 
@@ -1967,7 +2102,7 @@ async fn process_request(
         // Team Flow
         let team = config.teams.iter().find(|t| t.id == ctx.team_id);
         if team.is_none() {
-            return error_response(StatusCode::UNAUTHORIZED, "Team not found");
+            return protocol_error_response(route, StatusCode::UNAUTHORIZED, "Team not found");
         }
         let team = team.unwrap();
 
@@ -1978,7 +2113,11 @@ async fn process_request(
                 "Policy Failed: Model '{}' not allowed by team policy",
                 model_name_str
             );
-            return error_response(StatusCode::FORBIDDEN, "Model not allowed by team policy");
+            return protocol_error_response(
+                route,
+                StatusCode::FORBIDDEN,
+                "Model not allowed by team policy",
+            );
         }
 
         // Check Allowed Routers (Mandatory)
@@ -1988,7 +2127,8 @@ async fn process_request(
                 "Policy Failed: No allowed routers configured for team '{}'",
                 ctx.team_id
             );
-            return error_response(
+            return protocol_error_response(
+                route,
                 StatusCode::FORBIDDEN,
                 "No allowed routers configured for team",
             );
@@ -2020,7 +2160,8 @@ async fn process_request(
                     "Router Resolution Failed: No matching router found for model '{}' in allowed routers",
                     model_name_str
                 );
-                return error_response(
+                return protocol_error_response(
+                    route,
                     StatusCode::NOT_FOUND,
                     "No matching router found for model in allowed routers",
                 );
@@ -2029,7 +2170,11 @@ async fn process_request(
     } else {
         // Global Auth Flow (Legacy/Admin)
         if let Err(resp) = enforce_global_auth(&config, &headers) {
-            return resp;
+            return if matches!(route, RouteKind::GeminiNative) {
+                protocol_error_response(route, StatusCode::UNAUTHORIZED, "unauthorized")
+            } else {
+                resp
+            };
         }
 
         // Try to find ANY router that handles the model
@@ -2052,7 +2197,8 @@ async fn process_request(
                     "Router Resolution Failed: No matching router found for model '{}'",
                     model_name_str
                 );
-                return error_response(
+                return protocol_error_response(
+                    route,
                     StatusCode::BAD_REQUEST,
                     "No matching router found for model",
                 );
@@ -2061,8 +2207,18 @@ async fn process_request(
     };
 
     let Some(router) = config.routers.iter().find(|r| r.name == router_name) else {
-        return error_response(StatusCode::NOT_FOUND, "router not found");
+        return protocol_error_response(route, StatusCode::NOT_FOUND, "router not found");
     };
+    if matches!(route, RouteKind::GeminiNative)
+        && model_name_str == "gemini-native"
+        && !gemini_native_resource_router_is_deterministic(router, model_name_str)
+    {
+        return protocol_error_response(
+            route,
+            StatusCode::BAD_REQUEST,
+            "Gemini native resource routes require a priority router rule with exactly one channel",
+        );
+    }
 
     tracing::info!("Router Resolved: {}", router.name);
     tracing::Span::current().record("router_name", &router.name);
@@ -2137,12 +2293,17 @@ async fn process_request(
             None,
             None,
         );
-        return error_response(StatusCode::BAD_GATEWAY, "no channels configured or matched");
+        return protocol_error_response(
+            route,
+            StatusCode::BAD_GATEWAY,
+            "no channels configured or matched",
+        );
     }
 
     let route_label = match route {
         RouteKind::Openai => "openai",
         RouteKind::Anthropic => "anthropic",
+        RouteKind::GeminiNative => "gemini_native",
     };
     state
         .metrics
@@ -2155,11 +2316,17 @@ async fn process_request(
 
     // 4. Loop channels
     let retry_on = &config.global.retries.retry_on_status;
-    let max_attempts = config.global.retries.max_attempts.max(1);
 
     // Extract path and query for preparation
     let path = path_override.unwrap_or_else(|| parts.uri.path().to_string());
     let query = parts.uri.query().map(|s| s.to_string());
+    let is_gemini_native_upload = matches!(route, RouteKind::GeminiNative)
+        && (path.contains(":uploadToFileSearchStore") || path.starts_with("/gemini/upload/"));
+    let max_attempts = if is_gemini_native_upload {
+        1
+    } else {
+        config.global.retries.max_attempts.max(1)
+    };
 
     let mut index = 0;
     let mut fallback_triggered = false;
@@ -2167,6 +2334,40 @@ async fn process_request(
     while index < channels.len() {
         let channel = channels[index];
         tracing::Span::current().record("channel_name", &channel.name);
+
+        if matches!(route, RouteKind::GeminiNative)
+            && channel.provider_type != crate::config::ProviderType::Gemini
+        {
+            let message = format!(
+                "Gemini native route resolved to non-Gemini channel '{}'",
+                channel.name
+            );
+            tracing::warn!("Request Rejected: {}", message);
+            state
+                .access_audit
+                .audit(&channel.provider_type, route, false);
+            state
+                .metrics
+                .error_total
+                .with_label_values(&[route_label, &router_name])
+                .inc();
+            state.database.log_error(route_label, &router_name);
+            state.usage_logger.log_failure(
+                request_id.as_deref(),
+                &team_id,
+                &router_name,
+                matched_rule.as_deref(),
+                &channel.name,
+                model_name_str,
+                None,
+                fallback_triggered,
+                StatusCode::BAD_GATEWAY.as_u16() as i64,
+                &message,
+                None,
+                None,
+            );
+            return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
+        }
 
         if index > 0 {
             tracing::warn!(
@@ -2269,11 +2470,11 @@ async fn process_request(
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!("Upstream Request Build Failed: {}", e);
-                    return error_response(StatusCode::BAD_REQUEST, &e.to_string());
+                    return protocol_error_response(route, StatusCode::BAD_REQUEST, &e.to_string());
                 }
             };
 
-            let adapter = state.providers.adapter(channel);
+            let adapter = state.providers.adapter_for(channel, route);
 
             let start = std::time::Instant::now();
 
@@ -2288,7 +2489,11 @@ async fn process_request(
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!("Upstream Request Build Failed: {}", e);
-                    return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+                    return protocol_error_response(
+                        route,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &e.to_string(),
+                    );
                 }
             };
 
@@ -2528,7 +2733,261 @@ async fn process_request(
         None,
     );
 
-    error_response(StatusCode::BAD_GATEWAY, "all channels failed")
+    protocol_error_response(route, StatusCode::BAD_GATEWAY, "all channels failed")
+}
+
+async fn process_gemini_native_direct_pass(
+    state: Arc<AppState>,
+    req: Request<Body>,
+    routing_model: String,
+) -> Response<Body> {
+    let (parts, body) = req.into_parts();
+    let route = RouteKind::GeminiNative;
+    let route_label = "gemini_native";
+    let request_id = request_id_from_parts(&parts);
+    let team_id = parts
+        .extensions
+        .get::<crate::middleware::auth::TeamContext>()
+        .map(|ctx| ctx.team_id.clone())
+        .unwrap_or_else(|| "global".to_string());
+    let headers = parts.headers.clone();
+    let config = state.config.read().unwrap().clone();
+
+    let router_name = if let Some(ctx) = parts.extensions.get::<TeamContext>() {
+        let Some(team) = config.teams.iter().find(|team| team.id == ctx.team_id) else {
+            return protocol_error_response(route, StatusCode::UNAUTHORIZED, "Team not found");
+        };
+
+        if !team.policy.is_model_allowed(&routing_model) {
+            return protocol_error_response(
+                route,
+                StatusCode::FORBIDDEN,
+                "Model not allowed by team policy",
+            );
+        }
+
+        team.policy
+            .allowed_routers
+            .iter()
+            .find(|router_name| {
+                config
+                    .routers
+                    .iter()
+                    .find(|router| router.name == **router_name)
+                    .and_then(|router| state.selector.select_channel(router, &routing_model))
+                    .is_some()
+            })
+            .cloned()
+    } else {
+        if let Err(_resp) = enforce_global_auth(&config, &headers) {
+            return protocol_error_response(route, StatusCode::UNAUTHORIZED, "unauthorized");
+        }
+        config
+            .routers
+            .iter()
+            .find(|router| {
+                state
+                    .selector
+                    .select_channel(router, &routing_model)
+                    .is_some()
+            })
+            .map(|router| router.name.clone())
+    };
+
+    let Some(router_name) = router_name else {
+        return protocol_error_response(
+            route,
+            StatusCode::NOT_FOUND,
+            "No matching router found for model",
+        );
+    };
+    let Some(router) = config
+        .routers
+        .iter()
+        .find(|router| router.name == router_name)
+    else {
+        return protocol_error_response(route, StatusCode::NOT_FOUND, "router not found");
+    };
+    if !gemini_native_resource_router_is_deterministic(router, &routing_model) {
+        return protocol_error_response(
+            route,
+            StatusCode::BAD_REQUEST,
+            "Gemini native resource routes require a priority router rule with exactly one channel",
+        );
+    }
+    let Some(selection) = state
+        .selector
+        .select_channel_with_rule(router, &routing_model)
+    else {
+        return protocol_error_response(
+            route,
+            StatusCode::BAD_GATEWAY,
+            "no channels configured or matched",
+        );
+    };
+    let matched_rule = selection.matched_rule.clone();
+    let Some(channel) = config
+        .channels
+        .iter()
+        .find(|channel| channel.name == selection.channel_name)
+    else {
+        return protocol_error_response(
+            route,
+            StatusCode::BAD_GATEWAY,
+            "no channels configured or matched",
+        );
+    };
+
+    if channel.provider_type != crate::config::ProviderType::Gemini {
+        let message = format!(
+            "Gemini native route resolved to non-Gemini channel '{}'",
+            channel.name
+        );
+        state.usage_logger.log_failure(
+            request_id.as_deref(),
+            &team_id,
+            &router_name,
+            matched_rule.as_deref(),
+            &channel.name,
+            &routing_model,
+            None,
+            false,
+            StatusCode::BAD_GATEWAY.as_u16() as i64,
+            &message,
+            None,
+            None,
+        );
+        return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
+    }
+
+    state
+        .metrics
+        .request_total
+        .with_label_values(&[route_label, &router_name])
+        .inc();
+    state.database.log_request(route_label, &router_name);
+
+    if !state.rate_limiter.check(&channel.provider_type) {
+        return protocol_error_response(route, StatusCode::TOO_MANY_REQUESTS, "rate limited");
+    }
+
+    let path = parts.uri.path().to_string();
+    let query = parts.uri.query().map(|value| value.to_string());
+    let prepared = match crate::providers::prepare_gemini_native_request(
+        channel,
+        &channel.base_url,
+        &path,
+        query.as_deref(),
+        &headers,
+        &Bytes::new(),
+    ) {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            return protocol_error_response(route, StatusCode::BAD_REQUEST, &err.to_string());
+        }
+    };
+
+    let start = std::time::Instant::now();
+    let reqwest_body = reqwest::Body::wrap_stream(body.into_data_stream());
+    let req_built = match state
+        .client
+        .request(parts.method.clone(), prepared.url)
+        .headers(prepared.headers)
+        .body(reqwest_body)
+        .build()
+    {
+        Ok(request) => request,
+        Err(err) => {
+            return protocol_error_response(
+                route,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &err.to_string(),
+            );
+        }
+    };
+
+    let resp = match state.client.execute(req_built).await {
+        Ok(resp) => resp,
+        Err(err) => {
+            let message = format_error_chain(&err);
+            state.usage_logger.log_failure(
+                request_id.as_deref(),
+                &team_id,
+                &router_name,
+                matched_rule.as_deref(),
+                &channel.name,
+                &routing_model,
+                None,
+                false,
+                StatusCode::BAD_GATEWAY.as_u16() as i64,
+                &message,
+                None,
+                None,
+            );
+            return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
+        }
+    };
+
+    let elapsed = start.elapsed().as_millis() as f64;
+    state
+        .metrics
+        .upstream_latency_ms
+        .with_label_values(&[route_label, &router_name, &channel.name])
+        .observe(elapsed);
+    state
+        .database
+        .log_latency(route_label, &router_name, &channel.name, elapsed);
+
+    let status = resp.status();
+    if !status.is_success() {
+        state.database.log_error(route_label, &router_name);
+        let provider_trace_id = provider_trace_id_from_headers(resp.headers());
+        let response_headers = resp.headers().clone();
+        let error_body_bytes = resp.bytes().await.unwrap_or_default();
+        let stored_error_body =
+            truncate_for_storage(&String::from_utf8_lossy(&error_body_bytes), 4000);
+        state.usage_logger.log_failure(
+            request_id.as_deref(),
+            &team_id,
+            &router_name,
+            matched_rule.as_deref(),
+            &channel.name,
+            &routing_model,
+            Some(elapsed),
+            false,
+            status.as_u16() as i64,
+            status
+                .canonical_reason()
+                .unwrap_or("upstream request failed"),
+            provider_trace_id.as_deref(),
+            Some(stored_error_body.as_str()),
+        );
+        return response_from_upstream_bytes(status, &response_headers, error_body_bytes);
+    }
+
+    state
+        .access_audit
+        .audit(&channel.provider_type, route, true);
+    let adapter = state.providers.adapter_for(channel, route);
+    let response = adapter.handle_response(
+        route,
+        resp,
+        Duration::from_millis(config.global.timeouts.response_ms),
+    );
+    crate::usage::wrap_response(
+        response,
+        request_id,
+        team_id,
+        router_name,
+        matched_rule,
+        channel.name.clone(),
+        routing_model,
+        state.usage_logger.clone(),
+        state.metrics.clone(),
+        Some(elapsed),
+        false,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -2576,7 +3035,6 @@ mod tests {
                     retry_on_status: vec![],
                 },
                 gemini_replay: crate::config::GeminiReplay::default(),
-                enable_mcp: true,
                 cors_allowed_origins: vec![],
             },
             data_dir: "/tmp".to_string(),
@@ -2594,7 +3052,6 @@ mod tests {
                 dir: None,
             },
             teams: Arc::new(vec![]),
-            prompts: Arc::new(vec![]),
             compliance: None,
             channels: Arc::new(vec![
                 crate::config::Channel {
@@ -2691,7 +3148,6 @@ mod tests {
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
         let (_dir, database) = create_test_database();
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -2705,7 +3161,6 @@ mod tests {
             gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
-            mcp_server,
             database,
             web_dir: "target/web".to_string(),
         });
@@ -2729,7 +3184,6 @@ mod tests {
         let audit_calls = Arc::new(Mutex::new(Vec::new()));
 
         let (_dir, database) = create_test_database();
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -2743,7 +3197,6 @@ mod tests {
             gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
-            mcp_server,
             database,
             web_dir: "target/web".to_string(),
         });
@@ -2966,7 +3419,6 @@ mod tests {
         let config_arc = Arc::new(RwLock::new(config));
 
         let (_dir, database) = create_test_database();
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -2980,7 +3432,6 @@ mod tests {
             gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
-            mcp_server,
             database,
             web_dir: "target/web".to_string(),
         });
@@ -3019,7 +3470,6 @@ mod tests {
         let config_arc = Arc::new(RwLock::new(config));
 
         let (_dir, database) = create_test_database();
-        let mcp_server = Arc::new(McpServer::new(config_arc.clone(), database.clone()));
         let state = Arc::new(AppState {
             config: config_arc,
             metrics: Arc::new(MetricsState::new().unwrap()),
@@ -3033,7 +3483,6 @@ mod tests {
             gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
             client: reqwest::Client::new(),
             usage_logger: Arc::new(UsageLogger::new(database.clone())),
-            mcp_server,
             database,
             web_dir: "target/web".to_string(),
         });

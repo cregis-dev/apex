@@ -206,6 +206,24 @@ impl UsageTrackerState {
                 self.output_tokens += output;
             }
         }
+
+        // Gemini native generateContent / streamGenerateContent.
+        if let Some(usage) = json.get("usageMetadata") {
+            if let Some(input) = usage
+                .get("promptTokenCount")
+                .or_else(|| usage.get("prompt_token_count"))
+                .and_then(|v| v.as_u64())
+            {
+                self.input_tokens = input;
+            }
+            if let Some(output) = usage
+                .get("candidatesTokenCount")
+                .or_else(|| usage.get("candidates_token_count"))
+                .and_then(|v| v.as_u64())
+            {
+                self.output_tokens = output;
+            }
+        }
     }
 
     fn flush(&self) {
@@ -481,6 +499,68 @@ mod tests {
         tracker.extract_usage(&json);
         assert_eq!(tracker.input_tokens, 0);
         assert_eq!(tracker.output_tokens, 5);
+    }
+
+    #[test]
+    fn test_extract_usage_gemini_native_usage_metadata() {
+        let (_dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+
+        let mut tracker = UsageTrackerState::new(
+            "team1".to_string(),
+            Some("req-1".to_string()),
+            "gemini_native".to_string(),
+            Some("gemini-*".to_string()),
+            "c1".to_string(),
+            "gemini-test".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+        );
+
+        let json = serde_json::json!({
+            "usageMetadata": {
+                "promptTokenCount": 11,
+                "candidatesTokenCount": 7,
+                "totalTokenCount": 18
+            }
+        });
+
+        tracker.extract_usage(&json);
+        assert_eq!(tracker.input_tokens, 11);
+        assert_eq!(tracker.output_tokens, 7);
+    }
+
+    #[test]
+    fn test_extract_usage_gemini_native_snake_case_usage_metadata() {
+        let (_dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+
+        let mut tracker = UsageTrackerState::new(
+            "team1".to_string(),
+            Some("req-1".to_string()),
+            "gemini_native".to_string(),
+            Some("gemini-*".to_string()),
+            "c1".to_string(),
+            "gemini-test".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+        );
+
+        let json = serde_json::json!({
+            "usageMetadata": {
+                "prompt_token_count": 13,
+                "candidates_token_count": 8,
+                "total_token_count": 21
+            }
+        });
+
+        tracker.extract_usage(&json);
+        assert_eq!(tracker.input_tokens, 13);
+        assert_eq!(tracker.output_tokens, 8);
     }
 
     #[test]

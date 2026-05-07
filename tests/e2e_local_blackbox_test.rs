@@ -590,3 +590,194 @@ APEX_UPSTREAM_1_MODEL=reload-primary-model
         "response from mock-after"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_blackbox_gemini_native_pass_through_routes_work() {
+    let upstream = MockProvider::spawn("mock-gemini-native").await.unwrap();
+    let listen = pick_listen_addr().unwrap();
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("generated.gemini-native.e2e.config.json");
+
+    let env: E2eEnv = format!(
+        r#"
+APEX_E2E_LISTEN={listen}
+APEX_E2E_TEAM_ID=gemini-native-team
+APEX_E2E_TEAM_KEY=sk-gemini-native-team
+APEX_E2E_ADMIN_KEY=sk-gemini-native-admin
+APEX_E2E_ROUTER_NAME=gemini-native-router
+APEX_E2E_TEST_MODEL=gemini-test
+
+APEX_UPSTREAM_1_ENABLED=true
+APEX_UPSTREAM_1_NAME=mock_gemini_native
+APEX_UPSTREAM_1_TYPE=gemini
+APEX_UPSTREAM_1_BASE_URL={}/v1beta/openai
+APEX_UPSTREAM_1_API_KEY=sk-gemini-native-upstream
+APEX_UPSTREAM_1_MODEL=gemini-test
+"#,
+        upstream.base_url()
+    )
+    .parse()
+    .unwrap();
+
+    let mut config = harness::config_builder::build_config(&env, &config_path);
+    std::sync::Arc::make_mut(&mut config.teams)[0]
+        .policy
+        .allowed_models = Some(vec!["gemini-*".to_string(), "gemini-native".to_string()]);
+    save_config(&config_path, &config).unwrap();
+
+    let mut gateway = GatewayProcess::spawn(&config_path, &listen).unwrap();
+    gateway.wait_until_ready(Duration::from_secs(10)).unwrap();
+
+    let client = Client::new();
+    let generation = client
+        .post(format!(
+            "{}/gemini/v1beta/models/gemini-test:generateContent",
+            gateway.base_url()
+        ))
+        .header("Authorization", "Bearer sk-gemini-native-team")
+        .header("Content-Type", "application/json")
+        .header("x-goog-fieldmask", "candidates,usageMetadata")
+        .json(&json!({
+            "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+            "tools": [
+                {"google_search": {}},
+                {"url_context": {}},
+                {"code_execution": {}},
+                {"googleMaps": {}}
+            ],
+            "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        generation.status(),
+        200,
+        "gateway logs:\n{}",
+        gateway.read_logs()
+    );
+    let generation_body: serde_json::Value = generation.json().await.unwrap();
+    assert_eq!(
+        generation_body["auth"]["xGoogApiKey"],
+        "sk-gemini-native-upstream"
+    );
+    assert_eq!(
+        generation_body["auth"]["authorization"],
+        serde_json::Value::Null
+    );
+    assert_eq!(generation_body["auth"]["xApiKey"], serde_json::Value::Null);
+    assert_eq!(
+        generation_body["auth"]["customGoogHeader"],
+        "candidates,usageMetadata"
+    );
+    assert_eq!(
+        generation_body["request"]["tools"][0]["google_search"],
+        json!({})
+    );
+    assert_eq!(
+        generation_body["candidates"][0]["groundingMetadata"]["searchEntryPoint"]["renderedContent"],
+        "mock-rendered"
+    );
+    assert_eq!(generation_body["usageMetadata"]["promptTokenCount"], 11);
+
+    let interaction = client
+        .post(format!("{}/gemini/v1beta/interactions", gateway.base_url()))
+        .header("Authorization", "Bearer sk-gemini-native-team")
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "input": "Research Apex gateway Gemini native pass-through.",
+            "agent": "deep-research-pro-preview-12-2025",
+            "background": true,
+            "tools": [{"type": "file_search", "file_search_store_names": ["fileSearchStores/store-1"]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        interaction.status(),
+        200,
+        "gateway logs:\n{}",
+        gateway.read_logs()
+    );
+    let interaction_body: serde_json::Value = interaction.json().await.unwrap();
+    assert_eq!(
+        interaction_body["auth"]["xGoogApiKey"],
+        "sk-gemini-native-upstream"
+    );
+    assert_eq!(
+        interaction_body["auth"]["authorization"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        interaction_body["request"]["agent"],
+        "deep-research-pro-preview-12-2025"
+    );
+    assert_eq!(
+        interaction_body["request"]["tools"][0]["type"],
+        "file_search"
+    );
+
+    let interaction_id = interaction_body["id"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("interactions/");
+    let interaction_get = client
+        .get(format!(
+            "{}/gemini/v1beta/interactions/{}",
+            gateway.base_url(),
+            interaction_id
+        ))
+        .header("Authorization", "Bearer sk-gemini-native-team")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        interaction_get.status(),
+        200,
+        "gateway logs:\n{}",
+        gateway.read_logs()
+    );
+    let interaction_get_body: serde_json::Value = interaction_get.json().await.unwrap();
+    assert_eq!(interaction_get_body["status"], "completed");
+
+    let upload = client
+        .post(format!(
+            "{}/gemini/upload/v1beta/fileSearchStores/store-1:uploadToFileSearchStore?uploadType=media",
+            gateway.base_url()
+        ))
+        .header("Authorization", "Bearer sk-gemini-native-team")
+        .header("Content-Type", "application/octet-stream")
+        .header("x-goog-upload-protocol", "raw")
+        .body("file-search-body")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        upload.status(),
+        200,
+        "gateway logs:\n{}",
+        gateway.read_logs()
+    );
+    let upload_body: serde_json::Value = upload.json().await.unwrap();
+    assert_eq!(
+        upload_body["auth"]["xGoogApiKey"],
+        "sk-gemini-native-upstream"
+    );
+    assert_eq!(upload_body["uploadProtocol"], "raw");
+    assert_eq!(upload_body["body"], "file-search-body");
+
+    let rejected = client
+        .post(format!(
+            "{}/gemini/v1beta/cachedContents",
+            gateway.base_url()
+        ))
+        .header("Authorization", "Bearer sk-gemini-native-team")
+        .header("Content-Type", "application/json")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), 404);
+    let rejected_body: serde_json::Value = rejected.json().await.unwrap();
+    assert_eq!(rejected_body["error"]["status"], "NOT_FOUND");
+}
