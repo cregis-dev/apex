@@ -1263,7 +1263,7 @@ fn build_model_router_section(records: &[DashboardUsageRecord]) -> DashboardMode
                 },
             })
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| right.requests.cmp(&left.requests));
+        items.sort_by_key(|item| std::cmp::Reverse(item.requests));
         items
     };
 
@@ -1306,7 +1306,7 @@ fn build_topology_section(records: &[DashboardUsageRecord]) -> DashboardTopology
             },
         )
         .collect::<Vec<_>>();
-    flows.sort_by(|left, right| right.requests.cmp(&left.requests));
+    flows.sort_by_key(|flow| std::cmp::Reverse(flow.requests));
 
     let mut nodes = Vec::new();
     let mut node_index: HashMap<(String, String), usize> = HashMap::new();
