@@ -198,7 +198,6 @@ echo "Run: $INSTALL_PATH/apex gateway start --config /path/to/config.json"
       "backoff_ms": 500,
       "retry_on_status": [429, 500, 502, 503, 504]
     },
-    "enable_mcp": true,
     "cors_allowed_origins": ["https://dashboard.example.com"]
   },
   "logging": {

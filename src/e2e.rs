@@ -19,7 +19,6 @@ pub struct E2eEnv {
     pub router_name: String,
     pub router_strategy: String,
     pub test_model: String,
-    pub enable_mcp: bool,
     pub metrics_path: String,
     pub upstreams: Vec<UpstreamConfig>,
 }
@@ -58,7 +57,6 @@ impl FromStr for E2eEnv {
         let router_strategy =
             get_or_default(&values, "APEX_E2E_ROUTER_STRATEGY", "priority").to_lowercase();
         let test_model = get_or_default(&values, "APEX_E2E_TEST_MODEL", "apex-test-chat");
-        let enable_mcp = parse_bool_with_default(&values, "APEX_E2E_ENABLE_MCP", true)?;
         let metrics_path = get_or_default(&values, "APEX_E2E_METRICS_PATH", "/metrics");
         let upstreams = parse_upstreams(&values, &test_model)?;
 
@@ -74,7 +72,6 @@ impl FromStr for E2eEnv {
             router_name,
             router_strategy,
             test_model,
-            enable_mcp,
             metrics_path,
             upstreams,
         })
@@ -136,7 +133,6 @@ pub fn build_config(env: &E2eEnv, config_path: &Path) -> Config {
                 retry_on_status: vec![429, 500, 502, 503, 504],
             },
             gemini_replay: crate::config::GeminiReplay::default(),
-            enable_mcp: env.enable_mcp,
             cors_allowed_origins: vec![],
         },
         logging: Logging {
@@ -177,7 +173,6 @@ pub fn build_config(env: &E2eEnv, config_path: &Path) -> Config {
                 rate_limit: None,
             },
         }]),
-        prompts: Arc::new(vec![]),
         compliance: None,
     }
 }

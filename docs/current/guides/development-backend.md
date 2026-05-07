@@ -153,13 +153,6 @@ apex/
 │   ├── compliance.rs       # 合规性检查
 │   ├── logs.rs             # 日志配置
 │   ├── utils.rs            # 工具函数
-│   ├── mcp/                # MCP 模块
-│   │   ├── mod.rs
-│   │   ├── server.rs
-│   │   ├── protocol.rs
-│   │   ├── session.rs
-│   │   ├── transport.rs
-│   │   └── capabilities.rs
 │   └── middleware/         # 中间件
 │       ├── mod.rs
 │       ├── auth.rs
@@ -333,7 +326,7 @@ curl http://localhost:12356/api/metrics
       "max_attempts": 2,
       "backoff_ms": 200
     },
-    "enable_mcp": true
+    "cors_allowed_origins": []
   },
   "logging": {
     "level": "debug",

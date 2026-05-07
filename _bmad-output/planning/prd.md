@@ -4,16 +4,17 @@
 
 - Status: active
 - Audience: BMAD planning and solutioning workflows
-- Scope: Apex Gateway backend, MCP capabilities, and supporting dashboard surfaces
+- Scope: Apex Gateway backend, AI-friendly CLI management, and supporting dashboard surfaces
 
 ## Product Summary
 
-Apex Gateway is an internal AI API gateway that gives teams one governed entry point for LLM access. It normalizes multi-provider APIs, applies team-aware access control and rate limits, supports intelligent routing and failover, and exposes operational insight through metrics, usage records, and MCP capabilities.
+Apex Gateway is an internal AI API gateway that gives teams one governed entry point for LLM access. It normalizes multi-provider APIs, applies team-aware access control and rate limits, supports intelligent routing and failover, and exposes operational insight through metrics, usage records, and an AI-friendly local CLI automation surface.
 
 The product serves two connected surfaces:
 
 1. A Rust gateway runtime that brokers requests to upstream model providers.
 2. A web dashboard that visualizes usage and operational metrics.
+3. A local CLI surface used by operators, automation, and AI skills to manage and inspect configuration.
 
 ## Problem Statement
 
@@ -31,7 +32,9 @@ Internal teams need a consistent and governable way to access multiple model pro
 - Preserve compatibility with common OpenAI- and Anthropic-style client integrations.
 - Enforce team-based authentication, policy, and rate limits centrally.
 - Support configurable routing, balancing, retries, and failover.
-- Expose operational data through metrics, usage reporting, and MCP endpoints.
+- Expose operational data through metrics, usage reporting, and dashboard surfaces.
+- Provide an AI-friendly CLI that supports fully parameterized input and machine-readable JSON output.
+- Retire the legacy HTTP MCP surface in favor of future Admin Control Plane direction.
 - Support enterprise controls such as data masking and audit-friendly behavior.
 
 ## Non-Goals
@@ -51,7 +54,7 @@ Internal teams need a consistent and governable way to access multiple model pro
 ### Secondary Users
 
 - Product and operations teams reviewing usage and reliability trends
-- Tooling clients consuming MCP prompts, tools, and resources
+- Operators, scripts, and AI skills invoking the local CLI for configuration workflows
 
 ## Core Capabilities
 
@@ -79,11 +82,17 @@ Internal teams need a consistent and governable way to access multiple model pro
 - Persist usage and metrics events for reporting.
 - Provide dashboard views over usage, rankings, and trends.
 
-### MCP Support
+### CLI Automation Surface
 
-- Expose MCP-compatible resources, prompts, and tools.
-- Support MCP session lifecycle and capability negotiation.
-- Align MCP access control with gateway authentication and policy rules.
+- Support non-interactive CLI workflows for AI-oriented operations.
+- Accept complete command input through arguments and flags when provided.
+- Provide machine-readable JSON output for automation and skills.
+- Initial v1 scope for this automation surface is limited to `channel`, `router`, and `team` command families.
+
+### Superseded Scope
+
+- The previous HTTP MCP server scope is no longer an active product requirement.
+- That surface is superseded by the future Admin Control Plane direction and should be treated as retired from active planning scope.
 
 ### Compliance
 
@@ -116,9 +125,9 @@ The system shall support retries, timeouts, and fallback behavior for upstream r
 
 The system shall expose metrics and stored usage data sufficient for monitoring and operational analysis.
 
-### FR7. MCP Surface
+### FR7. AI-Friendly CLI Surface
 
-The system shall expose MCP resources, prompts, and tools over the supported MCP transport model used by the gateway implementation.
+The system shall provide AI-oriented CLI workflows that can run non-interactively via command arguments and return machine-readable JSON output for automation use.
 
 ### FR8. Compliance Controls
 
@@ -130,21 +139,21 @@ The system shall support request-time data masking or blocking behavior for sens
 - Reliability: graceful handling of upstream failures with retries and fallback
 - Security: centralized authentication, policy enforcement, and secret masking
 - Operability: structured logs, metrics, and CLI-driven administration
-- Extensibility: add providers, routers, and MCP capabilities without major redesign
+- Extensibility: add providers, routers, and CLI automation capabilities without major redesign
 
 ## Success Indicators
 
 - Internal teams can access multiple model providers through one gateway integration.
 - Team-level policy violations are blocked consistently at the gateway layer.
 - Operators can identify request volume, error rate, and usage trends through dashboard and metrics endpoints.
-- MCP clients can discover and invoke supported prompts, tools, and resources using the gateway's MCP implementation.
+- Operators and AI skills can invoke supported CLI workflows without interactive prompts and consume JSON output reliably.
 
 ## Delivery Themes
 
 - Theme 1: Core gateway and provider interoperability
 - Theme 2: Advanced routing and operational controls
 - Theme 3: Team governance and compliance
-- Theme 4: MCP server operations and analytics
+- Theme 4: AI-friendly CLI operations and Admin Control Plane alignment
 
 ## Relationship to Planning Artifacts
 

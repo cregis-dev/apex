@@ -16,7 +16,7 @@ Apex Gateway 后端采用分层架构设计，以 Axum 作为 Web 框架，Tokio
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      Axum Router Layer                       │
-│  /v1/chat/completions │ /v1/messages │ /mcp │ /api/*   │
+│  /v1/chat/completions │ /v1/messages │ /api/* │ /dashboard/* │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -74,7 +74,6 @@ pub struct AppState {
 | `/v1/chat/completions` | POST | OpenAI 兼容聊天接口 |
 | `/v1/messages` | POST | Anthropic 兼容接口 |
 | `/v1/models` | GET | 模型列表 |
-| `/mcp` | GET/POST/DELETE | MCP Streamable HTTP (协议版本 2025-11-25) |
 | `/api/usage` | GET | Usage 记录 API |
 | `/api/metrics` | GET | Metrics 汇总 API |
 | `/api/metrics/trends` | GET | 趋势数据 API |
@@ -97,7 +96,6 @@ pub struct Config {
     pub channels: Arc<Vec<Channel>>,
     pub routers: Arc<Vec<Router>>,
     pub teams: Arc<Vec<Team>>,
-    pub prompts: Arc<Vec<Prompt>>,
     pub metrics: Metrics,
     pub hot_reload: HotReload,
     pub compliance: Option<Compliance>,
@@ -292,58 +290,7 @@ pub struct UsageRecord {
 }
 ```
 
-### 9. MCP 模块 (`src/mcp/`)
-
-**职责**: MCP (Model Context Protocol) 服务器实现
-
-#### 模块结构
-
-| 文件 | 职责 |
-|------|------|
-| `mod.rs` | 模块入口 |
-| `server.rs` | MCP 服务器核心逻辑 |
-| `protocol.rs` | JSON-RPC 2.0 协议定义 |
-| `session.rs` | 会话管理 |
-| `transport.rs` | SSE 传输层 |
-| `capabilities.rs` | 能力声明 |
-| `analytics.rs` | MCP 分析 |
-
-#### MCP 能力
-
-**Resources**:
-- `config://config.json` - 完整配置文件 (Key 脱敏)
-- `config://teams` - 团队配置列表
-- `config://routers` - 路由配置列表
-- `config://channels` - 通道配置列表
-
-**Prompts** (从配置加载):
-```json
-{
-  "name": "code-review",
-  "description": "标准代码审查模板",
-  "arguments": [...],
-  "messages": [...]
-}
-```
-
-**Tools**:
-- `list_models` - 列出可用模型
-- `echo` - 测试工具
-
-#### Streamable HTTP 传输流程
-
-```
-1. Client → POST /mcp (InitializeRequest)
-2. Server → InitializeResponse + MCP-Session-Id: <uuid>
-3. Client → POST /mcp (JSON-RPC Request) + MCP-Session-Id: <uuid>
-4. Server → JSON-RPC Response
-```
-
-**GET /mcp** - 可选，用于接收服务端主动推送的通知（SSE 流）
-
-**DELETE /mcp** - 主动终止会话
-
-### 10. Compliance 模块 (`src/compliance.rs`)
+### 9. Compliance 模块 (`src/compliance.rs`)
 
 **职责**: 数据合规性检查
 
@@ -352,7 +299,7 @@ pub struct UsageRecord {
 - 敏感数据脱敏
 - 审计日志记录
 
-### 11. Converters 模块 (`src/converters.rs`)
+### 10. Converters 模块 (`src/converters.rs`)
 
 **职责**: 协议转换
 
@@ -434,7 +381,6 @@ pub struct UsageRecord {
       "backoff_ms": 200,
       "retry_on_status": [429, 500, 502, 503, 504]
     },
-    "enable_mcp": true,
     "cors_allowed_origins": []
   },
   "logging": {
@@ -472,7 +418,6 @@ pub struct UsageRecord {
       }
     }
   ],
-  "prompts": [...],
   "metrics": {
     "enabled": true,
     "path": "/metrics"
