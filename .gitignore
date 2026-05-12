@@ -43,3 +43,8 @@ web/out/
 web/test-results/
 web/*.tsbuildinfo
 web/next-env.d.ts
+
+# Control Plane UI local artifacts
+cp/node_modules/
+cp/dist/
+cp/*.tsbuildinfo
