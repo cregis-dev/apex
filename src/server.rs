@@ -376,7 +376,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             get(
                 move |State(state): State<Arc<AppState>>,
                       axum::extract::Path(path): axum::extract::Path<String>| async move {
-                    let mut resp = serve_web_asset(&state.web_dir, &format!("cp/assets/{path}"), "Not found");
+                    let mut resp =
+                        serve_web_asset(&state.web_dir, &format!("cp/assets/{path}"), "Not found");
                     resp.headers_mut().insert(
                         axum::http::header::CACHE_CONTROL,
                         axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
@@ -1737,10 +1738,7 @@ async fn handle_admin_channels(
         .unwrap()
 }
 
-async fn handle_cp_info(
-    State(state): State<Arc<AppState>>,
-    req: Request<Body>,
-) -> Response<Body> {
+async fn handle_cp_info(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response<Body> {
     let (parts, _body) = req.into_parts();
     let config = state.config.read().unwrap().clone();
 
