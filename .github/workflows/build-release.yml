@@ -44,6 +44,11 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: cp/package.json
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -69,6 +74,12 @@ jobs:
         run: |
           npm ci
           npm run build
+
+      - name: Build control plane UI
+        working-directory: cp
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
 
       - name: Build release
         env:

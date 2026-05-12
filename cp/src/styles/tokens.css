@@ -1,0 +1,210 @@
+/* Apex Control Plane — design tokens */
+:root {
+  /* surfaces */
+  --bg: oklch(0.985 0.008 75);
+  --bg-soft: oklch(0.97 0.01 75);
+  --surface: #ffffff;
+  --surface-2: oklch(0.98 0.008 75);
+  --surface-hover: oklch(0.96 0.01 70);
+
+  /* borders */
+  --border: oklch(0.92 0.01 75);
+  --border-strong: oklch(0.86 0.012 70);
+  --divider: oklch(0.94 0.008 75);
+
+  /* ink */
+  --ink: oklch(0.22 0.015 60);
+  --ink-2: oklch(0.36 0.014 60);
+  --muted: oklch(0.52 0.012 60);
+  --muted-2: oklch(0.68 0.01 60);
+
+  /* brand — terracotta, used sparingly */
+  --brand: oklch(0.55 0.13 45);
+  --brand-hover: oklch(0.5 0.13 45);
+  --brand-soft: oklch(0.95 0.025 55);
+  --brand-ink: oklch(0.42 0.13 45);
+
+  /* status */
+  --ok: oklch(0.62 0.12 150);
+  --ok-soft: oklch(0.95 0.04 150);
+  --warn: oklch(0.72 0.13 75);
+  --warn-soft: oklch(0.96 0.06 85);
+  --err: oklch(0.58 0.18 25);
+  --err-soft: oklch(0.96 0.04 30);
+  --info: oklch(0.6 0.1 230);
+  --info-soft: oklch(0.96 0.03 230);
+
+  /* radii */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+
+  /* shadows */
+  --shadow-xs: 0 1px 2px rgba(60, 40, 25, 0.04);
+  --shadow-sm: 0 1px 3px rgba(60, 40, 25, 0.06), 0 1px 2px rgba(60, 40, 25, 0.04);
+  --shadow-md: 0 4px 12px rgba(60, 40, 25, 0.08), 0 1px 3px rgba(60, 40, 25, 0.04);
+  --shadow-lg: 0 12px 32px rgba(60, 40, 25, 0.1), 0 4px 8px rgba(60, 40, 25, 0.06);
+
+  /* type */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv11", "ss01", "ss03";
+}
+button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; }
+a { color: inherit; text-decoration: none; }
+
+/* ---------- atoms ---------- */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 12px;
+  border-radius: var(--r-sm);
+  font-size: 13px; font-weight: 500;
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--border);
+  transition: background 120ms, border-color 120ms;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--surface-hover); }
+.btn-primary {
+  background: var(--brand); color: #fff; border-color: var(--brand);
+}
+.btn-primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
+.btn-ghost { border-color: transparent; background: transparent; }
+.btn-ghost:hover { background: var(--surface-hover); }
+.btn-sm { height: 26px; padding: 0 10px; font-size: 12px; }
+.btn-lg { height: 38px; padding: 0 16px; font-size: 14px; }
+
+.input, .select {
+  height: 32px; padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-size: 13px;
+  color: var(--ink);
+  transition: border-color 120ms, box-shadow 120ms;
+}
+.input:focus, .select:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+.input::placeholder { color: var(--muted-2); }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 20px; padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px; font-weight: 500;
+  background: var(--bg-soft); color: var(--ink-2);
+  border: 1px solid var(--border);
+}
+.badge-ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.badge-warn { background: var(--warn-soft); color: oklch(0.42 0.1 70); border-color: transparent; }
+.badge-err { background: var(--err-soft); color: var(--err); border-color: transparent; }
+.badge-info { background: var(--info-soft); color: var(--info); border-color: transparent; }
+.badge-brand { background: var(--brand-soft); color: var(--brand-ink); border-color: transparent; }
+
+.dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.dot-ok { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.dot-warn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.dot-err { background: var(--err); box-shadow: 0 0 0 3px var(--err-soft); }
+.dot-muted { background: var(--muted-2); }
+
+.kbd {
+  display: inline-flex; align-items: center;
+  height: 18px; min-width: 18px; padding: 0 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--surface);
+}
+
+.mono { font-family: var(--font-mono); }
+.muted { color: var(--muted); }
+
+/* tables */
+.table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.table td {
+  padding: 14px;
+  border-bottom: 1px solid var(--divider);
+  vertical-align: middle;
+}
+.table tr:last-child td { border-bottom: none; }
+.table tr.row-hover:hover td { background: var(--surface-2); }
+
+/* scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: oklch(0.88 0.01 75); border-radius: 999px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: oklch(0.8 0.012 70); }
+
+/* utility */
+.h-full { height: 100%; }
+.flex { display: flex; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.gap-2 { gap: 8px; }
+.gap-3 { gap: 12px; }
+.gap-4 { gap: 16px; }
+.gap-6 { gap: 24px; }
+
+/* page chrome */
+.page-pad { padding: 32px 40px; max-width: 1280px; }
+.page-head { margin-bottom: 28px; }
+.page-title { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 4px; }
+.page-sub { color: var(--muted); font-size: 13px; margin: 0; }
+
+.section-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); font-weight: 500; margin: 0 0 12px;
+}
+
+/* keyframes */
+@keyframes pulse-soft { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+@keyframes blink-rec { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@keyframes slide-in-row {
+  from { opacity: 0; transform: translateY(-4px); background: var(--brand-soft); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes bar-grow {
+  from { height: 0; }
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.spinner {
+  width: 14px; height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}

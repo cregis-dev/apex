@@ -267,7 +267,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     let admin_routes = Router::new()
         .route("/admin/teams", get(handle_admin_teams))
         .route("/admin/routers", get(handle_admin_routers))
-        .route("/admin/channels", get(handle_admin_channels));
+        .route("/admin/channels", get(handle_admin_channels))
+        .route("/api/cp/info", get(handle_cp_info));
 
     // Metrics (Protected by Global API Key)
     let metrics_routes = if metrics_enabled {
@@ -351,8 +352,44 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             }),
         );
 
+    // Control Plane UI (Vite + React, hash routing)
+    // HTML/assets are public so browsers can load the SPA; API endpoints handle their own auth.
+    let cp_routes = Router::new()
+        .route(
+            "/cp",
+            get(|OriginalUri(uri): OriginalUri| async move {
+                let target = match uri.query() {
+                    Some(q) if !q.is_empty() => format!("/cp/?{q}"),
+                    _ => "/cp/".to_string(),
+                };
+                Redirect::permanent(&target)
+            }),
+        )
+        .route(
+            "/cp/",
+            get(move |State(state): State<Arc<AppState>>| async move {
+                serve_web_asset(&state.web_dir, "cp/index.html", "Control plane not found")
+            }),
+        )
+        .route(
+            "/cp/assets/*path",
+            get(
+                move |State(state): State<Arc<AppState>>,
+                      axum::extract::Path(path): axum::extract::Path<String>| async move {
+                    let mut resp =
+                        serve_web_asset(&state.web_dir, &format!("cp/assets/{path}"), "Not found");
+                    resp.headers_mut().insert(
+                        axum::http::header::CACHE_CONTROL,
+                        axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+                    );
+                    resp
+                },
+            ),
+        );
+
     app = app.merge(next_static_routes);
     app = app.merge(dashboard_routes);
+    app = app.merge(cp_routes);
 
     app.layer(
         tower::ServiceBuilder::new()
@@ -1698,6 +1735,43 @@ async fn handle_admin_channels(
             })
             .to_string(),
         ))
+        .unwrap()
+}
+
+async fn handle_cp_info(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let config = state.config.read().unwrap().clone();
+
+    if let Err(resp) = enforce_global_auth(&config, &parts.headers) {
+        return resp;
+    }
+
+    let info = json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "listen": config.global.listen,
+        "auth_required": !config.global.auth_keys.is_empty(),
+        "auth_key_count": config.global.auth_keys.len(),
+        "cors_origins": config.global.cors_allowed_origins,
+        "timeouts": {
+            "connect_ms": config.global.timeouts.connect_ms,
+            "request_ms": config.global.timeouts.request_ms,
+            "response_ms": config.global.timeouts.response_ms,
+        },
+        "retries": {
+            "max_attempts": config.global.retries.max_attempts,
+            "backoff_ms": config.global.retries.backoff_ms,
+        },
+        "channels": config.channels.len(),
+        "routers": config.routers.len(),
+        "teams": config.teams.len(),
+        "metrics_enabled": config.metrics.enabled,
+        "hot_reload": config.hot_reload.watch,
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(info.to_string()))
         .unwrap()
 }
 
