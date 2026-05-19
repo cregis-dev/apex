@@ -13,7 +13,9 @@ pub struct Config {
     pub logging: Logging,
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
-    #[serde(default = "default_web_dir")]
+    // Legacy-only: filesystem asset override remains readable for old configs,
+    // but should no longer be emitted in supported config files.
+    #[serde(default = "default_web_dir", skip_serializing)]
     pub web_dir: String,
     #[serde(default)]
     pub channels: Arc<Vec<Channel>>,
@@ -396,7 +398,7 @@ pub fn save_config(path: &Path, config: &Config) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::ProviderType;
+    use super::{Config, ProviderType};
 
     #[test]
     fn provider_type_zai_round_trips_as_snake_case() {
@@ -405,5 +407,50 @@ mod tests {
 
         let parsed: ProviderType = serde_json::from_str("\"zai\"").unwrap();
         assert_eq!(parsed, ProviderType::Zai);
+    }
+
+    #[test]
+    fn config_accepts_legacy_web_dir_but_does_not_serialize_it() {
+        let content = r#"{
+          "version": "1.0",
+          "global": {
+            "listen": "127.0.0.1:12356",
+            "auth_keys": [],
+            "timeouts": {
+              "connect_ms": 1000,
+              "request_ms": 1000,
+              "response_ms": 1000
+            },
+            "retries": {
+              "max_attempts": 1,
+              "backoff_ms": 100,
+              "retry_on_status": [500]
+            },
+            "cors_allowed_origins": []
+          },
+          "logging": {
+            "level": "info",
+            "dir": null
+          },
+          "data_dir": "/tmp/apex-data",
+          "web_dir": "/tmp/legacy-web",
+          "channels": [],
+          "routers": [],
+          "teams": [],
+          "metrics": {
+            "enabled": true,
+            "path": "/metrics"
+          },
+          "hot_reload": {
+            "config_path": "config.json",
+            "watch": false
+          }
+        }"#;
+
+        let config: Config = serde_json::from_str(content).unwrap();
+        assert_eq!(config.web_dir, "/tmp/legacy-web");
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(!serialized.contains("web_dir"));
     }
 }

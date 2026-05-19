@@ -72,6 +72,90 @@ async fn e2e_openai_route_success() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_openai_embeddings_route_forwards_path_and_body() {
+    let (upstream, captures) = spawn_upstream_capture(
+        StatusCode::OK,
+        r#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"text-embedding-3-small","usage":{"prompt_tokens":4,"total_tokens":4}}"#,
+    )
+    .await;
+    ensure_upstream_ok(upstream, "/v1/embeddings").await;
+
+    let mut config = base_config();
+    std::sync::Arc::make_mut(&mut config.teams).push(Team {
+        id: "test-team".to_string(),
+        api_key: "vk_test".to_string(),
+        policy: TeamPolicy {
+            allowed_routers: vec!["r1".to_string()],
+            allowed_models: None,
+            rate_limit: None,
+        },
+    });
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
+        name: "primary".to_string(),
+        provider_type: ProviderType::Openai,
+        base_url: base_url(upstream),
+        api_key: "".to_string(),
+        anthropic_base_url: None,
+        headers: None,
+        model_map: None,
+        timeouts: None,
+    });
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
+        name: "r1".to_string(),
+        channels: vec![TargetChannel {
+            name: "primary".to_string(),
+            weight: 1,
+        }],
+        strategy: "round_robin".to_string(),
+        metadata: None,
+        fallback_channels: vec![],
+        rules: vec![RouterRule {
+            match_spec: MatchSpec {
+                models: vec!["*".to_string()],
+            },
+            channels: vec![TargetChannel {
+                name: "primary".to_string(),
+                weight: 1,
+            }],
+            strategy: "priority".to_string(),
+        }],
+    });
+
+    let state = build_state(config).unwrap();
+    let app = build_app(state);
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/embeddings")
+        .header("content-type", "application/json")
+        .header("Authorization", "Bearer vk_test")
+        .body(Body::from(
+            json!({
+                "model":"text-embedding-3-small",
+                "input":"hello embeddings"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let (status, body) = response_text(resp).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+
+    let body_value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body_value["object"], "list");
+    assert_eq!(body_value["data"][0]["object"], "embedding");
+
+    let captured = captures.lock().unwrap();
+    let captured_post = captured
+        .iter()
+        .find(|request| request.method == "POST")
+        .expect("expected captured POST request");
+    assert_eq!(captured_post.path, "/v1/embeddings");
+    let captured_body: serde_json::Value = serde_json::from_str(&captured_post.body).unwrap();
+    assert_eq!(captured_body["model"], "text-embedding-3-small");
+    assert_eq!(captured_body["input"], "hello embeddings");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_global_auth_required() {
     let upstream = spawn_upstream_ok().await;
     let mut config = base_config();

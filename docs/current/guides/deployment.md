@@ -262,7 +262,7 @@ echo "Run: $INSTALL_PATH/apex gateway start --config /path/to/config.json"
 
 - 发布二进制应使用 `embedded-web` feature 构建
 - 发布产物不再需要额外携带 `web/` 静态目录
-- `web_dir` 仅在开发态或未启用 `embedded-web` 的文件系统模式下使用
+- 未启用 `embedded-web` 时，后端默认从 `target/web` 读取静态资源；`web_dir` 已退役
 
 ---
 
@@ -393,7 +393,7 @@ curl -I https://api.openai.com
 
 **Q: Dashboard 无法访问？**
 
-A: 发布环境优先确认是否使用 `embedded-web` 构建；仅文件系统模式下才需要检查 `web_dir` 和 `target/web`：
+A: 发布环境优先确认是否使用 `embedded-web` 构建；文件系统模式下确认 `target/web` 已生成且进程工作目录正确：
 ```bash
 cargo build --release --features embedded-web
 ```

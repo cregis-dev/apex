@@ -18,7 +18,7 @@ Development keeps filesystem-based behavior available:
 
 - frontend source lives in `web/`
 - frontend export output lives in `target/web/`
-- backend can read static assets from `web_dir`
+- backend reads static assets from the fixed `target/web` export when not using `embedded-web`
 
 Default filesystem asset directory:
 
@@ -47,13 +47,13 @@ Result:
 
 ## Config Semantics
 
-`web_dir` remains in config for filesystem mode compatibility.
+`web_dir` is no longer part of the supported config surface.
 
 Interpretation:
 
-- required for local or fallback filesystem serving
-- not required for embedded release binaries
-- recommended value in filesystem mode: `target/web`
+- local filesystem serving uses the fixed `target/web` export directory
+- embedded release binaries do not need any web asset path in config
+- legacy configs that still contain `web_dir` are tolerated for compatibility, but the field is retired
 
 ## Canonical Rules
 

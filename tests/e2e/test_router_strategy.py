@@ -73,7 +73,6 @@ def apex_server(mock_servers):
         },
         "logging": {"level": "info", "dir": None},
         "data_dir": str((RUNTIME_DIR / "data").resolve()),
-        "web_dir": "target/web",
         "channels": [
             {
                 "name": "channel_a",

@@ -13,6 +13,7 @@ struct MockState {
     name: String,
     chat_status: StatusCode,
     message_status: StatusCode,
+    embeddings_status: StatusCode,
 }
 
 pub struct MockProvider {
@@ -22,20 +23,21 @@ pub struct MockProvider {
 
 impl MockProvider {
     pub async fn spawn(name: impl Into<String>) -> anyhow::Result<Self> {
-        Self::spawn_with_status(name, StatusCode::OK, StatusCode::OK).await
+        Self::spawn_with_status(name, StatusCode::OK, StatusCode::OK, StatusCode::OK).await
     }
 
     pub async fn spawn_failing_chat(
         name: impl Into<String>,
         status: StatusCode,
     ) -> anyhow::Result<Self> {
-        Self::spawn_with_status(name, status, StatusCode::OK).await
+        Self::spawn_with_status(name, status, StatusCode::OK, StatusCode::OK).await
     }
 
     async fn spawn_with_status(
         name: impl Into<String>,
         chat_status: StatusCode,
         message_status: StatusCode,
+        embeddings_status: StatusCode,
     ) -> anyhow::Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -47,6 +49,7 @@ impl MockProvider {
             name: name.into(),
             chat_status,
             message_status,
+            embeddings_status,
         };
 
         let app = Router::new()
@@ -57,6 +60,9 @@ impl MockProvider {
             .route("/v1/chat/completions", post(chat_completions))
             .route("/chat/completions", post(chat_completions))
             .route("/openai/chat/completions", post(chat_completions))
+            .route("/v1/embeddings", post(embeddings))
+            .route("/embeddings", post(embeddings))
+            .route("/openai/embeddings", post(embeddings))
             .route("/v1/messages", post(messages))
             .route("/messages", post(messages))
             .route("/v1beta/models", get(gemini_native_models))
@@ -246,6 +252,49 @@ async fn messages(State(state): State<MockState>, Json(body): Json<Value>) -> Re
     .into_response()
 }
 
+async fn embeddings(State(state): State<MockState>, Json(body): Json<Value>) -> Response {
+    if state.embeddings_status != StatusCode::OK {
+        return (
+            state.embeddings_status,
+            Json(json!({
+                "error": {
+                    "message": format!("forced embeddings failure from {}", state.name),
+                    "type": "upstream_error"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    let inputs = body
+        .get("input")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![body.get("input").cloned().unwrap_or_else(|| json!(""))]);
+    let data = inputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, _)| {
+            json!({
+                "object": "embedding",
+                "index": index,
+                "embedding": [0.01, 0.02, 0.03]
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Json(json!({
+        "object": "list",
+        "data": data,
+        "model": body.get("model").cloned().unwrap_or_else(|| json!("mock-model")),
+        "usage": {
+            "prompt_tokens": 3,
+            "total_tokens": 3
+        }
+    }))
+    .into_response()
+}
+
 async fn gemini_native_models(State(state): State<MockState>, headers: HeaderMap) -> Response {
     Json(json!({
         "models": [
@@ -283,8 +332,22 @@ async fn gemini_native_generate(
         let mut response = Response::new(axum::body::Body::from(format!(
             "data: {}\n\n",
             json!({
-                "candidates": [{"content": {"parts": [{"text": format!("stream from {}", state.name)}], "role": "model"}, "groundingMetadata": {"searchEntryPoint": {"renderedContent": "mock-rendered"}}}],
-                "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 7, "totalTokenCount": 18},
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": format!("stream from {}", state.name)}],
+                            "role": "model"
+                        },
+                        "groundingMetadata": {
+                            "searchEntryPoint": {"renderedContent": "mock-rendered"}
+                        }
+                    }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 11,
+                    "candidatesTokenCount": 7,
+                    "totalTokenCount": 18
+                },
                 "auth": gemini_native_auth_snapshot(&headers),
                 "request": body_json
             })
@@ -298,8 +361,29 @@ async fn gemini_native_generate(
     }
 
     Json(json!({
-        "candidates": [{"content": {"parts": [{"text": format!("response from {}", state.name)}, {"executableCode": {"language": "PYTHON", "code": "print('ok')"}}, {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "ok"}}], "role": "model"}, "groundingMetadata": {"searchEntryPoint": {"renderedContent": "mock-rendered"}}, "urlContextMetadata": {"urlMetadata": [{"retrievedUrl": "https://example.com"}]}}],
-        "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 7, "totalTokenCount": 18},
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {"text": format!("response from {}", state.name)},
+                        {"executableCode": {"language": "PYTHON", "code": "print('ok')"}},
+                        {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "ok"}}
+                    ],
+                    "role": "model"
+                },
+                "groundingMetadata": {
+                    "searchEntryPoint": {"renderedContent": "mock-rendered"}
+                },
+                "urlContextMetadata": {
+                    "urlMetadata": [{"retrievedUrl": "https://example.com"}]
+                }
+            }
+        ],
+        "usageMetadata": {
+            "promptTokenCount": 11,
+            "candidatesTokenCount": 7,
+            "totalTokenCount": 18
+        },
         "auth": gemini_native_auth_snapshot(&headers),
         "modelAction": model_action,
         "request": body_json
@@ -316,8 +400,12 @@ async fn gemini_native_resource(
         "name": format!("fileSearchStores/{}", state.name),
         "done": true,
         "auth": gemini_native_auth_snapshot(&headers),
-        "contentType": headers.get(axum::http::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()),
-        "uploadProtocol": headers.get("x-goog-upload-protocol").and_then(|value| value.to_str().ok()),
+        "contentType": headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        "uploadProtocol": headers
+            .get("x-goog-upload-protocol")
+            .and_then(|value| value.to_str().ok()),
         "body": String::from_utf8_lossy(&body)
     }))
     .into_response()
@@ -355,9 +443,17 @@ async fn gemini_native_interaction_get(
 
 fn gemini_native_auth_snapshot(headers: &HeaderMap) -> Value {
     json!({
-        "xGoogApiKey": headers.get("x-goog-api-key").and_then(|value| value.to_str().ok()),
-        "authorization": headers.get("authorization").and_then(|value| value.to_str().ok()),
-        "xApiKey": headers.get("x-api-key").and_then(|value| value.to_str().ok()),
-        "customGoogHeader": headers.get("x-goog-fieldmask").and_then(|value| value.to_str().ok())
+        "xGoogApiKey": headers
+            .get("x-goog-api-key")
+            .and_then(|value| value.to_str().ok()),
+        "authorization": headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        "xApiKey": headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok()),
+        "customGoogHeader": headers
+            .get("x-goog-fieldmask")
+            .and_then(|value| value.to_str().ok())
     })
 }

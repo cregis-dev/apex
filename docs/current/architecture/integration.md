@@ -59,16 +59,9 @@
 
 **Backend 职责**: 通过统一静态资源访问层提供 Dashboard 静态资源
 
-**配置**:
-```json
-{
-  "web_dir": "target/web"
-}
-```
-
 说明：
 
-- 文件系统模式下从 `web_dir` 指向的 `target/web` 目录读取资源
+- 文件系统模式下从固定的 `target/web` 目录读取资源
 - 启用 `embedded-web` 时从二进制内嵌资源读取
 - 发布态推荐使用 `embedded-web`
 
@@ -437,7 +430,7 @@ Apex Gateway
 
 **Q: Dashboard 无法加载静态资源？**
 
-A: 先确认发布二进制是否使用 `embedded-web` 构建；仅文件系统模式下才需要检查 `web_dir` 和 `target/web`。
+A: 先确认发布二进制是否使用 `embedded-web` 构建；文件系统模式下检查 `target/web` 已生成且进程工作目录正确。
 
 **Q: API 请求返回 401？**
 

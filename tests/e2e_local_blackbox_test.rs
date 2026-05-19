@@ -204,6 +204,65 @@ APEX_UPSTREAM_1_HEADERS_JSON={{"anthropic-version":"2023-06-01"}}
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_blackbox_openai_embeddings_work() {
+    let upstream = MockProvider::spawn("mock-openai-embeddings").await.unwrap();
+    let listen = pick_listen_addr().unwrap();
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("generated.embeddings.e2e.config.json");
+
+    let env: E2eEnv = format!(
+        r#"
+APEX_E2E_LISTEN={listen}
+APEX_E2E_TEAM_ID=embeddings-team
+APEX_E2E_TEAM_KEY=sk-embeddings-team
+APEX_E2E_ADMIN_KEY=sk-embeddings-admin
+APEX_E2E_ROUTER_NAME=embeddings-router
+APEX_E2E_TEST_MODEL=apex-test-embedding
+
+APEX_UPSTREAM_1_ENABLED=true
+APEX_UPSTREAM_1_NAME=mock_openai_embeddings
+APEX_UPSTREAM_1_TYPE=openai
+APEX_UPSTREAM_1_BASE_URL={}
+APEX_UPSTREAM_1_MODEL=text-embedding-3-small
+"#,
+        upstream.base_url()
+    )
+    .parse()
+    .unwrap();
+
+    write_config(&env, &config_path).unwrap();
+
+    let mut gateway = GatewayProcess::spawn(&config_path, &listen).unwrap();
+    gateway.wait_until_ready(Duration::from_secs(10)).unwrap();
+
+    let client = Client::new();
+    let embeddings = client
+        .post(format!("{}/v1/embeddings", gateway.base_url()))
+        .header("Authorization", "Bearer sk-embeddings-team")
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "model": "apex-test-embedding",
+            "input": ["hello", "world"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        embeddings.status(),
+        200,
+        "gateway logs:\n{}",
+        gateway.read_logs()
+    );
+
+    let embeddings_body: serde_json::Value = embeddings.json().await.unwrap();
+    assert_eq!(embeddings_body["object"], "list");
+    assert_eq!(embeddings_body["model"], "text-embedding-3-small");
+    assert_eq!(embeddings_body["data"].as_array().unwrap().len(), 2);
+    assert_eq!(embeddings_body["data"][0]["object"], "embedding");
+    assert_eq!(embeddings_body["usage"]["prompt_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_blackbox_claude_code_to_gemini_work() {
     let upstream = MockProvider::spawn("mock-gemini-openai").await.unwrap();
     let listen = pick_listen_addr().unwrap();

@@ -115,7 +115,6 @@ _bmad-output/
 │   │   ├── 8-3-mcp-resources.md
 │   │   ├── 8-4-resource-listing-key-masking.md
 │   │   ├── 8-5-analytics-reporting.md
-│   │   ├── 8-6-mcp-prompts.md
 │   │   └── 8-7-mcp-tools.md
 │   ├── tech-specs/
 │   ├── tests/

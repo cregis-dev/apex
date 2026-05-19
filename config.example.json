@@ -85,33 +85,6 @@
       }
     }
   ],
-  "prompts": [
-    {
-      "name": "code-review",
-      "description": "Generate a code review for the provided diff",
-      "arguments": [
-        {
-          "name": "language",
-          "description": "Programming language",
-          "required": true
-        }
-      ],
-      "messages": [
-        {
-          "role": "system",
-          "content": {
-            "text": "You are an expert code reviewer."
-          }
-        },
-        {
-          "role": "user",
-          "content": {
-            "text": "Review this {{language}} code.\n\n```\n{{diff}}\n```"
-          }
-        }
-      ]
-    }
-  ],
   "metrics": {
     "enabled": true,
     "path": "/metrics"

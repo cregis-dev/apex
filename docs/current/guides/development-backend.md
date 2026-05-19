@@ -333,7 +333,6 @@ curl http://localhost:12356/api/metrics
     "dir": "~/.apex/logs"
   },
   "data_dir": "~/.apex/data",
-  "web_dir": "target/web",
   "channels": [
     {
       "name": "openai-dev",

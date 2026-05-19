@@ -19,6 +19,10 @@ fn raw_apex_cmd() -> Command {
     Command::new(env!("CARGO_BIN_EXE_apex"))
 }
 
+fn stdout_json(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON")
+}
+
 #[test]
 fn test_router_multichannel() {
     let temp_dir = TempDir::new().unwrap();
@@ -436,6 +440,7 @@ fn test_team_lifecycle_is_noninteractive() {
     let config_str = config_path.to_str().unwrap();
 
     apex_cmd(config_str).arg("init").assert().success();
+
     apex_cmd(config_str)
         .arg("team")
         .arg("add")
