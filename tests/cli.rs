@@ -19,10 +19,6 @@ fn raw_apex_cmd() -> Command {
     Command::new(env!("CARGO_BIN_EXE_apex"))
 }
 
-fn stdout_json(output: &Output) -> serde_json::Value {
-    serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON")
-}
-
 #[test]
 fn test_router_multichannel() {
     let temp_dir = TempDir::new().unwrap();
