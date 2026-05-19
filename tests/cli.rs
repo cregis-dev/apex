@@ -93,6 +93,91 @@ fn test_router_multichannel() {
 }
 
 #[test]
+fn test_config_path_uses_env_when_no_flag() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("env-apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    raw_apex_cmd()
+        .arg("config")
+        .arg("path")
+        .env("APEX_CONFIG", config_str)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("path: {}", config_str)))
+        .stdout(predicate::str::contains("source: env"));
+}
+
+#[test]
+fn test_config_path_flag_overrides_env_and_short_flag_works() {
+    let temp_dir = TempDir::new().unwrap();
+    let env_path = temp_dir.path().join("env.json");
+    let flag_path = temp_dir.path().join("flag.json");
+    let flag_str = flag_path.to_str().unwrap();
+
+    raw_apex_cmd()
+        .arg("-c")
+        .arg(flag_str)
+        .arg("config")
+        .arg("path")
+        .env("APEX_CONFIG", env_path.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("path: {}", flag_str)))
+        .stdout(predicate::str::contains("source: flag"));
+}
+
+#[test]
+fn test_config_validate_success_and_failure() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("apex.json");
+    let config_str = config_path.to_str().unwrap();
+
+    raw_apex_cmd()
+        .arg("-c")
+        .arg(config_str)
+        .arg("init")
+        .assert()
+        .success();
+
+    raw_apex_cmd()
+        .arg("-c")
+        .arg(config_str)
+        .arg("config")
+        .arg("validate")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Config is valid"));
+
+    raw_apex_cmd()
+        .arg("-c")
+        .arg(temp_dir.path().join("missing.json"))
+        .arg("config")
+        .arg("validate")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Config file not found"));
+}
+
+#[test]
+fn test_gateway_run_is_accepted_without_breaking_start() {
+    raw_apex_cmd()
+        .arg("gateway")
+        .arg("run")
+        .arg("--help")
+        .assert()
+        .success();
+
+    raw_apex_cmd()
+        .arg("gateway")
+        .arg("start")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--daemon"));
+}
+
+#[test]
 fn test_init_creates_config() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("apex.json");

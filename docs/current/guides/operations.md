@@ -82,6 +82,21 @@ apex init
 ```
 默认配置路径：`~/.apex/config.json`
 
+配置路径解析顺序固定为：
+
+1. 命令行 `--config` / `-c`
+2. 环境变量 `APEX_CONFIG`
+3. 默认路径 `~/.apex/config.json`
+
+常用诊断命令：
+
+```bash
+apex config path
+apex config validate
+APEX_CONFIG=/opt/apex/config.json apex config path
+apex -c /opt/apex/config.json config validate
+```
+
 ### 2. 添加 Channel (上游通道)
 
 Channel 代表一个实际的 AI 提供商账号或端点。
@@ -126,6 +141,31 @@ Team 'demo-team' added successfully.
 API Key: sk-ap-XyZ123...
 ```
 请妥善保存生成的 API Key。
+
+### 5. 启动与服务管理
+
+前台运行推荐使用 `gateway run`：
+
+```bash
+apex gateway run
+APEX_CONFIG=/opt/apex/config.json apex gateway run
+```
+
+`apex gateway start` 仍保持兼容，`apex gateway start --daemon` 仍使用内置 daemon/pid 文件模式。生产环境推荐使用原生服务管理：
+
+```bash
+apex -c /opt/apex/config.json service install --install-dir /opt/apex
+apex service start --install-dir /opt/apex
+apex service status --install-dir /opt/apex
+apex service logs --install-dir /opt/apex
+```
+
+Linux 使用 systemd，macOS 使用 launchd user agent。升级已通过 release installer 安装的实例：
+
+```bash
+apex upgrade --dry-run --install-dir /opt/apex
+apex upgrade --restart --install-dir /opt/apex
+```
 
 ### 面向自动化 / AI Skills 的 CLI 使用约定
 

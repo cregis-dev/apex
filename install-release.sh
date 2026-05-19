@@ -11,6 +11,7 @@
 #   --version <tag>      安装指定版本，默认 latest
 #   --repo <owner/repo>  指定 GitHub 仓库，默认 cregis-dev/apex
 #   --config-path <file> 将包内 config.example.json 写入指定路径
+#   --service           安装完成后注册原生系统服务
 #   --force-config       当 --config-path 已存在时强制覆盖
 #   --skip-checksum      跳过 SHA256 校验
 #   --help, -h           显示帮助
@@ -20,6 +21,8 @@ set -euo pipefail
 REPO="${APEX_REPO:-cregis-dev/apex}"
 VERSION="latest"
 CONFIG_PATH=""
+CONFIG_PATH_SET=false
+INSTALL_SERVICE=false
 FORCE_CONFIG=false
 SKIP_CHECKSUM=false
 TARGET_DIR="/opt/apex"
@@ -33,6 +36,7 @@ print_usage() {
   --version <tag>      安装指定版本，默认 latest
   --repo <owner/repo>  指定 GitHub 仓库，默认 cregis-dev/apex
   --config-path <file> 将包内 config.example.json 写入指定路径
+  --service            安装完成后注册原生系统服务
   --force-config       当 --config-path 已存在时强制覆盖
   --skip-checksum      跳过 SHA256 校验
   --help, -h           显示此帮助信息
@@ -40,7 +44,7 @@ print_usage() {
 示例:
   ./install-release.sh
   ./install-release.sh /opt/apex
-  ./install-release.sh --config-path /etc/apex/config.json /opt/apex
+  ./install-release.sh --service --config-path /etc/apex/config.json /opt/apex
   ./install-release.sh --version v0.1.1 /opt/apex
   ./install-release.sh --repo your-org/apex --skip-checksum /opt/apex
 EOF
@@ -221,7 +225,12 @@ while [ "$#" -gt 0 ]; do
                 exit 1
             fi
             CONFIG_PATH="$2"
+            CONFIG_PATH_SET=true
             shift 2
+            ;;
+        --service)
+            INSTALL_SERVICE=true
+            shift
             ;;
         --force-config)
             FORCE_CONFIG=true
@@ -268,6 +277,9 @@ echo "目标路径：$TARGET_DIR"
 if [ -n "$CONFIG_PATH" ]; then
     echo "配置文件：$CONFIG_PATH"
 fi
+if [ "$INSTALL_SERVICE" = true ]; then
+    echo "服务安装：是"
+fi
 
 echo ""
 echo "=== 1. 下载发布包 ==="
@@ -302,17 +314,39 @@ fi
 
 mkdir -p "$TARGET_DIR"
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
+RELEASE_DIR="$TARGET_DIR/releases/$VERSION"
+RELEASES_DIR="$TARGET_DIR/releases"
+CURRENT_LINK="$TARGET_DIR/current"
+mkdir -p "$RELEASE_DIR" "$TARGET_DIR/data" "$TARGET_DIR/logs"
 
-cp "$EXTRACTED_BINARY" "$TARGET_DIR/apex"
-chmod +x "$TARGET_DIR/apex"
+cp "$EXTRACTED_BINARY" "$RELEASE_DIR/apex"
+chmod +x "$RELEASE_DIR/apex"
 
 if [ "$(uname -s)" = "Darwin" ] && have_command codesign; then
     echo "在 macOS 上重新签名安装产物..."
-    codesign --force --sign - "$TARGET_DIR/apex"
+    codesign --force --sign - "$RELEASE_DIR/apex"
 fi
+
+if [ -L "$CURRENT_LINK" ] || [ -f "$CURRENT_LINK" ]; then
+    rm -f "$CURRENT_LINK"
+elif [ -d "$CURRENT_LINK" ]; then
+    rmdir "$CURRENT_LINK"
+fi
+if [ -L "$TARGET_DIR/apex" ] || [ -f "$TARGET_DIR/apex" ]; then
+    rm -f "$TARGET_DIR/apex"
+elif [ -d "$TARGET_DIR/apex" ]; then
+    echo "错误：$TARGET_DIR/apex 是目录，无法替换为便捷符号链接"
+    exit 1
+fi
+ln -s "$RELEASE_DIR" "$CURRENT_LINK"
+ln -s "$CURRENT_LINK/apex" "$TARGET_DIR/apex"
 
 echo ""
 echo "=== 4. 处理配置文件 ==="
+if [ -z "$CONFIG_PATH" ]; then
+    CONFIG_PATH="$TARGET_DIR/config.json"
+fi
+
 if [ -n "$CONFIG_PATH" ]; then
     if [ -z "$EXTRACTED_CONFIG_EXAMPLE" ]; then
         echo "错误：发布包中未找到 config.example.json，无法写入配置文件"
@@ -322,24 +356,61 @@ if [ -n "$CONFIG_PATH" ]; then
     CONFIG_PATH="$(expand_input_path "$CONFIG_PATH")"
 
     if [ -f "$CONFIG_PATH" ] && [ "$FORCE_CONFIG" = false ]; then
-        echo "错误：配置文件已存在：$CONFIG_PATH"
-        echo "如需覆盖，请追加 --force-config"
-        exit 1
+        if [ "$CONFIG_PATH_SET" = true ]; then
+            echo "错误：配置文件已存在：$CONFIG_PATH"
+            echo "如需覆盖，请追加 --force-config"
+            exit 1
+        fi
+        echo "配置文件已存在，保留：$CONFIG_PATH"
+    else
+        mkdir -p "$(dirname "$CONFIG_PATH")"
+        cp "$EXTRACTED_CONFIG_EXAMPLE" "$CONFIG_PATH"
+        echo "已写入配置文件：$CONFIG_PATH"
     fi
+fi
 
-    mkdir -p "$(dirname "$CONFIG_PATH")"
-    cp "$EXTRACTED_CONFIG_EXAMPLE" "$CONFIG_PATH"
-    echo "已写入配置文件：$CONFIG_PATH"
-else
-    echo "未请求写入配置文件，跳过"
+SERVICE_MANAGER=""
+SERVICE_NAME=""
+case "$(uname -s)" in
+    Linux)
+        SERVICE_MANAGER="systemd"
+        SERVICE_NAME="apex"
+        ;;
+    Darwin)
+        SERVICE_MANAGER="launchd"
+        SERVICE_NAME="dev.cregis.apex"
+        ;;
+esac
+
+cat > "$TARGET_DIR/install.json" <<EOF
+{
+  "install_dir": "$TARGET_DIR",
+  "current_version": "$VERSION",
+  "repo": "$REPO",
+  "config_path": "$CONFIG_PATH",
+  "service_name": "$SERVICE_NAME",
+  "service_manager": "$SERVICE_MANAGER",
+  "current_link": "$CURRENT_LINK",
+  "releases_dir": "$RELEASES_DIR",
+  "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "updated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+EOF
+
+if [ "$INSTALL_SERVICE" = true ]; then
+    echo ""
+    echo "=== 5. 安装系统服务 ==="
+    "$CURRENT_LINK/apex" -c "$CONFIG_PATH" service install --install-dir "$TARGET_DIR"
 fi
 
 echo ""
 echo "=== 安装完成 ==="
 echo "目录结构:"
-echo "  $TARGET_DIR/apex - 主程序"
-if [ -n "$CONFIG_PATH" ]; then
-    echo "  $CONFIG_PATH - 用户指定配置文件"
-fi
+echo "  $RELEASE_DIR/apex - 当前版本程序"
+echo "  $CURRENT_LINK -> releases/$VERSION"
+echo "  $TARGET_DIR/apex -> current/apex"
+echo "  $TARGET_DIR/install.json - 安装元数据"
+echo "  $CONFIG_PATH - 配置文件"
 echo ""
-echo "运行示例：$TARGET_DIR/apex gateway start --config /path/to/config.json"
+echo "运行示例：APEX_CONFIG=$CONFIG_PATH $TARGET_DIR/apex gateway run"
+echo "服务管理：$TARGET_DIR/apex service status --install-dir $TARGET_DIR"

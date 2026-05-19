@@ -77,73 +77,48 @@ docker run -d \
 
 #### 安装步骤
 
-**1. 下载二进制文件**:
+**1. 下载二进制文件并安装服务**:
 ```bash
 # 直接安装最新版本
-curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  sudo bash -s -- --service --config-path /opt/apex/config.json /opt/apex
 
 # 或安装指定版本到 /opt/apex
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
-  bash -s -- --version v0.1.0 /opt/apex
-
-# 如需一并写入示例配置到明确路径
-curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
-  bash -s -- --version v0.1.1 --config-path /opt/apex/config.json /opt/apex
+  sudo bash -s -- --service --version v0.1.1 --config-path /opt/apex/config.json /opt/apex
 ```
 
-**2. 移动到系统路径**:
+安装脚本会创建：
+
+- `/opt/apex/releases/<version>/apex`
+- `/opt/apex/current -> releases/<version>`
+- `/opt/apex/apex -> current/apex`
+- `/opt/apex/config.json`
+- `/opt/apex/install.json`
+- `/opt/apex/data` 和 `/opt/apex/logs`
+
+**2. 可选：移动到系统路径**:
 ```bash
 sudo ln -sf /opt/apex/apex /usr/local/bin/apex
 ```
 
 **3. 准备配置文件**:
 ```bash
-sudo mkdir -p /opt/apex
-curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
-  sudo bash -s -- --version v0.1.1 --config-path /opt/apex/config.json /opt/apex
 sudo vi /opt/apex/config.json
 ```
 
-**4. 配置 systemd 服务**:
-```ini
-# /etc/systemd/system/apex.service
-[Unit]
-Description=Apex AI Gateway
-After=network.target
-
-[Service]
-Type=simple
-User=apex
-Group=apex
-WorkingDirectory=/opt/apex
-ExecStart=/usr/local/bin/apex gateway start --config /opt/apex/config.json
-Restart=always
-RestartSec=10
-Environment=RUST_LOG=info
-
-[Install]
-WantedBy=multi-user.target
+**4. 启动服务**:
+```bash
+sudo /opt/apex/apex service start --install-dir /opt/apex
 ```
 
-**5. 启动服务**:
+**5. 验证状态**:
 ```bash
-# 创建用户
-sudo useradd -r -s /bin/false apex
-
-# 设置权限
-sudo chown -R apex:apex /opt/apex
-
-# 启用服务
-sudo systemctl daemon-reload
-sudo systemctl enable apex
-sudo systemctl start apex
-```
-
-**6. 验证状态**:
-```bash
-sudo systemctl status apex
+sudo /opt/apex/apex service status --install-dir /opt/apex
 curl http://localhost:12356/metrics
 ```
+
+Linux 服务由 systemd 管理，unit 执行 `/opt/apex/current/apex gateway run` 并通过 `APEX_CONFIG=/opt/apex/config.json` 传入配置。macOS 服务由 launchd user agent 管理，日志写入 `/opt/apex/logs/stdout.log` 和 `/opt/apex/logs/stderr.log`。
 
 ---
 
@@ -153,9 +128,9 @@ curl http://localhost:12356/metrics
 # 一键安装
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | sudo bash -s -- /opt/apex
 
-# 安装并写入示例配置
+# 安装、写入示例配置并注册服务
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
-  sudo bash -s -- --config-path /opt/apex/config.json /opt/apex
+  sudo bash -s -- --service --config-path /opt/apex/config.json /opt/apex
 ```
 
 **安装脚本内容** (`install-release.sh`):
@@ -166,11 +141,18 @@ INSTALL_PATH=${1:-/opt/apex}
 echo "Installing Apex Gateway to $INSTALL_PATH"
 
 # Detect platform and download the matching release archive
-# Install only the apex binary by default
-# Write config.example.json only when --config-path is provided
+# Install releases/<version>/apex and update current/apex symlinks
+# Write install.json metadata for service and upgrade commands
 
 echo "Installation complete!"
-echo "Run: $INSTALL_PATH/apex gateway start --config /path/to/config.json"
+echo "Run: APEX_CONFIG=$INSTALL_PATH/config.json $INSTALL_PATH/apex gateway run"
+```
+
+升级 release 安装：
+
+```bash
+sudo /opt/apex/apex upgrade --dry-run --install-dir /opt/apex
+sudo /opt/apex/apex upgrade --restart --install-dir /opt/apex
 ```
 
 ---

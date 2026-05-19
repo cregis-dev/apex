@@ -13,12 +13,15 @@ mod config;
 mod converters;
 mod database;
 mod gemini_compat;
+mod install_metadata;
 mod logs;
 mod metrics;
 mod middleware;
 mod providers;
 mod router_selector;
 mod server;
+mod service;
+mod upgrade;
 mod usage;
 mod utils;
 mod web_assets;
@@ -150,7 +153,7 @@ fn channels_public_json(channels: &[Channel]) -> Value {
 #[derive(Parser)]
 #[command(name = "apex", version)]
 struct Cli {
-    #[arg(long, global = true)]
+    #[arg(long, short = 'c', global = true)]
     config: Option<String>,
     #[command(subcommand)]
     command: Commands,
@@ -159,6 +162,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Init,
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     Channel {
         #[command(subcommand)]
         command: ChannelCommand,
@@ -177,15 +184,66 @@ enum Commands {
     },
     Status,
     Logs,
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+    Upgrade(UpgradeArgs),
 }
 
 #[derive(Subcommand)]
 enum GatewayCommand {
+    Run,
     Start {
         #[arg(long, short = 'd')]
         daemon: bool,
     },
     Stop,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    Path,
+    Validate,
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    Install(ServiceInstallArgs),
+    Uninstall(ServiceNameArgs),
+    Start(ServiceNameArgs),
+    Stop(ServiceNameArgs),
+    Restart(ServiceNameArgs),
+    Status(ServiceNameArgs),
+    Logs(ServiceNameArgs),
+}
+
+#[derive(Args)]
+struct ServiceInstallArgs {
+    #[arg(long)]
+    install_dir: Option<PathBuf>,
+    #[arg(long)]
+    name: Option<String>,
+}
+
+#[derive(Args)]
+struct ServiceNameArgs {
+    #[arg(long)]
+    install_dir: Option<PathBuf>,
+    #[arg(long)]
+    name: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct UpgradeArgs {
+    #[arg(long)]
+    version: Option<String>,
+    #[arg(long)]
+    restart: bool,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    install_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -219,7 +277,7 @@ struct TeamAddArgs {
 }
 
 fn handle_team_command(cli: &Cli, command: &TeamCommand) -> anyhow::Result<()> {
-    let config_path = resolve_config_path(cli.config.clone());
+    let config_path = resolve_config_path(cli.config.as_deref());
 
     match command {
         TeamCommand::Add(args) => {
@@ -523,7 +581,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Load config to get log level and dir
-    let config_path = resolve_config_path(cli.config.clone());
+    let config_path = resolve_config_path(cli.config.as_deref());
     let config = config::load_config(&config_path).ok();
 
     let log_level = config
@@ -591,14 +649,19 @@ fn main() -> anyhow::Result<()> {
 async fn async_main(cli: Cli) -> anyhow::Result<()> {
     match &cli.command {
         Commands::Init => {
-            let path = resolve_config_path(cli.config.clone());
+            let path = resolve_config_path(cli.config.as_deref());
             init_config(&path)?;
         }
+        Commands::Config { command } => handle_config_command(&cli, command)?,
         Commands::Channel { command } => handle_channel_command(&cli, command)?,
         Commands::Router { command } => handle_router_command(&cli, command)?,
         Commands::Gateway { command } => match command {
+            GatewayCommand::Run => {
+                let path = resolve_config_path(cli.config.as_deref());
+                server::run_server(path).await?;
+            }
             GatewayCommand::Start { daemon: _ } => {
-                let path = resolve_config_path(cli.config.clone());
+                let path = resolve_config_path(cli.config.as_deref());
                 server::run_server(path).await?;
             }
             GatewayCommand::Stop => handle_stop_command(&cli)?,
@@ -606,12 +669,162 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Commands::Status => handle_status_command(&cli)?,
         Commands::Logs => handle_logs_command(&cli)?,
         Commands::Team { command } => handle_team_command(&cli, command)?,
+        Commands::Service { command } => handle_service_command(&cli, command)?,
+        Commands::Upgrade(args) => {
+            upgrade::run_upgrade(upgrade::UpgradeOptions {
+                install_dir: args.install_dir.clone(),
+                target_version: args.version.clone(),
+                restart: args.restart,
+                dry_run: args.dry_run,
+            })
+            .await?
+        }
     }
     Ok(())
 }
 
+fn handle_config_command(cli: &Cli, command: &ConfigCommand) -> anyhow::Result<()> {
+    let resolved = resolve_config_path_with_source(cli.config.as_deref());
+    match command {
+        ConfigCommand::Path => {
+            println!("path: {}", resolved.path.display());
+            println!("source: {}", resolved.source.as_str());
+        }
+        ConfigCommand::Validate => {
+            load_config_or_exit(&resolved.path)?;
+            println!(
+                "Config is valid: {} (source: {})",
+                resolved.path.display(),
+                resolved.source.as_str()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn handle_service_command(cli: &Cli, command: &ServiceCommand) -> anyhow::Result<()> {
+    match command {
+        ServiceCommand::Install(args) => {
+            let install_dir = resolve_install_dir(args.install_dir.as_ref())?;
+            let config_path = resolve_config_path(cli.config.as_deref());
+            let existing_metadata = read_service_metadata(&install_dir);
+            let service_name = args
+                .name
+                .clone()
+                .or_else(|| {
+                    existing_metadata
+                        .as_ref()
+                        .and_then(|m| m.service_name.clone())
+                })
+                .unwrap_or_else(|| service::default_service_name().to_string());
+            let manager = service::ServiceManager::detect()?;
+            let definition = service::ServiceDefinition::new(
+                install_dir.clone(),
+                config_path.clone(),
+                service_name,
+                manager,
+            );
+            service::install_service(&definition)?;
+            let metadata = install_metadata::InstallMetadata::new(
+                install_dir.clone(),
+                existing_metadata
+                    .as_ref()
+                    .map(|m| m.current_version.clone())
+                    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+                existing_metadata
+                    .as_ref()
+                    .map(|m| m.repo.clone())
+                    .unwrap_or_else(|| "cregis-dev/apex".to_string()),
+                config_path,
+                Some(definition.service_name.clone()),
+                Some(manager.as_str().to_string()),
+            );
+            install_metadata::write_metadata(&install_dir, &metadata)?;
+            println!("Service installed: {}", definition.service_name);
+        }
+        ServiceCommand::Uninstall(args) => {
+            let definition = service_definition_from_args(cli, args)?;
+            service::uninstall_service(&definition)?;
+        }
+        ServiceCommand::Start(args) => {
+            let definition = service_definition_from_args(cli, args)?;
+            service::start_service(&definition)?;
+        }
+        ServiceCommand::Stop(args) => {
+            let definition = service_definition_from_args(cli, args)?;
+            service::stop_service(&definition)?;
+        }
+        ServiceCommand::Restart(args) => {
+            let definition = service_definition_from_args(cli, args)?;
+            service::restart_service(&definition)?;
+        }
+        ServiceCommand::Status(args) => {
+            let definition = service_definition_from_args(cli, args)?;
+            service::status_service(&definition)?;
+        }
+        ServiceCommand::Logs(args) => {
+            let definition = service_definition_from_args(cli, args)?;
+            service::logs_service(&definition)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_install_dir(input: Option<&PathBuf>) -> anyhow::Result<PathBuf> {
+    if let Some(path) = input {
+        return Ok(path.clone());
+    }
+    if let Ok(value) = std::env::var("APEX_INSTALL_DIR")
+        && !value.trim().is_empty()
+    {
+        return Ok(expand_config_path(&value));
+    }
+    Ok(PathBuf::from("/opt/apex"))
+}
+
+fn read_service_metadata(
+    install_dir: &std::path::Path,
+) -> Option<install_metadata::InstallMetadata> {
+    install_metadata::read_metadata(install_dir).ok()
+}
+
+fn service_definition_from_args(
+    cli: &Cli,
+    args: &ServiceNameArgs,
+) -> anyhow::Result<service::ServiceDefinition> {
+    let install_dir = resolve_install_dir(args.install_dir.as_ref())?;
+    let metadata = read_service_metadata(&install_dir);
+    let manager = match metadata.as_ref().and_then(|m| m.service_manager.as_deref()) {
+        Some("systemd") => service::ServiceManager::Systemd,
+        Some("launchd") => service::ServiceManager::Launchd,
+        Some(other) => anyhow::bail!("unsupported service manager in metadata: {}", other),
+        None => service::ServiceManager::detect()?,
+    };
+    let config_path = cli
+        .config
+        .as_deref()
+        .map(expand_config_path)
+        .or_else(|| {
+            metadata
+                .as_ref()
+                .map(|m| expand_config_path(&m.config_path))
+        })
+        .unwrap_or_else(default_config_path);
+    let service_name = args
+        .name
+        .clone()
+        .or_else(|| metadata.as_ref().and_then(|m| m.service_name.clone()))
+        .unwrap_or_else(|| service::default_service_name_for(manager).to_string());
+    Ok(service::ServiceDefinition::new(
+        install_dir,
+        config_path,
+        service_name,
+        manager,
+    ))
+}
+
 fn handle_logs_command(cli: &Cli) -> anyhow::Result<()> {
-    let path = resolve_config_path(cli.config.clone());
+    let path = resolve_config_path(cli.config.as_deref());
     let config = config::load_config(&path).ok();
     let log_dir_override = config.as_ref().and_then(|c| c.logging.dir.clone());
     let log_dir = get_log_dir(log_dir_override);
@@ -681,7 +894,7 @@ fn handle_logs_command(cli: &Cli) -> anyhow::Result<()> {
 
 fn handle_status_command(cli: &Cli) -> anyhow::Result<()> {
     // Load config to find log dir
-    let path = resolve_config_path(cli.config.clone());
+    let path = resolve_config_path(cli.config.as_deref());
     let config = config::load_config(&path).ok();
     let log_dir_override = config.as_ref().and_then(|c| c.logging.dir.clone());
     let log_dir = get_log_dir(log_dir_override);
@@ -711,7 +924,7 @@ fn handle_status_command(cli: &Cli) -> anyhow::Result<()> {
     println!("Gateway Status: {}{}", status, pid_info);
 
     // Load config to show details
-    let path = resolve_config_path(cli.config.clone());
+    let path = resolve_config_path(cli.config.as_deref());
     if path.exists() {
         println!("\nConfig File: {}", path.display());
         match config::load_config(&path) {
@@ -734,7 +947,7 @@ fn handle_status_command(cli: &Cli) -> anyhow::Result<()> {
 }
 
 fn handle_stop_command(cli: &Cli) -> anyhow::Result<()> {
-    let path = resolve_config_path(cli.config.clone());
+    let path = resolve_config_path(cli.config.as_deref());
     let config = config::load_config(&path).ok();
     let log_dir_override = config.as_ref().and_then(|c| c.logging.dir.clone());
     let log_dir = get_log_dir(log_dir_override);
@@ -787,14 +1000,76 @@ fn handle_stop_command(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn resolve_config_path(path: Option<String>) -> PathBuf {
-    if let Some(path) = path {
-        return expand_path(&path);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigPathSource {
+    Flag,
+    Env,
+    Default,
+}
+
+impl ConfigPathSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            ConfigPathSource::Flag => "flag",
+            ConfigPathSource::Env => "env",
+            ConfigPathSource::Default => "default",
+        }
     }
-    let mut home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.push(".apex");
-    home.push("config.json");
-    home
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedConfigPath {
+    path: PathBuf,
+    source: ConfigPathSource,
+}
+
+fn resolve_config_path(path: Option<&str>) -> PathBuf {
+    resolve_config_path_with_source(path).path
+}
+
+fn resolve_config_path_with_source(path: Option<&str>) -> ResolvedConfigPath {
+    if let Some(path) = path
+        && !path.trim().is_empty()
+    {
+        return ResolvedConfigPath {
+            path: expand_config_path(path),
+            source: ConfigPathSource::Flag,
+        };
+    }
+
+    if let Ok(path) = std::env::var("APEX_CONFIG")
+        && !path.trim().is_empty()
+    {
+        return ResolvedConfigPath {
+            path: expand_config_path(&path),
+            source: ConfigPathSource::Env,
+        };
+    }
+
+    ResolvedConfigPath {
+        path: default_config_path(),
+        source: ConfigPathSource::Default,
+    }
+}
+
+fn default_config_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".apex")
+        .join("config.json")
+}
+
+fn expand_config_path(path_str: &str) -> PathBuf {
+    let trimmed = path_str.trim();
+    if trimmed == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    }
+    if let Some(stripped) = trimmed.strip_prefix("~/") {
+        return dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(stripped);
+    }
+    PathBuf::from(trimmed)
 }
 
 fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
@@ -857,7 +1132,7 @@ fn load_config_or_exit(path: &std::path::Path) -> anyhow::Result<Config> {
 }
 
 fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result<()> {
-    let path = resolve_config_path(cli.config.clone());
+    let path = resolve_config_path(cli.config.as_deref());
     match command {
         ChannelCommand::Add(args) => {
             let mut config =
@@ -1205,7 +1480,7 @@ fn parse_target_channels(inputs: &[String]) -> anyhow::Result<Vec<TargetChannel>
 }
 
 fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<()> {
-    let path = resolve_config_path(cli.config.clone());
+    let path = resolve_config_path(cli.config.as_deref());
     match command {
         RouterCommand::Add(args) => {
             let mut config =
