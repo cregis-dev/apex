@@ -71,8 +71,7 @@ pub fn service_path(definition: &ServiceDefinition) -> PathBuf {
         ServiceManager::Systemd => {
             PathBuf::from("/etc/systemd/system").join(systemd_unit(definition))
         }
-        ServiceManager::Launchd => dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
+        ServiceManager::Launchd => launchd_home_dir()
             .join("Library")
             .join("LaunchAgents")
             .join(format!("{}.plist", definition.service_name)),
@@ -190,12 +189,32 @@ pub fn start_service(definition: &ServiceDefinition) -> anyhow::Result<()> {
                 .arg("start")
                 .arg(systemd_unit(definition)),
         )?,
-        ServiceManager::Launchd => run_command(
-            Command::new("launchctl")
-                .arg("bootstrap")
-                .arg(launchd_domain())
-                .arg(service_path(definition)),
-        )?,
+        ServiceManager::Launchd => {
+            let path = service_path(definition);
+            if !path.exists() {
+                bail!(
+                    "service definition not found at {}; run service install first",
+                    path.display()
+                );
+            }
+
+            let domain = launchd_domain();
+            let target = launchd_target(&domain, &definition.service_name);
+            if !launchd_service_is_loaded(&target) {
+                run_command(
+                    Command::new("launchctl")
+                        .arg("bootstrap")
+                        .arg(&domain)
+                        .arg(&path),
+                )?;
+            }
+            run_command(
+                Command::new("launchctl")
+                    .arg("kickstart")
+                    .arg("-k")
+                    .arg(target),
+            )?;
+        }
     }
     Ok(())
 }
@@ -210,8 +229,7 @@ pub fn stop_service(definition: &ServiceDefinition) -> anyhow::Result<()> {
         ServiceManager::Launchd => run_command(
             Command::new("launchctl")
                 .arg("bootout")
-                .arg(launchd_domain())
-                .arg(service_path(definition)),
+                .arg(launchd_target(&launchd_domain(), &definition.service_name)),
         )?,
     }
     Ok(())
@@ -239,13 +257,11 @@ pub fn status_service(definition: &ServiceDefinition) -> anyhow::Result<()> {
                 .arg("status")
                 .arg(systemd_unit(definition)),
         )?,
-        ServiceManager::Launchd => {
-            run_command(Command::new("launchctl").arg("print").arg(format!(
-                "{}/{}",
-                launchd_domain(),
-                definition.service_name
-            )))?
-        }
+        ServiceManager::Launchd => run_command(
+            Command::new("launchctl")
+                .arg("print")
+                .arg(launchd_target(&launchd_domain(), &definition.service_name)),
+        )?,
     }
     Ok(())
 }
@@ -261,7 +277,7 @@ pub fn service_is_active(definition: &ServiceDefinition) -> bool {
             .unwrap_or(false),
         ServiceManager::Launchd => Command::new("launchctl")
             .arg("print")
-            .arg(format!("{}/{}", launchd_domain(), definition.service_name))
+            .arg(launchd_target(&launchd_domain(), &definition.service_name))
             .status()
             .map(|status| status.success())
             .unwrap_or(false),
@@ -293,18 +309,61 @@ fn systemd_unit(definition: &ServiceDefinition) -> String {
     }
 }
 
+fn launchd_home_dir() -> PathBuf {
+    launchd_home_dir_for(std::env::var("SUDO_USER").ok().as_deref(), dirs::home_dir())
+}
+
+fn launchd_home_dir_for(sudo_user: Option<&str>, fallback_home: Option<PathBuf>) -> PathBuf {
+    if let Some(user) = sudo_user
+        && !user.trim().is_empty()
+        && user != "root"
+    {
+        return PathBuf::from("/Users").join(user);
+    }
+    fallback_home.unwrap_or_else(|| PathBuf::from("."))
+}
+
 fn launchd_domain() -> String {
-    format!(
-        "gui/{}",
-        std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|uid| uid.trim().to_string())
-            .filter(|uid| !uid.is_empty())
-            .unwrap_or_else(|| "501".to_string())
-    )
+    launchd_domain_for_uid(&launchd_uid())
+}
+
+fn launchd_uid() -> String {
+    if let Some(uid) = launchd_uid_from_sudo_env(std::env::var("SUDO_UID").ok().as_deref()) {
+        return uid;
+    }
+
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|uid| uid.trim().to_string())
+        .filter(|uid| !uid.is_empty())
+        .unwrap_or_else(|| "501".to_string())
+}
+
+fn launchd_uid_from_sudo_env(sudo_uid: Option<&str>) -> Option<String> {
+    sudo_uid
+        .map(str::trim)
+        .filter(|uid| !uid.is_empty() && *uid != "0")
+        .map(ToString::to_string)
+}
+
+fn launchd_domain_for_uid(uid: &str) -> String {
+    format!("gui/{uid}")
+}
+
+fn launchd_target(domain: &str, service_name: &str) -> String {
+    format!("{domain}/{service_name}")
+}
+
+fn launchd_service_is_loaded(target: &str) -> bool {
+    Command::new("launchctl")
+        .arg("print")
+        .arg(target)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn run_command(command: &mut Command) -> anyhow::Result<()> {
@@ -382,5 +441,31 @@ mod tests {
         assert!(plist.contains("<string>/opt/apex/config.json</string>"));
         assert!(plist.contains("<string>/opt/apex/logs/stdout.log</string>"));
         assert!(plist.contains("<string>/opt/apex/logs/stderr.log</string>"));
+    }
+
+    #[test]
+    fn launchd_domain_prefers_sudo_uid_for_user_agent() {
+        assert_eq!(
+            launchd_uid_from_sudo_env(Some("501")).as_deref(),
+            Some("501")
+        );
+        assert_eq!(launchd_uid_from_sudo_env(Some("0")), None);
+        assert_eq!(launchd_domain_for_uid("501"), "gui/501");
+        assert_eq!(
+            launchd_target("gui/501", "dev.cregis.apex"),
+            "gui/501/dev.cregis.apex"
+        );
+    }
+
+    #[test]
+    fn launchd_home_prefers_sudo_user_home() {
+        assert_eq!(
+            launchd_home_dir_for(Some("alice"), Some(PathBuf::from("/var/root"))),
+            PathBuf::from("/Users/alice")
+        );
+        assert_eq!(
+            launchd_home_dir_for(Some("root"), Some(PathBuf::from("/var/root"))),
+            PathBuf::from("/var/root")
+        );
     }
 }
