@@ -836,7 +836,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
         data_dir: dirs::home_dir()
             .map(|p| p.join(".apex/data").to_string_lossy().to_string())
             .unwrap_or_else(|| "~/.apex/data".to_string()),
-        web_dir: "web".to_string(),
+        web_dir: "target/web".to_string(),
         teams: std::sync::Arc::new(Vec::new()),
         compliance: None,
     };

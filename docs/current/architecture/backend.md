@@ -92,7 +92,6 @@ pub struct Config {
     pub global: Global,
     pub logging: Logging,
     pub data_dir: String,
-    pub web_dir: String, // optional override for filesystem-served web assets
     pub channels: Arc<Vec<Channel>>,
     pub routers: Arc<Vec<Router>>,
     pub teams: Arc<Vec<Team>>,
@@ -388,7 +387,6 @@ pub struct UsageRecord {
     "dir": "~/.apex/logs"
   },
   "data_dir": "~/.apex/data",
-  "web_dir": "target/web",
   "channels": [
     {
       "name": "openai-main",

@@ -23,7 +23,6 @@
   "global": { ... },
   "logging": { ... },
   "data_dir": "...",
-  "web_dir": "...",
   "channels": [ ... ],
   "routers": [ ... ],
   "teams": [ ... ],
@@ -38,7 +37,6 @@
 | `global` | object | 是 | 全局服务器设置 |
 | `logging` | object | 否 | 日志配置，默认为 info 级别 |
 | `data_dir` | string | 否 | 运行数据目录，默认 `~/.apex/data` |
-| `web_dir` | string | 否 | Web 静态目录覆盖项，默认 `target/web`，仅文件系统模式使用 |
 | `channels` | array | 否 | 通道列表，默认为空 |
 | `routers` | array | 否 | 路由规则列表，默认为空 |
 | `teams` | array | 否 | 团队列表，默认为空 |
@@ -49,19 +47,13 @@
 
 ## Web 静态资源目录
 
-`web_dir` 是可选字段。
+Dashboard 静态导出目录固定为 `target/web`。
 
 使用规则：
 
-- 未启用 `embedded-web` 时，后端从该目录读取静态导出资源
-- 启用 `embedded-web` 时，发布二进制从内嵌资源读取 Dashboard，`web_dir` 不再是发布必需项
-- 开发态如果需要从文件系统读取静态资源，建议使用默认值 `target/web`
-
-示例：
-
-```json
-"web_dir": "target/web"
-```
+- 未启用 `embedded-web` 时，后端按约定从 `target/web` 读取静态资源
+- 启用 `embedded-web` 时，发布二进制从内嵌资源读取 Dashboard
+- 旧配置中的 `web_dir` 会被兼容读取，但它已经不是正式配置项，也不会再写回配置文件
 
 ---
 

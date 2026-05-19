@@ -44,7 +44,6 @@ cat > "$CONFIG_PATH" <<EOF
       "backoff_ms": 100,
       "retry_on_status": [500, 502, 503, 504]
     },
-    "enable_mcp": false,
     "cors_allowed_origins": []
   },
   "logging": {
@@ -52,11 +51,9 @@ cat > "$CONFIG_PATH" <<EOF
     "dir": "$LOG_DIR"
   },
   "data_dir": "$DATA_DIR",
-  "web_dir": "$REPO_ROOT/target/web",
   "channels": [],
   "routers": [],
   "teams": [],
-  "prompts": [],
   "metrics": {
     "enabled": true,
     "path": "/metrics"

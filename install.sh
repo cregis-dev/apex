@@ -146,7 +146,6 @@ else
       "backoff_ms": 100,
       "retry_on_status": [429, 500, 502, 503, 504]
     },
-    "enable_mcp": true,
     "cors_allowed_origins": []
   },
   "metrics": {
@@ -167,8 +166,7 @@ else
     }
   ],
   "channels": [],
-  "routers": [],
-  "prompts": []
+  "routers": []
 }
 EOF
     echo "  已生成与当前代码一致的配置模板"

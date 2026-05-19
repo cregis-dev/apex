@@ -436,6 +436,7 @@ fn test_team_lifecycle_is_noninteractive() {
     let config_str = config_path.to_str().unwrap();
 
     apex_cmd(config_str).arg("init").assert().success();
+
     apex_cmd(config_str)
         .arg("team")
         .arg("add")
