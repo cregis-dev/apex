@@ -17,6 +17,11 @@ Current release automation:
   - `apex-aarch64-macos.tar.gz`
   - `checksums.txt`
 - Installer entrypoint: `install-release.sh`
+- Installed release layout:
+  - `<install_dir>/releases/<version>/apex`
+  - `<install_dir>/current -> releases/<version>`
+  - `<install_dir>/apex -> current/apex`
+  - `<install_dir>/install.json`
 
 Linux packaging notes:
 
@@ -76,6 +81,8 @@ cd web
 npm run build
 cd ..
 bash -n install-release.sh
+./install-release.sh --version v0.1.1 --skip-checksum /tmp/apex-release-smoke
+/tmp/apex-release-smoke/apex upgrade --dry-run --install-dir /tmp/apex-release-smoke
 ```
 
 ## Standard Release Flow
@@ -159,7 +166,15 @@ curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-releas
   bash -s -- --version v0.1.1 /tmp/apex-smoke
 ```
 
-5. Confirm the installed binary starts with the expected config path.
+5. Confirm the installed layout contains `releases/v0.1.1/apex`, `current`, `apex`, and `install.json`.
+6. Confirm the installed binary starts with the expected config path.
+7. For service-impacting releases, smoke-check service install rendering on a disposable host:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  sudo bash -s -- --service --version v0.1.1 --config-path /opt/apex/config.json /opt/apex
+sudo /opt/apex/apex upgrade --dry-run --install-dir /opt/apex
+```
 
 ## Main Branch vs Release Tag
 
@@ -225,6 +240,7 @@ Check:
 - artifact names still match platform detection in `install-release.sh`
 - `checksums.txt` contains the uploaded filenames
 - release assets were attached to the correct tag
+- `install.json` points at the intended install dir, config path, `current` symlink, and releases dir
 
 ### Linux runtime fails with `GLIBC_x.y not found`
 

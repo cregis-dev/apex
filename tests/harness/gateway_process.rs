@@ -13,6 +13,18 @@ pub struct GatewayProcess {
 
 impl GatewayProcess {
     pub fn spawn(config_path: &Path, listen: &str) -> anyhow::Result<Self> {
+        Self::spawn_with_command(config_path, listen, false)
+    }
+
+    pub fn spawn_run_with_env_config(config_path: &Path, listen: &str) -> anyhow::Result<Self> {
+        Self::spawn_with_command(config_path, listen, true)
+    }
+
+    fn spawn_with_command(
+        config_path: &Path,
+        listen: &str,
+        use_env_config_and_run: bool,
+    ) -> anyhow::Result<Self> {
         let log_path = config_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
@@ -23,11 +35,15 @@ impl GatewayProcess {
             .try_clone()
             .with_context(|| format!("failed to clone log file: {}", log_path.display()))?;
 
-        let child = Command::new(env!("CARGO_BIN_EXE_apex"))
-            .arg("gateway")
-            .arg("start")
-            .arg("--config")
-            .arg(config_path)
+        let mut command = Command::new(env!("CARGO_BIN_EXE_apex"));
+        command.arg("gateway");
+        if use_env_config_and_run {
+            command.arg("run").env("APEX_CONFIG", config_path);
+        } else {
+            command.arg("start").arg("--config").arg(config_path);
+        }
+
+        let child = command
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_err))
             .spawn()

@@ -115,6 +115,63 @@ APEX_UPSTREAM_1_MODEL=mock-openai-model
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_blackbox_gateway_run_uses_apex_config_env() {
+    let upstream = MockProvider::spawn("mock-run-env").await.unwrap();
+    let listen = pick_listen_addr().unwrap();
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("generated.e2e.config.json");
+
+    let env: E2eEnv = format!(
+        r#"
+APEX_E2E_LISTEN={listen}
+APEX_E2E_TEAM_ID=run-env-team
+APEX_E2E_TEAM_KEY=sk-run-env-team
+APEX_E2E_ADMIN_KEY=sk-run-env-admin
+APEX_E2E_ROUTER_NAME=run-env-router
+APEX_E2E_TEST_MODEL=apex-test-chat
+
+APEX_UPSTREAM_1_ENABLED=true
+APEX_UPSTREAM_1_NAME=mock_run_env
+APEX_UPSTREAM_1_TYPE=openai
+APEX_UPSTREAM_1_BASE_URL={}
+APEX_UPSTREAM_1_MODEL=mock-run-env-model
+"#,
+        upstream.base_url()
+    )
+    .parse()
+    .unwrap();
+
+    write_config(&env, &config_path).unwrap();
+
+    let mut gateway = GatewayProcess::spawn_run_with_env_config(&config_path, &listen).unwrap();
+    gateway.wait_until_ready(Duration::from_secs(10)).unwrap();
+
+    let response = Client::new()
+        .post(format!("{}/v1/chat/completions", gateway.base_url()))
+        .header("Authorization", "Bearer sk-run-env-team")
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "model": "apex-test-chat",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        200,
+        "gateway logs:\n{}",
+        gateway.read_logs()
+    );
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "response from mock-run-env"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_blackbox_anthropic_messages_and_stream_work() {
     let upstream = MockProvider::spawn("mock-anthropic").await.unwrap();
     let listen = pick_listen_addr().unwrap();
