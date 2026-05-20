@@ -706,8 +706,12 @@ fn handle_service_command(cli: &Cli, command: &ServiceCommand) -> anyhow::Result
     match command {
         ServiceCommand::Install(args) => {
             let install_dir = resolve_install_dir(args.install_dir.as_ref())?;
-            let config_path = resolve_config_path(cli.config.as_deref());
             let existing_metadata = read_service_metadata(&install_dir);
+            let config_path = resolve_service_install_config_path(
+                cli.config.as_deref(),
+                &install_dir,
+                existing_metadata.as_ref(),
+            );
             let service_name = args
                 .name
                 .clone()
@@ -786,6 +790,44 @@ fn read_service_metadata(
     install_dir: &std::path::Path,
 ) -> Option<install_metadata::InstallMetadata> {
     install_metadata::read_metadata(install_dir).ok()
+}
+
+fn resolve_service_install_config_path(
+    cli_config: Option<&str>,
+    install_dir: &std::path::Path,
+    metadata: Option<&install_metadata::InstallMetadata>,
+) -> PathBuf {
+    let resolved = resolve_config_path_with_source(cli_config);
+    choose_service_install_config_path(resolved, install_dir, metadata)
+}
+
+fn choose_service_install_config_path(
+    resolved: ResolvedConfigPath,
+    install_dir: &std::path::Path,
+    metadata: Option<&install_metadata::InstallMetadata>,
+) -> PathBuf {
+    if resolved.source != ConfigPathSource::Default {
+        return resolved.path;
+    }
+
+    let install_config = install_dir.join("config.json");
+
+    if let Some(metadata) = metadata {
+        let metadata_path = metadata.config_path.trim();
+        if !metadata_path.is_empty() {
+            let metadata_config = expand_config_path(metadata_path);
+            if metadata_config == resolved.path && install_config.exists() {
+                return install_config;
+            }
+            return metadata_config;
+        }
+    }
+
+    if install_config.exists() {
+        return install_config;
+    }
+
+    resolved.path
 }
 
 fn service_definition_from_args(
@@ -2082,6 +2124,89 @@ mod tests {
         };
         let merged = build_timeouts(&base, None, None, None);
         assert!(merged.is_none());
+    }
+
+    #[test]
+    fn service_install_uses_metadata_config_when_config_is_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        let metadata = install_metadata::InstallMetadata::new(
+            temp.path().to_path_buf(),
+            "v1.2.3".to_string(),
+            "cregis-dev/apex".to_string(),
+            config_path.clone(),
+            Some("apex".to_string()),
+            Some("systemd".to_string()),
+        );
+        let resolved = ResolvedConfigPath {
+            path: PathBuf::from("/home/user/.apex/config.json"),
+            source: ConfigPathSource::Default,
+        };
+
+        let chosen = choose_service_install_config_path(resolved, temp.path(), Some(&metadata));
+
+        assert_eq!(chosen, config_path);
+    }
+
+    #[test]
+    fn service_install_keeps_explicit_config_over_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let explicit_path = temp.path().join("explicit.json");
+        let metadata = install_metadata::InstallMetadata::new(
+            temp.path().to_path_buf(),
+            "v1.2.3".to_string(),
+            "cregis-dev/apex".to_string(),
+            temp.path().join("metadata.json"),
+            Some("apex".to_string()),
+            Some("systemd".to_string()),
+        );
+        let resolved = ResolvedConfigPath {
+            path: explicit_path.clone(),
+            source: ConfigPathSource::Flag,
+        };
+
+        let chosen = choose_service_install_config_path(resolved, temp.path(), Some(&metadata));
+
+        assert_eq!(chosen, explicit_path);
+    }
+
+    #[test]
+    fn service_install_uses_install_dir_config_before_home_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_config = temp.path().join("config.json");
+        std::fs::write(&install_config, "{}").unwrap();
+        let resolved = ResolvedConfigPath {
+            path: PathBuf::from("/home/user/.apex/config.json"),
+            source: ConfigPathSource::Default,
+        };
+
+        let chosen = choose_service_install_config_path(resolved, temp.path(), None);
+
+        assert_eq!(chosen, install_config);
+    }
+
+    #[test]
+    fn service_install_repairs_metadata_that_saved_home_default_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_config = temp.path().join("config.json");
+        let default_config = PathBuf::from("/home/user/.apex/config.json");
+        std::fs::write(&install_config, "{}").unwrap();
+        let metadata = install_metadata::InstallMetadata::new(
+            temp.path().to_path_buf(),
+            "v1.2.3".to_string(),
+            "cregis-dev/apex".to_string(),
+            default_config.clone(),
+            Some("apex".to_string()),
+            Some("systemd".to_string()),
+        );
+        let resolved = ResolvedConfigPath {
+            path: default_config,
+            source: ConfigPathSource::Default,
+        };
+
+        let chosen = choose_service_install_config_path(resolved, temp.path(), Some(&metadata));
+
+        assert_eq!(chosen, install_config);
     }
 }
 
