@@ -75,17 +75,27 @@ docker run -d \
 | Memory | 512MB+ |
 | Disk | 1GB+ |
 
-#### 安装步骤
+#### 安装路径默认值
+
+| 平台 | 默认 install dir | 服务管理 | 是否需要 sudo |
+|------|-----------------|----------|---------------|
+| Linux | `/opt/apex` | systemd 系统服务 | 是 |
+| macOS | `~/.apex` | launchd user agent | **否** |
+
+> macOS 上服务以普通用户身份运行，安装目录、配置、日志都必须对该用户可写。如果硬把 macOS 装到 `/opt/apex` 这种 root 目录，user agent 启动后会因为无法写入 `logs/` 而被 launchd 反复重启。
+
+可通过 `--install-dir <path>` 或 `APEX_INSTALL_DIR` 环境变量覆盖。
+
+#### 安装步骤（Linux）
 
 **1. 下载二进制文件并安装服务**:
 ```bash
-# 直接安装最新版本
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
-  sudo bash -s -- --service --config-path /opt/apex/config.json /opt/apex
+  sudo bash -s -- --service --config-path /opt/apex/config.json
 
-# 或安装指定版本到 /opt/apex
+# 安装指定版本
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
-  sudo bash -s -- --service --version v0.1.1 --config-path /opt/apex/config.json /opt/apex
+  sudo bash -s -- --service --version v0.1.1 --config-path /opt/apex/config.json
 ```
 
 安装脚本会创建：
@@ -102,57 +112,62 @@ curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-releas
 sudo ln -sf /opt/apex/apex /usr/local/bin/apex
 ```
 
-**3. 准备配置文件**:
+**3. 启动并验证**:
 ```bash
 sudo vi /opt/apex/config.json
-```
-
-**4. 启动服务**:
-```bash
 sudo /opt/apex/apex service start --install-dir /opt/apex
-```
-
-**5. 验证状态**:
-```bash
 sudo /opt/apex/apex service status --install-dir /opt/apex
 curl http://localhost:12356/metrics
 ```
 
-Linux 服务由 systemd 管理，unit 执行 `/opt/apex/current/apex gateway run` 并通过 `APEX_CONFIG=/opt/apex/config.json` 传入配置。macOS 服务由 launchd user agent 管理，日志写入 `/opt/apex/logs/stdout.log` 和 `/opt/apex/logs/stderr.log`。
+systemd unit 执行 `/opt/apex/current/apex gateway run`，并通过 `APEX_CONFIG=/opt/apex/config.json` 传入配置。
+
+#### 安装步骤（macOS）
+
+> 全程不要使用 sudo。
+
+**1. 下载二进制文件并安装服务**:
+```bash
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --service
+```
+
+安装脚本会创建：
+
+- `~/.apex/releases/<version>/apex`
+- `~/.apex/current -> releases/<version>`
+- `~/.apex/apex -> current/apex`
+- `~/.apex/config.json`
+- `~/.apex/install.json`
+- `~/.apex/data` 和 `~/.apex/logs`
+
+**2. 可选：移动到 PATH**:
+```bash
+ln -sf ~/.apex/apex /usr/local/bin/apex   # /usr/local/bin 写不进时改用 ~/bin
+```
+
+**3. 启动并验证**:
+```bash
+vi ~/.apex/config.json
+~/.apex/apex service start
+~/.apex/apex service status
+curl http://localhost:12356/metrics
+```
+
+launchd plist 位于 `~/Library/LaunchAgents/dev.cregis.apex.plist`，日志写入 `~/.apex/logs/stdout.log` 和 `~/.apex/logs/stderr.log`。
 
 ---
 
-### 3. 使用安装脚本
+### 3. 升级 release 安装
 
 ```bash
-# 一键安装
-curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | sudo bash -s -- /opt/apex
-
-# 安装、写入示例配置并注册服务
-curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
-  sudo bash -s -- --service --config-path /opt/apex/config.json /opt/apex
-```
-
-**安装脚本内容** (`install-release.sh`):
-```bash
-#!/bin/bash
-INSTALL_PATH=${1:-/opt/apex}
-
-echo "Installing Apex Gateway to $INSTALL_PATH"
-
-# Detect platform and download the matching release archive
-# Install releases/<version>/apex and update current/apex symlinks
-# Write install.json metadata for service and upgrade commands
-
-echo "Installation complete!"
-echo "Run: APEX_CONFIG=$INSTALL_PATH/config.json $INSTALL_PATH/apex gateway run"
-```
-
-升级 release 安装：
-
-```bash
+# Linux
 sudo /opt/apex/apex upgrade --dry-run --install-dir /opt/apex
 sudo /opt/apex/apex upgrade --restart --install-dir /opt/apex
+
+# macOS
+~/.apex/apex upgrade --dry-run
+~/.apex/apex upgrade --restart
 ```
 
 ---

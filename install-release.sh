@@ -7,6 +7,10 @@
 #   - 安装 apex 二进制到目标目录
 #   - 可选地将包内示例配置写入指定路径
 #
+# 目标路径默认值：
+#   Linux → /opt/apex（systemd 系统服务，需要 sudo）
+#   macOS → ~/.apex   （launchd user agent，不需要 sudo）
+#
 # 选项:
 #   --version <tag>      安装指定版本，默认 latest
 #   --repo <owner/repo>  指定 GitHub 仓库，默认 cregis-dev/apex
@@ -25,12 +29,49 @@ CONFIG_PATH_SET=false
 INSTALL_SERVICE=false
 FORCE_CONFIG=false
 SKIP_CHECKSUM=false
-TARGET_DIR="/opt/apex"
+TARGET_DIR=""
 TMP_DIR=""
+
+resolve_user_home() {
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        case "$(uname -s)" in
+            Darwin)
+                printf '/Users/%s\n' "$SUDO_USER"
+                return 0
+                ;;
+            Linux)
+                local home_entry
+                home_entry="$(getent passwd "$SUDO_USER" 2>/dev/null | awk -F: '{print $6}')"
+                if [ -n "$home_entry" ]; then
+                    printf '%s\n' "$home_entry"
+                    return 0
+                fi
+                printf '/home/%s\n' "$SUDO_USER"
+                return 0
+                ;;
+        esac
+    fi
+    printf '%s\n' "${HOME:-/root}"
+}
+
+default_target_dir() {
+    case "$(uname -s)" in
+        Darwin)
+            printf '%s/.apex\n' "$(resolve_user_home)"
+            ;;
+        *)
+            printf '/opt/apex\n'
+            ;;
+    esac
+}
 
 print_usage() {
     cat <<'EOF'
 用法：./install-release.sh [选项] [目标路径]
+
+目标路径默认值：
+  Linux  → /opt/apex      （需要 sudo，由 systemd 系统服务管理）
+  macOS  → ~/.apex        （不需要 sudo，由 launchd user agent 管理）
 
 选项:
   --version <tag>      安装指定版本，默认 latest
@@ -41,12 +82,14 @@ print_usage() {
   --skip-checksum      跳过 SHA256 校验
   --help, -h           显示此帮助信息
 
-示例:
+示例 (Linux)：
+  sudo ./install-release.sh
+  sudo ./install-release.sh --service --config-path /opt/apex/config.json /opt/apex
+
+示例 (macOS)：
   ./install-release.sh
-  ./install-release.sh /opt/apex
-  ./install-release.sh --service --config-path /etc/apex/config.json /opt/apex
-  ./install-release.sh --version v0.1.1 /opt/apex
-  ./install-release.sh --repo your-org/apex --skip-checksum /opt/apex
+  ./install-release.sh --service
+  ./install-release.sh --version v0.1.1 ~/.apex
 EOF
 }
 
@@ -255,6 +298,15 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+if [ -z "$TARGET_DIR" ]; then
+    TARGET_DIR="$(default_target_dir)"
+fi
+
+if [ "$(uname -s)" = "Darwin" ] && [ "$(id -u)" = "0" ] && [ -z "${SUDO_USER:-}" ]; then
+    echo "警告：在 macOS 上以 root 直接运行未指定 SUDO_USER，安装目标将落在 root 家目录。"
+    echo "      推荐改为以普通用户运行该脚本（macOS 默认使用 launchd user agent）。"
+fi
 
 require_any_command curl wget
 require_any_command tar

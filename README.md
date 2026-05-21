@@ -96,24 +96,40 @@ To use real providers (OpenAI, Anthropic, etc.):
 
 ## 📦 Installation (Standalone)
 
+Default install path: `/opt/apex` on Linux (needs sudo, systemd), `~/.apex` on macOS (no sudo, launchd user agent). See [deployment.md](docs/current/guides/deployment.md) for details.
+
 For packaged installation from GitHub Releases:
 
 ```bash
+# Linux
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | sudo bash
+
+# macOS (no sudo)
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | bash
 ```
 
 To install a specific version:
 
 ```bash
+# Linux
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
-  bash -s -- --version v0.1.0 /opt/apex
+  sudo bash -s -- --version v0.1.0
+
+# macOS
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --version v0.1.0
 ```
 
 To also write the packaged example config to an explicit path:
 
 ```bash
+# Linux
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
-  bash -s -- --version v0.1.1 --config-path /etc/apex/config.json /opt/apex
+  sudo bash -s -- --version v0.1.1 --config-path /etc/apex/config.json /opt/apex
+
+# macOS
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --version v0.1.1 --config-path ~/.apex/config.json
 ```
 
 If you prefer to build from source:

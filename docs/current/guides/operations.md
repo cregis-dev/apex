@@ -151,20 +151,43 @@ apex gateway run
 APEX_CONFIG=/opt/apex/config.json apex gateway run
 ```
 
-`apex gateway start` 仍保持兼容，`apex gateway start --daemon` 仍使用内置 daemon/pid 文件模式。生产环境推荐使用原生服务管理：
+`apex gateway start` 仍保持兼容，`apex gateway start --daemon` 仍使用内置 daemon/pid 文件模式。生产环境推荐使用原生服务管理。
+
+`service` / `upgrade` 子命令的默认 `--install-dir` 按平台区分：
+
+| 平台 | 默认 install dir | 服务管理 | 典型调用 |
+|------|-----------------|----------|----------|
+| Linux | `/opt/apex` | systemd 系统服务 | `sudo apex ...` |
+| macOS | `~/.apex` | launchd user agent | `apex ...`（不要 sudo） |
+
+> macOS 上 user agent 以普通用户身份运行；把目录放在 `/opt/apex` 这种 root 拥有的位置会导致 launchd 启动后无法写入 `logs/` 而反复重启。
 
 ```bash
-apex -c /opt/apex/config.json service install --install-dir /opt/apex
-apex service start --install-dir /opt/apex
-apex service status --install-dir /opt/apex
-apex service logs --install-dir /opt/apex
+# Linux
+sudo apex -c /opt/apex/config.json service install --install-dir /opt/apex
+sudo apex service start --install-dir /opt/apex
+sudo apex service status --install-dir /opt/apex
+sudo apex service logs --install-dir /opt/apex
+
+# macOS（默认值即 ~/.apex，--install-dir 可省略）
+apex -c ~/.apex/config.json service install
+apex service start
+apex service status
+apex service logs
 ```
 
-Linux 使用 systemd，macOS 使用 launchd user agent。升级已通过 release installer 安装的实例：
+可通过 `--install-dir <path>` 或 `APEX_INSTALL_DIR` 环境变量覆盖默认值。
+
+升级已通过 release installer 安装的实例：
 
 ```bash
-apex upgrade --dry-run --install-dir /opt/apex
-apex upgrade --restart --install-dir /opt/apex
+# Linux
+sudo apex upgrade --dry-run --install-dir /opt/apex
+sudo apex upgrade --restart --install-dir /opt/apex
+
+# macOS
+apex upgrade --dry-run
+apex upgrade --restart
 ```
 
 ### 面向自动化 / AI Skills 的 CLI 使用约定

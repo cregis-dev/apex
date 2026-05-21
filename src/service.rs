@@ -71,7 +71,7 @@ pub fn service_path(definition: &ServiceDefinition) -> PathBuf {
         ServiceManager::Systemd => {
             PathBuf::from("/etc/systemd/system").join(systemd_unit(definition))
         }
-        ServiceManager::Launchd => launchd_home_dir()
+        ServiceManager::Launchd => user_home_dir()
             .join("Library")
             .join("LaunchAgents")
             .join(format!("{}.plist", definition.service_name)),
@@ -162,7 +162,20 @@ pub fn install_service(definition: &ServiceDefinition) -> anyhow::Result<()> {
         .with_context(|| format!("failed to write service definition {}", path.display()))?;
     match definition.manager {
         ServiceManager::Systemd => run_command(Command::new("systemctl").arg("daemon-reload"))?,
-        ServiceManager::Launchd => {}
+        ServiceManager::Launchd => {
+            // If a previous registration is still loaded in launchd, bootout
+            // the old in-memory plist so the next `service start` fresh-
+            // bootstraps the file we just wrote. Otherwise launchctl keeps
+            // the stale plist (ExecStart, env, paths) until the user reboots.
+            let target = launchd_target(&launchd_domain(), &definition.service_name);
+            if launchd_service_is_loaded(&target) {
+                let _ = run_command(Command::new("launchctl").arg("bootout").arg(&target));
+                println!(
+                    "Unloaded previous launchd registration for {}; run `service start` to reload.",
+                    definition.service_name
+                );
+            }
+        }
     }
     println!("Wrote service definition: {}", path.display());
     Ok(())
@@ -226,11 +239,17 @@ pub fn stop_service(definition: &ServiceDefinition) -> anyhow::Result<()> {
                 .arg("stop")
                 .arg(systemd_unit(definition)),
         )?,
-        ServiceManager::Launchd => run_command(
-            Command::new("launchctl")
-                .arg("bootout")
-                .arg(launchd_target(&launchd_domain(), &definition.service_name)),
-        )?,
+        ServiceManager::Launchd => {
+            let target = launchd_target(&launchd_domain(), &definition.service_name);
+            if launchd_service_is_loaded(&target) {
+                run_command(Command::new("launchctl").arg("bootout").arg(&target))?;
+            } else {
+                println!(
+                    "Service {} is not loaded; nothing to stop.",
+                    definition.service_name
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -309,11 +328,11 @@ fn systemd_unit(definition: &ServiceDefinition) -> String {
     }
 }
 
-fn launchd_home_dir() -> PathBuf {
-    launchd_home_dir_for(std::env::var("SUDO_USER").ok().as_deref(), dirs::home_dir())
+pub fn user_home_dir() -> PathBuf {
+    user_home_dir_for(std::env::var("SUDO_USER").ok().as_deref(), dirs::home_dir())
 }
 
-fn launchd_home_dir_for(sudo_user: Option<&str>, fallback_home: Option<PathBuf>) -> PathBuf {
+fn user_home_dir_for(sudo_user: Option<&str>, fallback_home: Option<PathBuf>) -> PathBuf {
     if let Some(user) = sudo_user
         && !user.trim().is_empty()
         && user != "root"
@@ -361,6 +380,9 @@ fn launchd_service_is_loaded(target: &str) -> bool {
     Command::new("launchctl")
         .arg("print")
         .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -458,14 +480,22 @@ mod tests {
     }
 
     #[test]
-    fn launchd_home_prefers_sudo_user_home() {
+    fn user_home_prefers_sudo_user_home() {
         assert_eq!(
-            launchd_home_dir_for(Some("alice"), Some(PathBuf::from("/var/root"))),
+            user_home_dir_for(Some("alice"), Some(PathBuf::from("/var/root"))),
             PathBuf::from("/Users/alice")
         );
         assert_eq!(
-            launchd_home_dir_for(Some("root"), Some(PathBuf::from("/var/root"))),
+            user_home_dir_for(Some("root"), Some(PathBuf::from("/var/root"))),
             PathBuf::from("/var/root")
+        );
+        assert_eq!(
+            user_home_dir_for(None, Some(PathBuf::from("/Users/bob"))),
+            PathBuf::from("/Users/bob")
+        );
+        assert_eq!(
+            user_home_dir_for(Some(""), Some(PathBuf::from("/Users/bob"))),
+            PathBuf::from("/Users/bob")
         );
     }
 }

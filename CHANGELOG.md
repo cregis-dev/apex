@@ -14,6 +14,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PII masking engine for data compliance
 - Team governance features
 
+## [0.4.2] - 2026-05-21
+
+Patch release that makes `apex service` actually work on macOS.
+
+### Changed
+
+- Default `--install-dir` is now platform-aware: `/opt/apex` on Linux (unchanged), `~/.apex` on macOS. Override with `--install-dir` or `APEX_INSTALL_DIR`.
+- `install-release.sh` `TARGET_DIR` default follows the same rule; the script honors `SUDO_USER` so `sudo` on macOS still resolves to the calling user's home.
+- `service install` on macOS now unloads any previously bootstrapped plist after writing a new one, so the next `service start` picks up the new ExecStart / env / paths instead of running the stale in-memory copy.
+- `service stop` on macOS is now idempotent — it no longer errors when the service is already unloaded.
+
+### Fixed
+
+- macOS launchd user agent used to start as the calling user but try to write logs into the root-owned `/opt/apex/logs/`, which made the service crash-loop under `KeepAlive`. Defaulting the install dir to the user's home removes the permission mismatch.
+- `launchd_service_is_loaded` no longer leaks `launchctl print` output to the terminal during probing.
+
+### Docs
+
+- `README.md`, `README_zh-CN.md`, `docs/current/guides/deployment.md`, and `docs/current/guides/operations.md` now document separate Linux / macOS install paths and stop telling macOS users to `sudo`.
+
 ## [0.2.0] - 2026-03-28
 
 Minor release focused on `z.ai` provider support and E2E runtime hygiene.

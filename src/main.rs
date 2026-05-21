@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod compliance;
@@ -783,7 +783,27 @@ fn resolve_install_dir(input: Option<&PathBuf>) -> anyhow::Result<PathBuf> {
     {
         return Ok(expand_config_path(&value));
     }
-    Ok(PathBuf::from("/opt/apex"))
+    Ok(default_install_dir())
+}
+
+fn default_install_dir() -> PathBuf {
+    let os = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    default_install_dir_for(os, Some(service::user_home_dir()))
+}
+
+fn default_install_dir_for(target_os: &str, home: Option<PathBuf>) -> PathBuf {
+    if target_os == "macos"
+        && let Some(home) = home
+        && !home.as_os_str().is_empty()
+        && home != Path::new(".")
+    {
+        return home.join(".apex");
+    }
+    PathBuf::from("/opt/apex")
 }
 
 fn read_service_metadata(
@@ -2183,6 +2203,34 @@ mod tests {
         let chosen = choose_service_install_config_path(resolved, temp.path(), None);
 
         assert_eq!(chosen, install_config);
+    }
+
+    #[test]
+    fn default_install_dir_macos_uses_home_apex() {
+        assert_eq!(
+            default_install_dir_for("macos", Some(PathBuf::from("/Users/alice"))),
+            PathBuf::from("/Users/alice/.apex")
+        );
+    }
+
+    #[test]
+    fn default_install_dir_linux_uses_opt_apex() {
+        assert_eq!(
+            default_install_dir_for("linux", Some(PathBuf::from("/home/alice"))),
+            PathBuf::from("/opt/apex")
+        );
+    }
+
+    #[test]
+    fn default_install_dir_macos_falls_back_when_home_missing() {
+        assert_eq!(
+            default_install_dir_for("macos", None),
+            PathBuf::from("/opt/apex")
+        );
+        assert_eq!(
+            default_install_dir_for("macos", Some(PathBuf::from("."))),
+            PathBuf::from("/opt/apex")
+        );
     }
 
     #[test]

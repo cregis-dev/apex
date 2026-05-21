@@ -94,24 +94,40 @@ curl http://localhost:12356/v1/chat/completions \
 
 ## 📦 安装 (独立运行)
 
+默认安装路径：Linux 上 `/opt/apex`（需要 sudo，systemd 系统服务），macOS 上 `~/.apex`（不需要 sudo，launchd user agent）。详见 [deployment.md](docs/current/guides/deployment.md)。
+
 如果您希望直接安装 GitHub Releases 中的预编译包：
 
 ```bash
+# Linux
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | sudo bash
+
+# macOS（不要 sudo）
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | bash
 ```
 
 安装指定版本：
 
 ```bash
+# Linux
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
-  bash -s -- --version v0.1.0 /opt/apex
+  sudo bash -s -- --version v0.1.0
+
+# macOS
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --version v0.1.0
 ```
 
 如需同时写入示例配置文件，请显式指定目标路径：
 
 ```bash
+# Linux
 curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
-  bash -s -- --version v0.1.1 --config-path /etc/apex/config.json /opt/apex
+  sudo bash -s -- --version v0.1.1 --config-path /etc/apex/config.json /opt/apex
+
+# macOS
+curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-release.sh | \
+  bash -s -- --version v0.1.1 --config-path ~/.apex/config.json
 ```
 
 如果您更喜欢从源码构建：
