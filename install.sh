@@ -37,9 +37,14 @@ for arg in "$@"; do
             echo "  --force-config    强制重新生成配置文件"
             echo "  --help, -h        显示此帮助信息"
             echo ""
+            echo "推荐路径:"
+            echo "  Linux  → /opt/apex （systemd 系统服务，需要 sudo）"
+            echo "  macOS  → ~/.apex   （launchd user agent，不需要 sudo）"
+            echo ""
             echo "示例:"
-            echo "  $0 /opt/apex"
-            echo "  $0 --force-config /opt/apex"
+            echo "  sudo $0 /opt/apex        # Linux"
+            echo "  $0 ~/.apex               # macOS"
+            echo "  $0 --force-config ~/.apex"
             exit 0
             ;;
         *)
