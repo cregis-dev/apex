@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod compliance;
@@ -796,13 +796,12 @@ fn default_install_dir() -> PathBuf {
 }
 
 fn default_install_dir_for(target_os: &str, home: Option<PathBuf>) -> PathBuf {
-    if target_os == "macos" {
-        if let Some(home) = home
-            && !home.as_os_str().is_empty()
-            && home != PathBuf::from(".")
-        {
-            return home.join(".apex");
-        }
+    if target_os == "macos"
+        && let Some(home) = home
+        && !home.as_os_str().is_empty()
+        && home != Path::new(".")
+    {
+        return home.join(".apex");
     }
     PathBuf::from("/opt/apex")
 }
