@@ -14,6 +14,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PII masking engine for data compliance
 - Team governance features
 
+## [0.4.3] - 2026-06-04
+
+Patch release that stops `install-release.sh` from shipping a misleading default config.
+
+### Security
+
+- `install-release.sh` no longer copies `config.example.json` verbatim as the runtime `config.json`. The previous default contained a live-looking admin auth key (`sk-your-secret-key-here`) and a live-looking team API key (`sk-team-demo-key`) that the auth middleware would accept as real, so a fresh install — especially the no-sudo macOS `--service` flow added in 0.4.2 — would come up with two preset credentials exposed on `0.0.0.0:12356`.
+
+### Changed
+
+- `install-release.sh` now generates a clean placeholder `config.json` inline (mirroring `install.sh`): `auth_keys: ["replace-with-admin-key"]`, empty `teams` / `channels` / `routers`, absolute `data_dir` / `logging.dir` / `hot_reload.config_path` rooted at the install dir. Auth fails closed until the user sets a real key.
+- The install script prints the exact fields that must be edited before starting and points users at `config.example.json` (still bundled) for field-structure reference only.
+- `config.example.json` itself now uses obvious placeholders (`REPLACE-WITH-YOUR-ADMIN-KEY`, `REPLACE-WITH-YOUR-TEAM-API-KEY`, `/absolute/path/to/apex/...`) so anyone copying snippets out of it won't end up with live demo secrets.
+
+### Removed
+
+- Dropped the stale `model_map` example (`claude-3-5-sonnet` → `claude-sonnet-4-20250514`) from `config.example.json`; the alias was 13 months old by ship date.
+
 ## [0.4.2] - 2026-05-21
 
 Patch release that makes `apex service` actually work on macOS.

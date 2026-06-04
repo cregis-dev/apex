@@ -2,7 +2,7 @@
   "version": "1.0",
   "global": {
     "listen": "0.0.0.0:12356",
-    "auth_keys": ["sk-your-secret-key-here"],
+    "auth_keys": ["REPLACE-WITH-YOUR-ADMIN-KEY"],
     "timeouts": {
       "connect_ms": 1000,
       "request_ms": 10000,
@@ -19,9 +19,9 @@
   },
   "logging": {
     "level": "info",
-    "dir": "logs"
+    "dir": "/absolute/path/to/apex/logs"
   },
-  "data_dir": "~/.apex/data",
+  "data_dir": "/absolute/path/to/apex/data",
   "channels": [
     {
       "name": "openai-coding",
@@ -33,10 +33,7 @@
       "name": "anthropic-fast",
       "provider_type": "anthropic",
       "base_url": "https://api.anthropic.com",
-      "api_key": "${ANTHROPIC_API_KEY}",
-      "model_map": {
-        "claude-3-5-sonnet": "claude-sonnet-4-20250514"
-      }
+      "api_key": "${ANTHROPIC_API_KEY}"
     },
     {
       "name": "aggregator-dual",
@@ -79,7 +76,7 @@
   "teams": [
     {
       "id": "demo-team",
-      "api_key": "sk-team-demo-key",
+      "api_key": "REPLACE-WITH-YOUR-TEAM-API-KEY",
       "policy": {
         "allowed_routers": ["default"]
       }
@@ -90,7 +87,7 @@
     "path": "/metrics"
   },
   "hot_reload": {
-    "config_path": "config.json",
+    "config_path": "/absolute/path/to/apex/config.json",
     "watch": true
   }
 }
