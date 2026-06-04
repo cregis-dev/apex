@@ -14,6 +14,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PII masking engine for data compliance
 - Team governance features
 
+## [0.4.4] - 2026-06-04
+
+Patch release that closes the residual placeholder-credential hole from 0.4.3.
+
+### Security
+
+- `apex gateway run` (and the launchd / systemd services that wrap it) now refuses to bind if `global.auth_keys` or any `teams[].api_key` still contains one of the known placeholder strings shipped by `install-release.sh`, `install.sh`, `config.example.json`, or the historical v0.4.2 default config. Previously those strings (`replace-with-admin-key`, `sk-your-secret-key-here`, `sk-team-demo-key`, etc.) were accepted verbatim by the auth middleware, so a user who ignored the install-time warning would have a guessable preset key live on `0.0.0.0:12356`. The gateway now exits 1 with a multi-line message that lists every violation and points at `apex config path`. Hot-reload picks up the same check and refuses to swap in a config that re-introduces a placeholder.
+- `apex config validate` runs the same check, so users can catch this before ever starting the service.
+
+### Changed
+
+- `apex config validate` exit code is now 1 when placeholder credentials are present (was 0 if JSON parsed).
+
+### Notes for upgraders
+
+If you installed v0.4.2 and never edited `~/.apex/config.json` (or `/opt/apex/config.json`), your default `auth_keys = ["sk-your-secret-key-here"]` and demo team key `sk-team-demo-key` will now block the service from starting. Edit the file (`apex config path` to find it), replace both with real secrets, then `apex service restart`. Same applies if you ran `install-release.sh` on 0.4.3 and left the `replace-with-admin-key` placeholder in.
+
 ## [0.4.3] - 2026-06-04
 
 Patch release that stops `install-release.sh` from shipping a misleading default config.

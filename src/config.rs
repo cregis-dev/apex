@@ -387,6 +387,51 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
     Ok(config)
 }
 
+/// Strings used as placeholder admin keys by `install-release.sh`, `install.sh`,
+/// `config.example.json`, and the original v0.4.2 default config. These are
+/// shipped verbatim; without this guard a user who never edits the file would
+/// have a guessable preset key live on `0.0.0.0:12356`. See v0.4.4 changelog.
+pub const PLACEHOLDER_AUTH_KEYS: &[&str] = &[
+    "replace-with-admin-key",
+    "replace-with-dashboard-admin-key",
+    "REPLACE-WITH-YOUR-ADMIN-KEY",
+    "sk-your-secret-key-here",
+];
+
+pub const PLACEHOLDER_TEAM_KEYS: &[&str] = &[
+    "replace-with-team-api-key",
+    "REPLACE-WITH-YOUR-TEAM-API-KEY",
+    "sk-team-demo-key",
+];
+
+/// Returns Err with a multi-line, human-readable message if any auth key or
+/// team api key matches one of the placeholder strings shipped in our install
+/// templates. Called at gateway startup and on hot-reload so the server fails
+/// closed instead of accepting the preset string as a valid credential.
+pub fn check_no_placeholder_credentials(config: &Config) -> anyhow::Result<()> {
+    let mut violations: Vec<String> = Vec::new();
+    for (i, key) in config.global.auth_keys.iter().enumerate() {
+        if PLACEHOLDER_AUTH_KEYS.contains(&key.as_str()) {
+            violations.push(format!("global.auth_keys[{i}] = {key:?}"));
+        }
+    }
+    for team in config.teams.iter() {
+        if PLACEHOLDER_TEAM_KEYS.contains(&team.api_key.as_str()) {
+            violations.push(format!(
+                "teams[id={}].api_key = {:?}",
+                team.id, team.api_key
+            ));
+        }
+    }
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "refusing to load config: placeholder credentials present (they would be accepted as real keys by auth middleware)\n  - {}\nedit the file printed by `apex config path` and replace these strings with real secrets",
+        violations.join("\n  - ")
+    ))
+}
+
 pub fn save_config(path: &Path, config: &Config) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -398,7 +443,149 @@ pub fn save_config(path: &Path, config: &Config) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ProviderType};
+    use super::{
+        Config, PLACEHOLDER_AUTH_KEYS, PLACEHOLDER_TEAM_KEYS, ProviderType,
+        check_no_placeholder_credentials,
+    };
+
+    fn parse_config(json: &str) -> Config {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn config_with(auth_keys: &[&str], teams: &[(&str, &str)]) -> Config {
+        let auth_json = serde_json::to_string(auth_keys).unwrap();
+        let teams_json: String = if teams.is_empty() {
+            "[]".to_string()
+        } else {
+            let inner: Vec<String> = teams
+                .iter()
+                .map(|(id, key)| {
+                    format!(
+                        r#"{{"id":"{id}","api_key":"{key}","policy":{{"allowed_routers":[]}}}}"#
+                    )
+                })
+                .collect();
+            format!("[{}]", inner.join(","))
+        };
+        let json = format!(
+            r#"{{
+              "version": "1.0",
+              "global": {{
+                "listen": "127.0.0.1:12356",
+                "auth_keys": {auth_json},
+                "timeouts": {{"connect_ms":1000,"request_ms":1000,"response_ms":1000}},
+                "retries": {{"max_attempts":1,"backoff_ms":100,"retry_on_status":[500]}},
+                "cors_allowed_origins": []
+              }},
+              "logging": {{"level":"info","dir":null}},
+              "data_dir": "/tmp/apex-data",
+              "channels": [],
+              "routers": [],
+              "teams": {teams_json},
+              "metrics": {{"enabled":true,"path":"/metrics"}},
+              "hot_reload": {{"config_path":"config.json","watch":false}}
+            }}"#
+        );
+        parse_config(&json)
+    }
+
+    #[test]
+    fn placeholder_check_accepts_empty_auth_keys() {
+        let cfg = config_with(&[], &[]);
+        assert!(check_no_placeholder_credentials(&cfg).is_ok());
+    }
+
+    #[test]
+    fn placeholder_check_accepts_real_keys() {
+        let cfg = config_with(
+            &["sk-real-admin-7f9d3a2e1c8b4f5a"],
+            &[("acme", "sk-ap-realteamkey1234567890abcdef")],
+        );
+        assert!(check_no_placeholder_credentials(&cfg).is_ok());
+    }
+
+    #[test]
+    fn placeholder_check_rejects_install_release_admin_placeholder() {
+        let cfg = config_with(&["replace-with-admin-key"], &[]);
+        let err = check_no_placeholder_credentials(&cfg).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("global.auth_keys[0]"), "{msg}");
+        assert!(msg.contains("replace-with-admin-key"), "{msg}");
+    }
+
+    #[test]
+    fn placeholder_check_rejects_install_sh_admin_placeholder() {
+        let cfg = config_with(&["replace-with-dashboard-admin-key"], &[]);
+        assert!(check_no_placeholder_credentials(&cfg).is_err());
+    }
+
+    #[test]
+    fn placeholder_check_rejects_legacy_v042_admin_default() {
+        // Anyone upgrading from v0.4.2 and never editing config carries this.
+        let cfg = config_with(&["sk-your-secret-key-here"], &[]);
+        assert!(check_no_placeholder_credentials(&cfg).is_err());
+    }
+
+    #[test]
+    fn placeholder_check_rejects_uppercase_example_placeholder() {
+        let cfg = config_with(&["REPLACE-WITH-YOUR-ADMIN-KEY"], &[]);
+        assert!(check_no_placeholder_credentials(&cfg).is_err());
+    }
+
+    #[test]
+    fn placeholder_check_rejects_team_placeholder() {
+        let cfg = config_with(
+            &["sk-real-admin-7f9d3a2e1c8b4f5a"],
+            &[("demo-team", "replace-with-team-api-key")],
+        );
+        let err = check_no_placeholder_credentials(&cfg).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("teams[id=demo-team]"), "{msg}");
+    }
+
+    #[test]
+    fn placeholder_check_rejects_legacy_v042_team_default() {
+        let cfg = config_with(
+            &["sk-real-admin-7f9d3a2e1c8b4f5a"],
+            &[("demo-team", "sk-team-demo-key")],
+        );
+        assert!(check_no_placeholder_credentials(&cfg).is_err());
+    }
+
+    #[test]
+    fn placeholder_check_real_key_alongside_placeholder_still_rejects() {
+        // User added a real key but left the placeholder in place: still bad,
+        // because the placeholder remains live too.
+        let cfg = config_with(
+            &["sk-real-admin-7f9d3a2e1c8b4f5a", "replace-with-admin-key"],
+            &[],
+        );
+        let err = check_no_placeholder_credentials(&cfg).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("global.auth_keys[1]"), "{msg}");
+    }
+
+    #[test]
+    fn placeholder_check_substring_match_does_not_trip_real_keys() {
+        // A real key that happens to contain "replace" should NOT trip the
+        // guard — we check exact equality, not substring.
+        let cfg = config_with(&["sk-replace-this-with-rotation-policy"], &[]);
+        assert!(check_no_placeholder_credentials(&cfg).is_ok());
+    }
+
+    #[test]
+    fn placeholder_lists_cover_every_shipped_string() {
+        // Belt-and-suspenders: if we ever add a new placeholder string to an
+        // install template, this list should be updated too. Forces the dev
+        // to look here.
+        assert!(PLACEHOLDER_AUTH_KEYS.contains(&"replace-with-admin-key"));
+        assert!(PLACEHOLDER_AUTH_KEYS.contains(&"replace-with-dashboard-admin-key"));
+        assert!(PLACEHOLDER_AUTH_KEYS.contains(&"REPLACE-WITH-YOUR-ADMIN-KEY"));
+        assert!(PLACEHOLDER_AUTH_KEYS.contains(&"sk-your-secret-key-here"));
+        assert!(PLACEHOLDER_TEAM_KEYS.contains(&"replace-with-team-api-key"));
+        assert!(PLACEHOLDER_TEAM_KEYS.contains(&"REPLACE-WITH-YOUR-TEAM-API-KEY"));
+        assert!(PLACEHOLDER_TEAM_KEYS.contains(&"sk-team-demo-key"));
+    }
 
     #[test]
     fn provider_type_zai_round_trips_as_snake_case() {

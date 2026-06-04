@@ -61,6 +61,12 @@ pub async fn run_server(path: PathBuf) -> anyhow::Result<()> {
     // Store config path for potential hot reload
     config.hot_reload.config_path = path.to_string_lossy().to_string();
 
+    // Refuse to bind if the config still carries the placeholder admin/team
+    // keys we ship in install templates — those would be accepted verbatim
+    // by the auth middleware. Fail closed so an unfinished setup never goes
+    // live on 0.0.0.0:12356.
+    crate::config::check_no_placeholder_credentials(&config)?;
+
     let state = build_state(config.clone())?;
     let app = build_app(state.clone());
 
@@ -142,6 +148,10 @@ async fn watch_config(path: PathBuf, state: Arc<AppState>) -> notify::Result<()>
         // Reload config
         match crate::config::load_config(&path) {
             Ok(new_config) => {
+                if let Err(e) = crate::config::check_no_placeholder_credentials(&new_config) {
+                    error!("Refusing to apply reloaded config: {}", e);
+                    continue;
+                }
                 // Update config
                 {
                     let mut config_guard = state.config.write().unwrap();
