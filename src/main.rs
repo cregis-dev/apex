@@ -691,7 +691,8 @@ fn handle_config_command(cli: &Cli, command: &ConfigCommand) -> anyhow::Result<(
             println!("source: {}", resolved.source.as_str());
         }
         ConfigCommand::Validate => {
-            load_config_or_exit(&resolved.path)?;
+            let cfg = load_config_or_exit(&resolved.path)?;
+            config::check_no_placeholder_credentials(&cfg)?;
             println!(
                 "Config is valid: {} (source: {})",
                 resolved.path.display(),
