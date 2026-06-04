@@ -357,7 +357,6 @@ mkdir -p "$EXTRACT_DIR"
 tar -xzf "$ARCHIVE_PATH" -C "$EXTRACT_DIR"
 
 EXTRACTED_BINARY="$(find "$EXTRACT_DIR" -type f -name apex | head -n 1)"
-EXTRACTED_CONFIG_EXAMPLE="$(find "$EXTRACT_DIR" -type f -name config.example.json | head -n 1)"
 
 if [ -z "$EXTRACTED_BINARY" ]; then
     echo "错误：发布包中未找到 apex 可执行文件"
@@ -399,26 +398,63 @@ if [ -z "$CONFIG_PATH" ]; then
     CONFIG_PATH="$TARGET_DIR/config.json"
 fi
 
-if [ -n "$CONFIG_PATH" ]; then
-    if [ -z "$EXTRACTED_CONFIG_EXAMPLE" ]; then
-        echo "错误：发布包中未找到 config.example.json，无法写入配置文件"
+CONFIG_PATH="$(expand_input_path "$CONFIG_PATH")"
+
+if [ -f "$CONFIG_PATH" ] && [ "$FORCE_CONFIG" = false ]; then
+    if [ "$CONFIG_PATH_SET" = true ]; then
+        echo "错误：配置文件已存在：$CONFIG_PATH"
+        echo "如需覆盖，请追加 --force-config"
         exit 1
     fi
-
-    CONFIG_PATH="$(expand_input_path "$CONFIG_PATH")"
-
-    if [ -f "$CONFIG_PATH" ] && [ "$FORCE_CONFIG" = false ]; then
-        if [ "$CONFIG_PATH_SET" = true ]; then
-            echo "错误：配置文件已存在：$CONFIG_PATH"
-            echo "如需覆盖，请追加 --force-config"
-            exit 1
-        fi
-        echo "配置文件已存在，保留：$CONFIG_PATH"
-    else
-        mkdir -p "$(dirname "$CONFIG_PATH")"
-        cp "$EXTRACTED_CONFIG_EXAMPLE" "$CONFIG_PATH"
-        echo "已写入配置文件：$CONFIG_PATH"
-    fi
+    echo "配置文件已存在，保留：$CONFIG_PATH"
+else
+    mkdir -p "$(dirname "$CONFIG_PATH")"
+    mkdir -p "$TARGET_DIR/data" "$TARGET_DIR/logs"
+    cat > "$CONFIG_PATH" <<EOF
+{
+  "version": "1.0",
+  "logging": {
+    "level": "info",
+    "dir": "$TARGET_DIR/logs"
+  },
+  "data_dir": "$TARGET_DIR/data",
+  "global": {
+    "listen": "0.0.0.0:12356",
+    "auth_keys": ["replace-with-admin-key"],
+    "timeouts": {
+      "connect_ms": 10000,
+      "request_ms": 120000,
+      "response_ms": 300000
+    },
+    "retries": {
+      "max_attempts": 3,
+      "backoff_ms": 100,
+      "retry_on_status": [429, 500, 502, 503, 504]
+    },
+    "cors_allowed_origins": []
+  },
+  "metrics": {
+    "enabled": true,
+    "path": "/metrics"
+  },
+  "hot_reload": {
+    "config_path": "$CONFIG_PATH",
+    "watch": false
+  },
+  "teams": [],
+  "channels": [],
+  "routers": []
+}
+EOF
+    echo "已写入空白配置模板：$CONFIG_PATH"
+    echo ""
+    echo "⚠️  启动前必须修改以下字段（否则任何请求都会被 auth 拒绝 / 没有可路由的 channel）："
+    echo "    - global.auth_keys[0]   当前是占位 'replace-with-admin-key'，改成你自己的 admin key"
+    echo "    - channels[]            添加至少一个上游 provider 通道"
+    echo "    - routers[]             添加路由规则把模型映射到 channel"
+    echo "    - teams[]               如需多租户/团队 API key 隔离再加"
+    echo ""
+    echo "也可以参考发布包里的 config.example.json 学习字段结构（不要直接复制其中的 demo 字面 key）。"
 fi
 
 SERVICE_MANAGER=""
