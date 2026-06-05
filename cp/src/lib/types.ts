@@ -177,7 +177,40 @@ export interface AdminChannel {
   name: string
   provider_type: ProviderType
   base_url: string
+  anthropic_base_url: string | null
+}
+
+export interface CreateChannelRequest {
+  name: string
+  provider_type: ProviderType
+  base_url: string
   api_key: string
+  anthropic_base_url?: string | null
+  headers?: Record<string, string> | null
+  model_map?: Record<string, string> | null
+}
+
+export interface UpdateChannelRequest {
+  provider_type?: ProviderType
+  base_url?: string
+  /** Omit to keep current. Empty string is rejected. */
+  api_key?: string
+  anthropic_base_url?: string | null
+  headers?: Record<string, string> | null
+  model_map?: Record<string, string> | null
+}
+
+/** GET /admin/channels/api_keys entry. */
+export interface ChannelApiKeyEntry {
+  name: string
+  /** Server-side masked form, e.g. "sk-…ab0c". */
+  api_key: string
+}
+
+/** GET /api/cp/provider-templates entry — default URLs per provider type. */
+export interface ProviderTemplate {
+  provider_type: ProviderType
+  base_url: string
   anthropic_base_url: string | null
 }
 
@@ -211,6 +244,23 @@ export interface AdminRouter {
   fallback_channels?: string[]
 }
 
+export interface RouterRuleInput {
+  models: string[]
+  channels: { name: string; weight?: number }[]
+  strategy?: string
+}
+
+export interface CreateRouterRequest {
+  name: string
+  rules: RouterRuleInput[]
+  fallback_channels?: string[]
+}
+
+export interface UpdateRouterRequest {
+  rules?: RouterRuleInput[]
+  fallback_channels?: string[]
+}
+
 // --- /admin/teams ---
 
 export interface RateLimit {
@@ -226,8 +276,43 @@ export interface TeamPolicy {
 
 export interface AdminTeam {
   id: string
-  api_key: string
+  /** Optional group label. Empty string and null both render as "Default". */
+  group: string | null
+  /** Defaults to true. When false, all model requests from this team are rejected. */
+  enabled: boolean
   policy: TeamPolicy
+  /**
+   * Only present on the create response — the *unmasked* full api_key,
+   * shown to the operator once. List/update/delete responses never include
+   * the key; fetch the masked form from GET /admin/teams/api_keys.
+   */
+  api_key?: string
+  api_key_revealed?: boolean
+}
+
+/** GET /admin/teams/api_keys entry. */
+export interface TeamApiKeyEntry {
+  id: string
+  /** Server-side masked form, e.g. "sk-…ab0c". */
+  api_key: string
+}
+
+export interface CreateTeamRequest {
+  id: string
+  group?: string | null
+  enabled?: boolean
+  api_key?: string
+  allowed_routers?: string[]
+  allowed_models?: string[] | null
+  rate_limit?: { rpm: number | null; tpm: number | null } | null
+}
+
+export interface UpdateTeamRequest {
+  group?: string | null
+  enabled?: boolean
+  allowed_routers?: string[]
+  allowed_models?: string[] | null
+  rate_limit?: { rpm: number | null; tpm: number | null } | null
 }
 
 // --- /api/cp/info ---

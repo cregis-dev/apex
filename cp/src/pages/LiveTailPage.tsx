@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import Topbar from '../components/Topbar.tsx'
 import Icon from '../components/Icon.tsx'
 import Drawer from '../components/Drawer.tsx'
@@ -16,7 +17,11 @@ const STATUS_COLOR: Record<string, string> = {
 }
 function statusColor(s: string) { return STATUS_COLOR[s] ?? 'var(--muted)' }
 function fmtMs(ms: number | null) { return ms == null ? '—' : ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms` }
-function fmt(n: number) { return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n) }
+function fmt(n: number) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
 function fmtTs(ts: string) {
   try { const d = new Date(ts.replace(' ', 'T')); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}.${String(d.getMilliseconds()).padStart(3,'0')}` }
   catch { return ts }
@@ -99,15 +104,29 @@ export default function LiveTailPage() {
   const [running, setRunning] = useState(true)
   const [selected, setSelected] = useState<UsageRecord | null>(null)
   const [newCount, setNewCount] = useState(0)
+  const [teamFilter, setTeamFilter] = useState('')
+  const [modelFilter, setModelFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
   const shownIds = useRef(new Set<number>())
   const latestId = useRef<number | null>(null)
   const initialized = useRef(false)
 
+  const { data: analytics } = useQuery({
+    queryKey: ['analytics-filter-options', '1h'],
+    queryFn: () => api.analytics({ range: '1h' }),
+    staleTime: 60_000,
+  })
+
   const fetchRecords = useCallback(async (initial = false) => {
     try {
+      const filterParams: Record<string, string | number> = {}
+      if (teamFilter) filterParams.team_id = teamFilter
+      if (modelFilter) filterParams.model = modelFilter
+      if (statusFilter) filterParams.status = statusFilter
+
       const params = initial
-        ? { range: '1h' as const, limit: 30 }
-        : { range: '1h' as const, limit: 50, ...(latestId.current != null ? { since_id: latestId.current } : {}) }
+        ? { range: '1h' as const, limit: 30, ...filterParams }
+        : { range: '1h' as const, limit: 50, ...filterParams, ...(latestId.current != null ? { since_id: latestId.current } : {}) }
 
       const res = await api.records(params)
 
@@ -129,7 +148,17 @@ export default function LiveTailPage() {
     } catch {
       // silently ignore poll errors
     }
-  }, [])
+  }, [teamFilter, modelFilter, statusFilter])
+
+  // Reset rows when filters change
+  useEffect(() => {
+    shownIds.current = new Set()
+    latestId.current = null
+    setRows([])
+    setNewCount(0)
+    void fetchRecords(true)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamFilter, modelFilter, statusFilter])
 
   // initial load
   useEffect(() => {
@@ -152,8 +181,42 @@ export default function LiveTailPage() {
       </span>
     : <span className="badge">PAUSED</span>
 
+  const opts = analytics?.filter_options
   const actions = (
-    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+      <select
+        className="select btn-sm"
+        value={teamFilter}
+        onChange={(e) => setTeamFilter(e.target.value)}
+        style={{ height: 28, fontSize: 12 }}
+        title="Filter by team"
+      >
+        <option value="">All teams</option>
+        {(opts?.teams ?? []).map((t) => <option key={t} value={t}>{t}</option>)}
+      </select>
+      <select
+        className="select btn-sm"
+        value={modelFilter}
+        onChange={(e) => setModelFilter(e.target.value)}
+        style={{ height: 28, fontSize: 12 }}
+        title="Filter by model"
+      >
+        <option value="">All models</option>
+        {(opts?.models ?? []).map((m) => <option key={m} value={m}>{m}</option>)}
+      </select>
+      <select
+        className="select btn-sm"
+        value={statusFilter}
+        onChange={(e) => setStatusFilter(e.target.value)}
+        style={{ height: 28, fontSize: 12 }}
+        title="Filter by status"
+      >
+        <option value="">All statuses</option>
+        <option value="success">Success</option>
+        <option value="error">Error</option>
+        <option value="fallback_success">Fallback success</option>
+        <option value="fallback_error">Fallback error</option>
+      </select>
       {newCount > 0 && !running && (
         <span style={{ fontSize: 12, color: 'var(--brand)' }}>{newCount} new</span>
       )}

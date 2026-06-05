@@ -3,6 +3,10 @@ import type {
   AnalyticsResponse, AnalyticsParams,
   RecordsResponse, RecordsParams,
   AdminListResponse, AdminChannel, AdminRouter, AdminTeam,
+  ChannelApiKeyEntry, TeamApiKeyEntry, ProviderTemplate,
+  CreateTeamRequest, UpdateTeamRequest,
+  CreateChannelRequest, UpdateChannelRequest,
+  CreateRouterRequest, UpdateRouterRequest,
   CpInfo,
 } from './types.ts'
 
@@ -50,11 +54,47 @@ export const api = {
   channels: () =>
     req<AdminListResponse<AdminChannel>>('GET', '/admin/channels'),
 
+  channelApiKeys: () =>
+    req<AdminListResponse<ChannelApiKeyEntry>>('GET', '/admin/channels/api_keys'),
+
+  providerTemplates: () =>
+    req<AdminListResponse<ProviderTemplate>>('GET', '/api/cp/provider-templates'),
+
+  createChannel: (body: CreateChannelRequest) =>
+    req<AdminChannel>('POST', '/admin/channels', body),
+
+  updateChannel: (name: string, body: UpdateChannelRequest) =>
+    req<AdminChannel>('PATCH', `/admin/channels/${encodeURIComponent(name)}`, body),
+
+  deleteChannel: (name: string) =>
+    req<{ deleted: string }>('DELETE', `/admin/channels/${encodeURIComponent(name)}`),
+
   routers: () =>
     req<AdminListResponse<AdminRouter>>('GET', '/admin/routers'),
 
+  createRouter: (body: CreateRouterRequest) =>
+    req<AdminRouter>('POST', '/admin/routers', body),
+
+  updateRouter: (name: string, body: UpdateRouterRequest) =>
+    req<AdminRouter>('PATCH', `/admin/routers/${encodeURIComponent(name)}`, body),
+
+  deleteRouter: (name: string) =>
+    req<{ deleted: string }>('DELETE', `/admin/routers/${encodeURIComponent(name)}`),
+
   teams: () =>
     req<AdminListResponse<AdminTeam>>('GET', '/admin/teams'),
+
+  teamApiKeys: () =>
+    req<AdminListResponse<TeamApiKeyEntry>>('GET', '/admin/teams/api_keys'),
+
+  createTeam: (body: CreateTeamRequest) =>
+    req<AdminTeam>('POST', '/admin/teams', body),
+
+  updateTeam: (id: string, body: UpdateTeamRequest) =>
+    req<AdminTeam>('PATCH', `/admin/teams/${encodeURIComponent(id)}`, body),
+
+  deleteTeam: (id: string) =>
+    req<{ deleted: string }>('DELETE', `/admin/teams/${encodeURIComponent(id)}`),
 
   cpInfo: () =>
     req<CpInfo>('GET', '/api/cp/info'),

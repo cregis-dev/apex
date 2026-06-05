@@ -1,5 +1,7 @@
 import { NavLink, useLocation } from 'react-router'
+import { useQuery } from '@tanstack/react-query'
 import Icon, { type IconName } from './Icon.tsx'
+import { api } from '../lib/api.ts'
 
 interface NavItem {
   id: string
@@ -35,7 +37,6 @@ const NAV: NavSection[] = [
     section: 'Access',
     items: [
       { id: 'teams', label: 'Teams', icon: 'users' },
-      { id: 'keys', label: 'API Keys', icon: 'key' },
       { id: 'limits', label: 'Rate Limits', icon: 'gauge' },
     ],
   },
@@ -49,6 +50,11 @@ const NAV: NavSection[] = [
 
 export default function Sidebar() {
   const location = useLocation()
+  const { data: info } = useQuery({
+    queryKey: ['cpInfo'],
+    queryFn: api.cpInfo,
+    staleTime: 60_000,
+  })
 
   return (
     <nav style={{
@@ -133,7 +139,7 @@ export default function Sidebar() {
       }}>
         <span className="dot dot-ok" />
         <span style={{ fontSize: 12, color: 'var(--muted)', flex: 1 }}>All systems normal</span>
-        <span className="mono muted" style={{ fontSize: 11 }}>v0.2</span>
+        {info && <span className="mono muted" style={{ fontSize: 11 }}>v{info.version}</span>}
       </div>
     </nav>
   )

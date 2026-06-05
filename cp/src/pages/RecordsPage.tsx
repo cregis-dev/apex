@@ -1,20 +1,20 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import Topbar from '../components/Topbar.tsx'
 import Icon from '../components/Icon.tsx'
 import Drawer from '../components/Drawer.tsx'
 import Empty from '../components/Empty.tsx'
+import FiltersBar, {
+  DEFAULT_FILTERS,
+  filterValuesToParams,
+  type FilterValues,
+} from '../components/FiltersBar.tsx'
 import { api } from '../lib/api.ts'
-import type { TimeRange, UsageRecord, RecordsParams } from '../lib/types.ts'
-
-const RANGES: { label: string; value: TimeRange }[] = [
-  { label: 'Last 1h', value: '1h' },
-  { label: 'Last 24h', value: '24h' },
-  { label: 'Last 7d', value: '7d' },
-  { label: 'Last 30d', value: '30d' },
-]
+import type { UsageRecord, RecordsParams } from '../lib/types.ts'
 
 const PAGE_SIZE = 50
+const EXPORT_PAGE_SIZE = 200
+const EXPORT_HARD_CAP = 50_000
 
 const STATUS_COLOR: Record<string, string> = {
   success: 'var(--ok)',
@@ -46,10 +46,35 @@ function fmtTs(ts: string): string {
   }
 }
 
+function csvEscape(value: string | number | null | undefined): string {
+  const v = value == null ? '' : String(value)
+  if (/[",\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`
+  return v
+}
+
+function buildCsv(rows: UsageRecord[]): string {
+  const header = [
+    'id', 'timestamp', 'request_id', 'team_id', 'router', 'matched_rule',
+    'final_channel', 'channel', 'model', 'input_tokens', 'output_tokens',
+    'latency_ms', 'status', 'status_code', 'fallback_triggered',
+    'error_message', 'provider_trace_id', 'provider_error_body',
+  ]
+  const out = [header.join(',')]
+  for (const r of rows) {
+    out.push([
+      r.id, r.timestamp, r.request_id ?? '', r.team_id, r.router,
+      r.matched_rule ?? '', r.final_channel, r.channel, r.model,
+      r.input_tokens, r.output_tokens, r.latency_ms ?? '',
+      r.status, r.status_code ?? '', r.fallback_triggered ? 'true' : 'false',
+      r.error_message ?? '', r.provider_trace_id ?? '', r.provider_error_body ?? '',
+    ].map(csvEscape).join(','))
+  }
+  return out.join('\n')
+}
+
 function RecordInspector({ record, onClose }: { record: UsageRecord; onClose: () => void }) {
   return (
     <Drawer open title="Request Detail" sub={record.id.toString()} onClose={onClose} width={480}>
-      {/* Meta grid */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 20 }}>
         {[
           { label: 'Status', value: record.status, color: statusColor(record.status) },
@@ -64,7 +89,6 @@ function RecordInspector({ record, onClose }: { record: UsageRecord; onClose: ()
         ))}
       </div>
 
-      {/* Fields */}
       <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
         <tbody>
           {[
@@ -100,7 +124,6 @@ function RecordInspector({ record, onClose }: { record: UsageRecord; onClose: ()
         </div>
       )}
 
-      {/* Replay note */}
       <div style={{
         marginTop: 20, padding: '10px 14px',
         background: 'var(--info-soft)', borderRadius: 'var(--r-sm)',
@@ -113,49 +136,109 @@ function RecordInspector({ record, onClose }: { record: UsageRecord; onClose: ()
 }
 
 export default function RecordsPage() {
-  const [range, setRange] = useState<TimeRange>('24h')
+  const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTERS)
   const [offset, setOffset] = useState(0)
+  const [search, setSearch] = useState('')
   const [selected, setSelected] = useState<UsageRecord | null>(null)
+  const [exporting, setExporting] = useState(false)
 
-  const params: RecordsParams = { range, limit: PAGE_SIZE, offset }
+  const baseParams = useMemo(
+    () => filterValuesToParams(filters) as RecordsParams,
+    [filters]
+  )
+  const queryParams: RecordsParams = { ...baseParams, limit: PAGE_SIZE, offset }
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['records', range, offset],
-    queryFn: () => api.records(params),
+  const { data, isLoading, error, isFetching, refetch } = useQuery({
+    queryKey: ['records', queryParams],
+    queryFn: () => api.records(queryParams),
   })
 
-  const records = data?.data ?? []
+  // Fetch filter_options from analytics so the filters bar has values to show
+  const { data: analytics } = useQuery({
+    queryKey: ['analytics-filter-options', filters.range],
+    queryFn: () => api.analytics({ range: filters.range }),
+    staleTime: 60_000,
+  })
+
+  const allRecords = data?.data ?? []
   const total = data?.total ?? 0
+
+  const records = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return allRecords
+    return allRecords.filter((r) => {
+      const id = r.request_id?.toLowerCase() ?? ''
+      const traceId = r.provider_trace_id?.toLowerCase() ?? ''
+      return id.includes(q) || traceId.includes(q) || String(r.id).includes(q)
+    })
+  }, [allRecords, search])
+
   const pages = Math.ceil(total / PAGE_SIZE)
   const page = Math.floor(offset / PAGE_SIZE)
 
-  const handleExport = useCallback(() => {
-    if (!records.length) return
-    const header = 'id,timestamp,team_id,router,channel,model,status,latency_ms,input_tokens,output_tokens'
-    const rows = records.map((r) =>
-      [r.id, r.timestamp, r.team_id, r.router, r.channel, r.model, r.status, r.latency_ms ?? '', r.input_tokens, r.output_tokens].join(',')
-    )
-    const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `apex-records-${range}.csv`
-    a.click()
-  }, [records, range])
+  const updateFilters = useCallback((next: FilterValues) => {
+    setFilters(next)
+    setOffset(0)
+  }, [])
+
+  const handleRefresh = useCallback(() => {
+    void refetch()
+  }, [refetch])
+
+  const handleExport = useCallback(async () => {
+    setExporting(true)
+    try {
+      const collected: UsageRecord[] = []
+      let nextOffset = 0
+      // Guard total to avoid runaway exports
+      const target = Math.min(total || allRecords.length, EXPORT_HARD_CAP)
+      while (nextOffset < target) {
+        const batch = await api.records({
+          ...baseParams,
+          limit: EXPORT_PAGE_SIZE,
+          offset: nextOffset,
+        })
+        if (batch.data.length === 0) break
+        collected.push(...batch.data)
+        nextOffset += batch.data.length
+        if (batch.data.length < EXPORT_PAGE_SIZE) break
+      }
+      const blob = new Blob([buildCsv(collected)], { type: 'text/csv;charset=utf-8' })
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = `apex-records-${filters.range}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(a.href)
+    } finally {
+      setExporting(false)
+    }
+  }, [allRecords.length, baseParams, filters.range, total])
 
   const actions = (
-    <div style={{ display: 'flex', gap: 8 }}>
-      <select
-        className="select btn-sm"
-        value={range}
-        onChange={(e) => { setRange(e.target.value as TimeRange); setOffset(0) }}
-        style={{ height: 28, fontSize: 12 }}
+    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+      <button
+        className="btn btn-sm"
+        onClick={handleRefresh}
+        disabled={isFetching}
+        title="Refresh"
       >
-        {RANGES.map((r) => (
-          <option key={r.value} value={r.value}>{r.label}</option>
-        ))}
-      </select>
-      <button className="btn btn-sm" onClick={handleExport} disabled={!records.length}>
-        <Icon name="download" size={13} /> CSV
+        {isFetching
+          ? <span className="spinner" style={{ width: 12, height: 12 }} />
+          : <Icon name="refresh" size={13} />}
+        Refresh
+      </button>
+      <button
+        className="btn btn-sm"
+        onClick={handleExport}
+        disabled={exporting || total === 0}
+        title="Export filtered records to CSV"
+      >
+        {exporting
+          ? <span className="spinner" style={{ width: 12, height: 12 }} />
+          : <Icon name="download" size={13} />}
+        CSV
       </button>
     </div>
   )
@@ -167,6 +250,25 @@ export default function RecordsPage() {
         <div className="page-head">
           <h1 className="page-title">Records</h1>
           <p className="page-sub">Searchable history of every request through the gateway.</p>
+        </div>
+
+        <div className="card" style={{ padding: '12px 16px', marginBottom: 12, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <FiltersBar
+            values={filters}
+            options={analytics?.filter_options}
+            onChange={updateFilters}
+            showStatus
+          />
+          <div style={{ flex: 1, minWidth: 200, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Icon name="search" size={13} style={{ color: 'var(--muted)' }} />
+            <input
+              className="input"
+              placeholder="Search request id or trace id"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              style={{ flex: 1, height: 28, fontSize: 12 }}
+            />
+          </div>
         </div>
 
         {isLoading && (
@@ -183,17 +285,23 @@ export default function RecordsPage() {
 
         {!isLoading && !error && (
           <div className="card">
-            {records.length === 0 ? (
-              <Empty icon="list" title="No records in this period" sub="Requests will be logged here as they flow through the gateway." />
+            {allRecords.length === 0 ? (
+              <Empty icon="list" title="No records match these filters" sub="Adjust the filters above or widen the time range." />
             ) : (
               <>
-                <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', fontSize: 12, color: 'var(--muted)' }}>
-                  {total.toLocaleString()} records · page {page + 1} of {Math.max(1, pages)}
+                <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', fontSize: 12, color: 'var(--muted)', display: 'flex', justifyContent: 'space-between' }}>
+                  <span>
+                    {total.toLocaleString()} records · page {page + 1} of {Math.max(1, pages)}
+                  </span>
+                  {search.trim() && (
+                    <span>showing {records.length} matching this page</span>
+                  )}
                 </div>
                 <table className="table">
                   <thead>
                     <tr>
                       <th>Time</th>
+                      <th>Request ID</th>
                       <th>Team</th>
                       <th>Model</th>
                       <th>Channel</th>
@@ -212,6 +320,9 @@ export default function RecordsPage() {
                       >
                         <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
                           {fmtTs(r.timestamp)}
+                        </td>
+                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.request_id ?? ''}>
+                          {r.request_id ?? '—'}
                         </td>
                         <td style={{ fontSize: 13 }}>{r.team_id}</td>
                         <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{r.model}</td>
@@ -232,7 +343,6 @@ export default function RecordsPage() {
                   </tbody>
                 </table>
 
-                {/* Pagination */}
                 {pages > 1 && (
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 16px', borderTop: '1px solid var(--border)' }}>
                     <button className="btn btn-sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>

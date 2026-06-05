@@ -11,7 +11,6 @@ import ChannelsPage from './pages/ChannelsPage.tsx'
 import RoutersPage from './pages/RoutersPage.tsx'
 import ModelsPage from './pages/ModelsPage.tsx'
 import TeamsPage from './pages/TeamsPage.tsx'
-import KeysPage from './pages/KeysPage.tsx'
 import RateLimitsPage from './pages/RateLimitsPage.tsx'
 import SettingsPage from './pages/SettingsPage.tsx'
 import { getToken, authHeaders } from './lib/auth.ts'
@@ -44,7 +43,8 @@ const router = createHashRouter([
       { path: 'models', element: <ModelsPage /> },
       { path: 'routers', element: <RoutersPage /> },
       { path: 'teams', element: <TeamsPage /> },
-      { path: 'keys', element: <KeysPage /> },
+      // Legacy keys URL kept for any bookmarked links; redirect to Teams.
+      { path: 'keys', element: <Navigate to="/teams" replace /> },
       { path: 'limits', element: <RateLimitsPage /> },
       { path: 'settings', element: <SettingsPage /> },
     ],
