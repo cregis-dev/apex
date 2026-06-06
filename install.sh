@@ -3,7 +3,7 @@
 # 用法：./install.sh [选项] <目标路径>
 #
 # 功能:
-#   - 构建并安装内嵌 Dashboard 静态资源的 apex 二进制
+#   - 构建并安装内嵌控制台 (Control Plane) 静态资源的 apex 二进制
 #   - 保护现有 config.json 不被覆盖
 #
 # 选项:
@@ -80,13 +80,13 @@ TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
 
 require_command cargo "Rust toolchain (https://rustup.rs/)"
 require_command node "Node.js 18+"
-require_command npm "npm (通常随 Node.js 一起安装)"
+require_command pnpm "pnpm (https://pnpm.io/installation)"
 
 echo ""
-echo "=== 1. 构建 Web 前端 ==="
-cd "$SCRIPT_DIR/web"
-npm ci
-npm run build
+echo "=== 1. 构建控制台 (Control Plane) 前端 ==="
+cd "$SCRIPT_DIR/cp"
+pnpm install --frozen-lockfile
+pnpm build
 
 echo ""
 echo "=== 2. 构建 Rust 后端（embedded-web） ==="
@@ -101,9 +101,9 @@ if [ ! -f "$SCRIPT_DIR/target/release/apex" ]; then
     exit 1
 fi
 
-if [ ! -f "$SCRIPT_DIR/target/web/dashboard/index.html" ]; then
-    echo "错误：未找到前端构建产物 $SCRIPT_DIR/target/web/dashboard/index.html"
-    echo "请确认 web 构建脚本已成功导出静态文件"
+if [ ! -f "$SCRIPT_DIR/target/web/cp/index.html" ]; then
+    echo "错误：未找到前端构建产物 $SCRIPT_DIR/target/web/cp/index.html"
+    echo "请确认控制台 (cp) 构建脚本已成功导出静态文件"
     exit 1
 fi
 

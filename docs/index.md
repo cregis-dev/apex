@@ -12,8 +12,6 @@
 
 - [System Overview](./current/architecture/system-overview.md) - 系统级架构概览
 - [Backend](./current/architecture/backend.md) - Rust 网关后端架构
-- [Web](./current/architecture/web.md) - Web Dashboard 架构
-- [Web Components](./current/architecture/web-components.md) - Web 组件清单
 - [Integration](./current/architecture/integration.md) - 前后端集成与发布协作
 
 ### Reference
@@ -27,7 +25,6 @@
 ### Guides
 
 - [Backend Development](./current/guides/development-backend.md) - 后端开发指南
-- [Web Development](./current/guides/development-web.md) - 前端开发指南
 - [Operations](./current/guides/operations.md) - 操作手册
 - [Deployment](./current/guides/deployment.md) - 部署指南
 - [Testing Strategy](./current/guides/testing-strategy.md) - 当前推荐测试策略

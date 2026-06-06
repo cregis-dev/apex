@@ -18,7 +18,7 @@ Unlike personal AI gateways, Apex is built for **Teams**:
 | **Unified API** | OpenAI & Anthropic Compatible | Usually OpenAI only |
 | **Multi-Model Routing** | Round-Robin, Priority, Weighted | Basic fallback |
 | **Provider Agnostic** | OpenAI, Anthropic, DeepSeek, Ollama, etc. | Limited support |
-| **Observability** | Prometheus Metrics, SQLite Dashboard & Grafana Ready | Basic logs |
+| **Observability** | Prometheus Metrics, SQLite Control Plane & Grafana Ready | Basic logs |
 | **Performance** | Rust-based, sub-millisecond overhead | Often Python/Node.js |
 | **Resilience** | Automatic Retries & Fallbacks | Basic |
 | **Multi-Tenancy** | Team-based API Keys, Rate Limiting, Model Restrictions | Single tenant |
@@ -135,9 +135,9 @@ curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-releas
 If you prefer to build from source:
 
 ```bash
-cd web
-npm install
-npm run build
+cd cp
+pnpm install
+pnpm build
 
 cd ..
 cargo build --release --features embedded-web
@@ -145,25 +145,24 @@ cargo build --release --features embedded-web
 ```
 
 For local source-based installation into a target directory, use [`install.sh`](install.sh).
-Release binaries built with `embedded-web` do not require shipping a separate `web/` directory.
+Release binaries built with `embedded-web` do not require shipping a separate `cp/` directory.
 
-## 📊 Web Dashboard
+## 📊 Control Plane
 
-Apex includes a built-in Web Dashboard for observability and usage analytics:
+Apex ships a built-in Control Plane UI for observability and management:
 
-- **Usage Records**: View team-by-team API call history with token consumption
-- **Metrics Overview**: Real-time request counts, error rates, fallbacks, and latency
-- **Trend Analysis**: Daily/weekly/monthly usage patterns with interactive charts
-- **Rankings**: Top teams, models, and channels by usage
+- **Overview & Live Tail**: Real-time request counts, error rates, latency, and a live request stream
+- **Records**: Team-by-team API call history with token consumption and client attribution
+- **Rankings**: Top teams, models, and channels with a Requests/Tokens toggle
+- **Channels / Models / Routers**: Inspect and edit upstream providers and routing rules
+- **Teams & Rate Limits**: Manage team API keys and per-team RPM/TPM limits inline
 - **Filtering**: Query by team, router, channel, model, and date range
 
-### Access the Dashboard
+### Access the Control Plane
 
 1. Start the gateway: `apex gateway start --config /path/to/config.json`
-2. Open your browser: `http://localhost:12356/dashboard`
-3. Enter your Team API key when prompted
-
-See [the BMAD story record](_bmad-output/stories/web-dashboard.md) for the implementation history.
+2. Open your browser: `http://localhost:12356/cp`
+3. Sign in with your admin or team API key when prompted
 
 ## 📚 Documentation
 

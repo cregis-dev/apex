@@ -7,17 +7,17 @@
 
 Apex currently uses a two-stage web release model:
 
-1. build the Next.js dashboard as a static export into `target/web`
+1. build the Control Plane UI (Vite + React) into `target/web/cp`
 2. build the Rust binary with `--features embedded-web`
 
-Release binaries are expected to serve the dashboard from embedded assets, not from a separately deployed `web/` directory.
+Release binaries are expected to serve the Control Plane from embedded assets, not from a separately deployed `cp/` directory.
 
 ## Development Mode
 
 Development keeps filesystem-based behavior available:
 
-- frontend source lives in `web/`
-- frontend export output lives in `target/web/`
+- frontend source lives in `cp/`
+- frontend build output lives in `target/web/cp/`
 - backend reads static assets from the fixed `target/web` export when not using `embedded-web`
 
 Default filesystem asset directory:
@@ -31,9 +31,9 @@ target/web
 Release mode should use:
 
 ```bash
-cd web
-npm install
-npm run build
+cd cp
+pnpm install
+pnpm build
 
 cd ..
 cargo build --release --features embedded-web
@@ -42,8 +42,8 @@ cargo build --release --features embedded-web
 Result:
 
 - release artifact is the Rust binary
-- dashboard assets are embedded into that binary
-- shipping a separate `web/` directory is no longer required
+- Control Plane assets are embedded into that binary
+- shipping a separate `cp/` directory is no longer required
 
 ## Config Semantics
 
@@ -57,8 +57,8 @@ Interpretation:
 
 ## Canonical Rules
 
-- `web/` is source only
-- `target/web/` is the only static export directory
+- `cp/` is source only
+- `target/web/` is the only static export directory (Control Plane assets under `target/web/cp/`)
 - release automation should build `embedded-web`
 - install flows should not copy `target/web` into deployment targets
 

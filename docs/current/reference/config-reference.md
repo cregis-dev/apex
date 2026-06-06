@@ -47,12 +47,12 @@
 
 ## Web 静态资源目录
 
-Dashboard 静态导出目录固定为 `target/web`。
+控制台 (Control Plane) 静态导出目录固定为 `target/web`（资源位于 `target/web/cp`）。
 
 使用规则：
 
 - 未启用 `embedded-web` 时，后端按约定从 `target/web` 读取静态资源
-- 启用 `embedded-web` 时，发布二进制从内嵌资源读取 Dashboard
+- 启用 `embedded-web` 时，发布二进制从内嵌资源读取控制台资源
 - 旧配置中的 `web_dir` 会被兼容读取，但它已经不是正式配置项，也不会再写回配置文件
 
 ---
