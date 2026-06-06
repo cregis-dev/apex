@@ -141,6 +141,12 @@ a { color: inherit; text-decoration: none; }
 .mono { font-family: var(--font-mono); }
 .muted { color: var(--muted); }
 
+/* clickable team chip (rate limits) — hover reveals the edit affordance */
+.rl-team { transition: background 100ms; }
+.rl-team:hover { background: var(--surface-2); }
+.rl-team .rl-edit { opacity: 0; transition: opacity 100ms; }
+.rl-team:hover .rl-edit { opacity: 1; }
+
 /* tables */
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table th {

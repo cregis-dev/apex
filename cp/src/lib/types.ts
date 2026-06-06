@@ -114,6 +114,7 @@ export interface FilterOptions {
   models: string[]
   routers: string[]
   channels: string[]
+  clients: string[]
 }
 
 export interface RecordCursor {
@@ -131,6 +132,8 @@ export interface AnalyticsResponse {
   team_usage: TeamUsageSection
   system_reliability: SystemReliabilitySection
   model_router: ModelRouterSection
+  /** Per-client (tool) usage breakdown; records without a detected client bucket as "Unknown". */
+  client_usage: ShareItem[]
   records_meta: { total: number; latest_cursor: RecordCursor | null }
 }
 
@@ -155,6 +158,10 @@ export interface UsageRecord {
   error_message: string | null
   provider_trace_id: string | null
   provider_error_body: string | null
+  /** Normalized calling tool/client (e.g. "Claude Code", "Codex"), null if undetected. */
+  client: string | null
+  /** Raw User-Agent (truncated) for drill-down. */
+  user_agent: string | null
 }
 
 export interface RecordsResponse {
@@ -342,6 +349,7 @@ export interface AnalyticsParams {
   router?: string
   channel?: string
   model?: string
+  client?: string
 }
 
 export interface RecordsParams extends AnalyticsParams {

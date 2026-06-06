@@ -87,6 +87,10 @@ export const api = {
   teamApiKeys: () =>
     req<AdminListResponse<TeamApiKeyEntry>>('GET', '/admin/teams/api_keys'),
 
+  // Reveal the *unmasked* api_key for a single team (admin-only).
+  revealTeamApiKey: (id: string) =>
+    req<{ id: string; api_key: string }>('GET', `/admin/teams/${encodeURIComponent(id)}/api_key`),
+
   createTeam: (body: CreateTeamRequest) =>
     req<AdminTeam>('POST', '/admin/teams', body),
 

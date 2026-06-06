@@ -31,6 +31,7 @@ impl UsageLogger {
         output_tokens: u64,
         latency_ms: Option<f64>,
         fallback_triggered: bool,
+        client_info: &crate::utils::ClientInfo,
     ) {
         self.db.log_usage(
             request_id,
@@ -52,6 +53,8 @@ impl UsageLogger {
             None,
             None,
             None,
+            client_info.client.as_deref(),
+            client_info.user_agent.as_deref(),
         );
     }
 
@@ -70,6 +73,7 @@ impl UsageLogger {
         error_message: &str,
         provider_trace_id: Option<&str>,
         provider_error_body: Option<&str>,
+        client_info: &crate::utils::ClientInfo,
     ) {
         self.db.log_usage(
             request_id,
@@ -91,6 +95,8 @@ impl UsageLogger {
             Some(error_message),
             provider_trace_id,
             provider_error_body,
+            client_info.client.as_deref(),
+            client_info.user_agent.as_deref(),
         );
     }
 }
@@ -108,6 +114,7 @@ struct UsageTrackerState {
     output_tokens: u64,
     latency_ms: Option<f64>,
     fallback_triggered: bool,
+    client_info: crate::utils::ClientInfo,
     accumulated_data: String,
 }
 
@@ -138,6 +145,7 @@ impl UsageTrackerState {
             output_tokens: 0,
             latency_ms,
             fallback_triggered,
+            client_info: crate::utils::ClientInfo::default(),
             accumulated_data: String::new(),
         }
     }
@@ -250,6 +258,7 @@ impl UsageTrackerState {
             self.output_tokens,
             self.latency_ms,
             self.fallback_triggered,
+            &self.client_info,
         );
     }
 }
@@ -299,6 +308,7 @@ pub async fn wrap_response(
     metrics: Arc<MetricsState>,
     latency_ms: Option<f64>,
     fallback_triggered: bool,
+    client_info: crate::utils::ClientInfo,
 ) -> Response<Body> {
     let is_sse = response
         .headers()
@@ -310,7 +320,7 @@ pub async fn wrap_response(
     let (parts, body) = response.into_parts();
 
     if is_sse {
-        let state = Arc::new(Mutex::new(UsageTrackerState::new(
+        let mut tracker = UsageTrackerState::new(
             team_id,
             request_id,
             router,
@@ -321,7 +331,9 @@ pub async fn wrap_response(
             metrics,
             latency_ms,
             fallback_triggered,
-        )));
+        );
+        tracker.client_info = client_info;
+        let state = Arc::new(Mutex::new(tracker));
         let stream = body.into_data_stream();
         let usage_stream = UsageStream {
             inner: stream,
@@ -348,6 +360,7 @@ pub async fn wrap_response(
             latency_ms,
             fallback_triggered,
         );
+        state.client_info = client_info;
 
         if let Ok(json) = serde_json::from_slice::<Value>(&bytes) {
             state.extract_usage(&json);
@@ -629,6 +642,7 @@ mod tests {
             20,
             Some(12.0),
             false,
+            &crate::utils::ClientInfo::default(),
         );
 
         assert!(

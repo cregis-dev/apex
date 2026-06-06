@@ -292,6 +292,12 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             "/admin/teams/:team_id",
             patch(handle_admin_update_team).delete(handle_admin_delete_team),
         )
+        // Explicit single-key reveal: returns the *unmasked* api_key for one team.
+        // Separate from the masked bulk list so reveals stay auditable.
+        .route(
+            "/admin/teams/:team_id/api_key",
+            get(handle_admin_team_reveal_api_key),
+        )
         .route(
             "/admin/routers",
             get(handle_admin_routers).post(handle_admin_create_router),
@@ -742,6 +748,7 @@ struct DashboardFilterOptions {
     models: Vec<String>,
     routers: Vec<String>,
     channels: Vec<String>,
+    clients: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -881,6 +888,7 @@ struct DashboardAnalyticsResponse {
     team_usage: DashboardTeamUsageSection,
     system_reliability: DashboardSystemReliabilitySection,
     model_router: DashboardModelRouterSection,
+    client_usage: Vec<DashboardShareItem>,
     records_meta: DashboardRecordsMeta,
 }
 
@@ -956,6 +964,7 @@ fn build_dashboard_usage_query(
         channel: normalize_query_filter(params, "channel"),
         model: normalize_query_filter(params, "model"),
         status: normalize_query_filter(params, "status"),
+        client: normalize_query_filter(params, "client"),
         start_time: Some(format_dashboard_timestamp(start)),
         end_time: Some(format_dashboard_timestamp(end)),
     }
@@ -996,12 +1005,16 @@ fn build_filter_options(records: &[DashboardUsageRecord]) -> DashboardFilterOpti
     let mut models = BTreeSet::new();
     let mut routers = BTreeSet::new();
     let mut channels = BTreeSet::new();
+    let mut clients = BTreeSet::new();
 
     for record in records {
         teams.insert(record.team_id.clone());
         models.insert(record.model.clone());
         routers.insert(record.router.clone());
         channels.insert(record.final_channel.clone());
+        if let Some(client) = record.client.as_ref().filter(|c| !c.is_empty()) {
+            clients.insert(client.clone());
+        }
     }
 
     DashboardFilterOptions {
@@ -1009,6 +1022,7 @@ fn build_filter_options(records: &[DashboardUsageRecord]) -> DashboardFilterOpti
         models: models.into_iter().collect(),
         routers: routers.into_iter().collect(),
         channels: channels.into_iter().collect(),
+        clients: clients.into_iter().collect(),
     }
 }
 
@@ -1304,6 +1318,43 @@ fn build_system_reliability_section(
     }
 }
 
+/// Per-client (tool) usage breakdown. Records without a detected client are
+/// bucketed under "Unknown" (e.g. failed requests, tools that send no UA).
+fn build_client_usage_section(records: &[DashboardUsageRecord]) -> Vec<DashboardShareItem> {
+    let total_requests = records.len() as f64;
+    let mut map: HashMap<String, (i64, i64)> = HashMap::new();
+    for record in records {
+        let total_tokens = usage_record_total_tokens(record);
+        let key = record
+            .client
+            .clone()
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| "Unknown".to_string());
+        map.entry(key)
+            .and_modify(|entry| {
+                entry.0 += 1;
+                entry.1 += total_tokens;
+            })
+            .or_insert((1, total_tokens));
+    }
+
+    let mut items = map
+        .into_iter()
+        .map(|(name, (requests, total_tokens))| DashboardShareItem {
+            name,
+            requests,
+            total_tokens,
+            percentage: if total_requests > 0.0 {
+                (requests as f64 / total_requests) * 100.0
+            } else {
+                0.0
+            },
+        })
+        .collect::<Vec<_>>();
+    items.sort_by_key(|item| std::cmp::Reverse(item.requests));
+    items
+}
+
 fn build_model_router_section(records: &[DashboardUsageRecord]) -> DashboardModelRouterSection {
     let total_requests = records.len() as f64;
     let mut model_map: HashMap<String, (i64, i64)> = HashMap::new();
@@ -1538,6 +1589,7 @@ async fn dashboard_analytics_api_handler(
         team_usage: build_team_usage_section(&current_records),
         system_reliability: build_system_reliability_section(&current_records, &trend),
         model_router: build_model_router_section(&current_records),
+        client_usage: build_client_usage_section(&current_records),
         records_meta: DashboardRecordsMeta {
             total: current_records.len(),
             latest_cursor: latest_cursor(&current_records),
@@ -2915,6 +2967,29 @@ async fn handle_admin_teams_api_keys(
         .unwrap()
 }
 
+async fn handle_admin_team_reveal_api_key(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(team_id): axum::extract::Path<String>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let config = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config, &parts.headers) {
+        return resp;
+    }
+
+    match config.teams.iter().find(|team| team.id == team_id) {
+        Some(team) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "id": team.id, "api_key": team.api_key }).to_string(),
+            ))
+            .unwrap(),
+        None => error_response(StatusCode::NOT_FOUND, "Team not found"),
+    }
+}
+
 async fn handle_admin_channels_api_keys(
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
@@ -3372,6 +3447,7 @@ async fn process_request(
     path_override: Option<String>,
 ) -> Response<Body> {
     let (parts, body) = req.into_parts();
+    let client_info = crate::utils::classify_client(&parts.headers);
 
     // 1. Read Body
     let bytes = match axum::body::to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
@@ -3631,6 +3707,7 @@ async fn process_request(
             "no channels configured or matched",
             None,
             None,
+            &client_info,
         );
         return protocol_error_response(
             route,
@@ -3704,6 +3781,7 @@ async fn process_request(
                 &message,
                 None,
                 None,
+                &client_info,
             );
             return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
         }
@@ -3791,6 +3869,7 @@ async fn process_request(
                 &reason,
                 None,
                 None,
+                &client_info,
             );
             return protocol_error_response(route, StatusCode::BAD_REQUEST, &reason);
         }
@@ -3893,6 +3972,7 @@ async fn process_request(
                             state.metrics.clone(),
                             Some(elapsed),
                             fallback_triggered,
+                            client_info.clone(),
                         )
                         .await;
                     }
@@ -3974,6 +4054,7 @@ async fn process_request(
                                 .unwrap_or("upstream request failed"),
                             provider_trace_id.as_deref(),
                             Some(stored_error_body.as_str()),
+                            &client_info,
                         );
 
                         // Convert error if needed (e.g. for Anthropic)
@@ -4070,6 +4151,7 @@ async fn process_request(
         "all channels failed",
         None,
         None,
+        &client_info,
     );
 
     protocol_error_response(route, StatusCode::BAD_GATEWAY, "all channels failed")
@@ -4090,6 +4172,7 @@ async fn process_gemini_native_direct_pass(
         .map(|ctx| ctx.team_id.clone())
         .unwrap_or_else(|| "global".to_string());
     let headers = parts.headers.clone();
+    let client_info = crate::utils::classify_client(&headers);
     let config = state.config.read().unwrap().clone();
 
     let router_name = if let Some(ctx) = parts.extensions.get::<TeamContext>() {
@@ -4195,6 +4278,7 @@ async fn process_gemini_native_direct_pass(
             &message,
             None,
             None,
+            &client_info,
         );
         return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
     }
@@ -4262,6 +4346,7 @@ async fn process_gemini_native_direct_pass(
                 &message,
                 None,
                 None,
+                &client_info,
             );
             return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
         }
@@ -4300,6 +4385,7 @@ async fn process_gemini_native_direct_pass(
                 .unwrap_or("upstream request failed"),
             provider_trace_id.as_deref(),
             Some(stored_error_body.as_str()),
+            &client_info,
         );
         return response_from_upstream_bytes(status, &response_headers, error_body_bytes);
     }
@@ -4325,6 +4411,7 @@ async fn process_gemini_native_direct_pass(
         state.metrics.clone(),
         Some(elapsed),
         false,
+        client_info.clone(),
     )
     .await
 }
@@ -4605,6 +4692,8 @@ mod tests {
             error_message: None,
             provider_trace_id: None,
             provider_error_body: None,
+            client: None,
+            user_agent: None,
         }];
 
         let topology = build_topology_section(&records);
@@ -4641,6 +4730,8 @@ mod tests {
                 error_message: None,
                 provider_trace_id: None,
                 provider_error_body: None,
+                client: None,
+                user_agent: None,
             },
             DashboardUsageRecord {
                 id: 2,
@@ -4661,6 +4752,8 @@ mod tests {
                 error_message: None,
                 provider_trace_id: None,
                 provider_error_body: None,
+                client: None,
+                user_agent: None,
             },
         ];
 
@@ -4700,6 +4793,8 @@ mod tests {
                 error_message: None,
                 provider_trace_id: None,
                 provider_error_body: None,
+                client: None,
+                user_agent: None,
             })
             .collect::<Vec<_>>();
 
@@ -5013,6 +5108,8 @@ mod tests {
             false,
             "success",
             Some(200),
+            None,
+            None,
             None,
             None,
             None,

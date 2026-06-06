@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import Topbar from '../components/Topbar.tsx'
 import Sparkline from '../components/Sparkline.tsx'
 import Empty from '../components/Empty.tsx'
-import Icon from '../components/Icon.tsx'
+import Icon, { type IconName } from '../components/Icon.tsx'
 import FiltersBar, { DEFAULT_FILTERS, filterValuesToParams, type FilterValues } from '../components/FiltersBar.tsx'
 import { api } from '../lib/api.ts'
 import type { TrendPoint, TopologyNode, TopologyLink, FlowSummary } from '../lib/types.ts'
@@ -391,8 +391,62 @@ function TopologySection({
   )
 }
 
+interface RankItem {
+  name: string
+  requests: number
+  total_tokens: number
+}
+
+/** A ranked top-N list for one dimension (teams / models / channels). */
+function RankCard({
+  title,
+  icon,
+  items,
+  metric,
+}: {
+  title: string
+  icon: IconName
+  items: RankItem[]
+  metric: 'requests' | 'tokens'
+}) {
+  const valueOf = (it: RankItem) => (metric === 'requests' ? it.requests : it.total_tokens)
+  const sorted = [...items].sort((a, b) => valueOf(b) - valueOf(a)).slice(0, 8)
+  const max = Math.max(...sorted.map(valueOf), 1)
+  const unit = metric === 'requests' ? 'req' : 'tok'
+  return (
+    <div className="card">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '14px 16px', borderBottom: '1px solid var(--border)' }}>
+        <Icon name={icon} size={14} style={{ color: 'var(--muted)' }} />
+        <span style={{ fontWeight: 600, fontSize: 14 }}>{title}</span>
+      </div>
+      <div style={{ padding: '6px 0' }}>
+        {sorted.map((it, i) => (
+          <div key={it.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 16px' }}>
+            <span style={{ width: 16, fontSize: 12, fontWeight: 600, textAlign: 'right', color: i < 3 ? 'var(--brand)' : 'var(--muted-2)' }}>
+              {i + 1}
+            </span>
+            <span style={{ flex: 1, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.name}>
+              {it.name}
+            </span>
+            <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--muted)', width: 64, textAlign: 'right' }}>
+              {fmt(valueOf(it))} {unit}
+            </span>
+            <div style={{ width: 56, height: 4, background: 'var(--surface-2)', borderRadius: 2, overflow: 'hidden' }}>
+              <div style={{ width: `${(valueOf(it) / max) * 100}%`, height: '100%', background: 'var(--brand)', borderRadius: 2 }} />
+            </div>
+          </div>
+        ))}
+        {sorted.length === 0 && (
+          <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--muted)' }}>No data</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function OverviewPage() {
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTERS)
+  const [rankMetric, setRankMetric] = useState<'requests' | 'tokens'>('requests')
 
   const params = filterValuesToParams(filters)
   const { data, isLoading, error } = useQuery({
@@ -472,6 +526,49 @@ export default function OverviewPage() {
               {/* Topology */}
               <TopologySection topology={data.topology} />
 
+              {/* Rankings: team / model / channel */}
+              {(data.team_usage.leaderboard.length > 0 ||
+                data.model_router.model_share.length > 0 ||
+                data.model_router.channel_summary.length > 0) && (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                    <span style={{ fontWeight: 600, fontSize: 14 }}>Rankings</span>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      {(['requests', 'tokens'] as const).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setRankMetric(m)}
+                          className="btn btn-sm"
+                          style={{
+                            height: 26, fontSize: 12,
+                            background: rankMetric === m ? 'var(--brand-soft)' : 'transparent',
+                            color: rankMetric === m ? 'var(--brand-ink)' : 'var(--muted)',
+                            borderColor: rankMetric === m ? 'transparent' : 'var(--border)',
+                          }}
+                        >
+                          {m === 'requests' ? 'Requests' : 'Tokens'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+                    <RankCard
+                      title="Top Teams"
+                      icon="users"
+                      metric={rankMetric}
+                      items={data.team_usage.leaderboard.map((t) => ({
+                        name: t.team_id,
+                        requests: t.total_requests,
+                        total_tokens: t.total_tokens,
+                      }))}
+                    />
+                    <RankCard title="Top Models" icon="cube" metric={rankMetric} items={data.model_router.model_share} />
+                    <RankCard title="Top Channels" icon="plug" metric={rankMetric} items={data.model_router.channel_summary} />
+                  </div>
+                </div>
+              )}
+
               {/* Model + Router breakdown */}
               {(data.model_router.model_share.length > 0 || data.system_reliability.channel_latency.length > 0) && (
                 <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16, marginBottom: 16 }}>
@@ -527,6 +624,29 @@ export default function OverviewPage() {
                         <Empty icon="cube" title="No model data yet" />
                       )}
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Client (tool) breakdown */}
+              {(data.client_usage ?? []).length > 0 && (
+                <div className="card" style={{ marginBottom: 16 }}>
+                  <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Icon name="activity" size={14} style={{ color: 'var(--muted)' }} />
+                    <span style={{ fontWeight: 600, fontSize: 14 }}>Clients</span>
+                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>· tools calling the gateway</span>
+                  </div>
+                  <div style={{ padding: '8px 0' }}>
+                    {(data.client_usage ?? []).slice(0, 8).map((c) => (
+                      <div key={c.name} style={{ padding: '8px 20px', display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <div style={{ flex: 1, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</div>
+                        <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--muted)', width: 70, textAlign: 'right' }}>{fmt(c.requests)} req</div>
+                        <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--muted)', width: 40, textAlign: 'right' }}>{c.percentage.toFixed(0)}%</div>
+                        <div style={{ width: 80, height: 4, background: 'var(--surface-2)', borderRadius: 2, overflow: 'hidden' }}>
+                          <div style={{ width: `${c.percentage}%`, height: '100%', background: 'var(--brand)', borderRadius: 2 }} />
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}

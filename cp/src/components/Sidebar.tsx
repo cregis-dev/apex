@@ -1,7 +1,9 @@
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, useLocation } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import Icon, { type IconName } from './Icon.tsx'
 import { api } from '../lib/api.ts'
+import { clearToken } from '../lib/auth.ts'
 
 interface NavItem {
   id: string
@@ -50,11 +52,27 @@ const NAV: NavSection[] = [
 
 export default function Sidebar() {
   const location = useLocation()
+  const [menuOpen, setMenuOpen] = useState(false)
+  const accountRef = useRef<HTMLDivElement>(null)
   const { data: info } = useQuery({
     queryKey: ['cpInfo'],
     queryFn: api.cpInfo,
     staleTime: 60_000,
   })
+
+  useEffect(() => {
+    if (!menuOpen) return
+    function handler(e: MouseEvent) {
+      if (!accountRef.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    window.addEventListener('mousedown', handler)
+    return () => window.removeEventListener('mousedown', handler)
+  }, [menuOpen])
+
+  function signOut() {
+    clearToken()
+    window.location.reload()
+  }
 
   return (
     <nav style={{
@@ -140,6 +158,100 @@ export default function Sidebar() {
         <span className="dot dot-ok" />
         <span style={{ fontSize: 12, color: 'var(--muted)', flex: 1 }}>All systems normal</span>
         {info && <span className="mono muted" style={{ fontSize: 11 }}>v{info.version}</span>}
+      </div>
+
+      {/* Account / account menu (bottom-left) */}
+      <div ref={accountRef} style={{ position: 'relative', padding: 8, borderTop: '1px solid var(--border)' }}>
+        {menuOpen && (
+          <div
+            style={{
+              position: 'absolute', left: 8, right: 8, bottom: 'calc(100% - 2px)',
+              background: 'var(--surface)', border: '1px solid var(--border)',
+              borderRadius: 'var(--r-md)', boxShadow: 'var(--shadow-md)',
+              padding: 8, zIndex: 20, marginBottom: 6,
+            }}
+          >
+            {info && (
+              <div style={{
+                padding: '8px 10px 12px', borderBottom: '1px solid var(--divider)',
+                marginBottom: 6, fontSize: 11, color: 'var(--muted)',
+              }}>
+                {info.channels} channels · {info.routers} routers · {info.teams} teams
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => { setMenuOpen(false); window.location.hash = '#/settings' }}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+                padding: '7px 10px', borderRadius: 'var(--r-sm)', border: 'none',
+                background: 'transparent', color: 'var(--ink)', fontSize: 13,
+                cursor: 'pointer', textAlign: 'left',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-2)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              <Icon name="settings" size={13} style={{ color: 'var(--muted)' }} />
+              Settings
+            </button>
+            <button
+              type="button"
+              onClick={signOut}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+                padding: '7px 10px', borderRadius: 'var(--r-sm)', border: 'none',
+                background: 'transparent', color: 'var(--err)', fontSize: 13,
+                cursor: 'pointer', textAlign: 'left',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--err-soft)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              <Icon name="external" size={13} />
+              Sign out
+            </button>
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={() => setMenuOpen((o) => !o)}
+          aria-label="Account menu"
+          aria-expanded={menuOpen}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 9, width: '100%',
+            padding: '6px 8px', borderRadius: 'var(--r-sm)',
+            border: '1px solid transparent',
+            background: menuOpen ? 'var(--surface)' : 'transparent',
+            boxShadow: menuOpen ? 'var(--shadow-xs)' : 'none',
+            cursor: 'pointer', textAlign: 'left',
+          }}
+          onMouseEnter={(e) => { if (!menuOpen) e.currentTarget.style.background = 'var(--surface)' }}
+          onMouseLeave={(e) => { if (!menuOpen) e.currentTarget.style.background = 'transparent' }}
+        >
+          <div style={{
+            width: 28, height: 28, borderRadius: '50%',
+            background: 'oklch(0.75 0.02 60)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: '#fff', fontSize: 11, fontWeight: 600, flexShrink: 0,
+          }}>
+            AP
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontSize: 13, fontWeight: 600, color: 'var(--ink)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              Apex Gateway
+            </div>
+            <div style={{
+              fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--font-mono)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {info ? info.listen : '—'}
+            </div>
+          </div>
+          <Icon name="more" size={15} style={{ color: 'var(--muted)', flexShrink: 0 }} />
+        </button>
       </div>
     </nav>
   )
