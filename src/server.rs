@@ -1,3 +1,9 @@
+// Every HTTP handler in this module returns a full `Response<Body>`, and the
+// admin write path threads that same type through `Result<_, Response<Body>>`
+// (including the closures passed to `commit_config`). `result_large_err` is
+// fundamentally at odds with that design, so allow it module-wide.
+#![allow(clippy::result_large_err)]
+
 use crate::config::Config;
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::database::{Database, UsageRecord as DashboardUsageRecord, UsageRecordQuery};
@@ -1942,9 +1948,6 @@ fn persist_config(config: &Config) -> Result<(), String> {
 /// Note: the file write happens while the write lock is held. Admin mutations
 /// are rare and the proxy hot-path only takes *read* locks, so the brief stall
 /// is an acceptable tradeoff for atomicity.
-// The error payload is a full HTTP `Response` by design (every admin handler
-// builds and returns one); the large-Err lint doesn't apply to this style.
-#[allow(clippy::result_large_err)]
 fn commit_config<T>(
     state: &AppState,
     mutate: impl FnOnce(&mut Config) -> Result<T, Response<Body>>,
