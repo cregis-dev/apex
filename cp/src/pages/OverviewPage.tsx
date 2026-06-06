@@ -4,15 +4,9 @@ import Topbar from '../components/Topbar.tsx'
 import Sparkline from '../components/Sparkline.tsx'
 import Empty from '../components/Empty.tsx'
 import Icon from '../components/Icon.tsx'
+import FiltersBar, { DEFAULT_FILTERS, filterValuesToParams, type FilterValues } from '../components/FiltersBar.tsx'
 import { api } from '../lib/api.ts'
-import type { TimeRange, TrendPoint, Overview } from '../lib/types.ts'
-
-const RANGES: { label: string; value: TimeRange }[] = [
-  { label: 'Last 1h', value: '1h' },
-  { label: 'Last 24h', value: '24h' },
-  { label: 'Last 7d', value: '7d' },
-  { label: 'Last 30d', value: '30d' },
-]
+import type { TrendPoint, TopologyNode, TopologyLink, FlowSummary } from '../lib/types.ts'
 
 function fmt(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -121,86 +115,297 @@ function TrendChart({ points }: { points: TrendPoint[] }) {
   )
 }
 
-function TopologySection({ flows }: { flows: { team_id: string; router: string; channel: string; model: string; requests: number; total_tokens: number }[] }) {
-  if (!flows.length) return null
+const KIND_ORDER = ['team', 'router', 'channel', 'model'] as const
+const COLUMN_HEADERS = ['TEAMS', 'ROUTERS', 'CHANNELS', 'MODELS'] as const
+const KIND_FILL: Record<string, string> = {
+  team: 'oklch(0.66 0.14 55)',
+  router: 'oklch(0.62 0.14 48)',
+  channel: 'oklch(0.58 0.13 42)',
+  model: 'oklch(0.54 0.12 38)',
+}
+function depthOf(kind: string): number {
+  const i = KIND_ORDER.indexOf(kind as (typeof KIND_ORDER)[number])
+  return i < 0 ? 0 : i
+}
 
+/** Hand-drawn layered Sankey: team → router → channel → model. */
+function SankeyDiagram({ nodes, links }: { nodes: TopologyNode[]; links: TopologyLink[] }) {
+  const n = nodes.length
+  const W = 960
+  const NODE_W = 12
+  const PAD = { top: 28, right: 18, bottom: 14, left: 18 }
+  const GAP = 16
+
+  // Throughput per node = max(in, out) so source/sink nodes size correctly.
+  const inSum = new Array(n).fill(0)
+  const outSum = new Array(n).fill(0)
+  for (const l of links) {
+    outSum[l.source] += l.value
+    inSum[l.target] += l.value
+  }
+  const valOf = (i: number) => Math.max(inSum[i], outSum[i], 0)
+
+  // Group node indices into the 4 layers.
+  const layers: number[][] = [[], [], [], []]
+  nodes.forEach((nd, i) => layers[depthOf(nd.kind)].push(i))
+
+  const layerTotals = layers.map((L) => L.reduce((s, i) => s + valOf(i), 0))
+  const maxTotal = Math.max(...layerTotals, 1)
+  const maxCount = Math.max(...layers.map((L) => L.length), 1)
+
+  // Height: comfortable per-unit scale, clamped.
+  const baseUnit = 24
+  let innerH = maxTotal * baseUnit + GAP * (maxCount - 1)
+  innerH = Math.max(200, Math.min(440, innerH))
+  const scale = (innerH - GAP * (maxCount - 1)) / maxTotal
+  const H = innerH + PAD.top + PAD.bottom
+
+  const colX = (depth: number) =>
+    PAD.left + (W - PAD.left - PAD.right - NODE_W) * (depth / (KIND_ORDER.length - 1))
+
+  // Position every node within its layer (tallest first for a tidy stack).
+  const pos = new Map<number, { x: number; y: number; h: number; depth: number }>()
+  layers.forEach((L, depth) => {
+    const total = layerTotals[depth]
+    const layerH = total * scale + GAP * (Math.max(L.length, 1) - 1)
+    let y = PAD.top + (innerH - layerH) / 2
+    const sorted = [...L].sort((a, b) => valOf(b) - valOf(a) || nodes[a].name.localeCompare(nodes[b].name))
+    for (const i of sorted) {
+      const h = Math.max(6, valOf(i) * scale)
+      pos.set(i, { x: colX(depth), y, h, depth })
+      y += h + GAP
+    }
+  })
+
+  // Assign each link a vertical sub-band on both ends, ordered to reduce crossings.
+  const sourceMid = new Map<number, number>()
+  const targetMid = new Map<number, number>()
+  const bySource = new Map<number, number[]>()
+  const byTarget = new Map<number, number[]>()
+  links.forEach((l, idx) => {
+    ;(bySource.get(l.source) ?? bySource.set(l.source, []).get(l.source)!).push(idx)
+    ;(byTarget.get(l.target) ?? byTarget.set(l.target, []).get(l.target)!).push(idx)
+  })
+  for (const [s, arr] of bySource) {
+    arr.sort((a, b) => (pos.get(links[a].target)?.y ?? 0) - (pos.get(links[b].target)?.y ?? 0))
+    let cy = pos.get(s)?.y ?? 0
+    for (const idx of arr) {
+      const w = links[idx].value * scale
+      sourceMid.set(idx, cy + w / 2)
+      cy += w
+    }
+  }
+  for (const [t, arr] of byTarget) {
+    arr.sort((a, b) => (pos.get(links[a].source)?.y ?? 0) - (pos.get(links[b].source)?.y ?? 0))
+    let cy = pos.get(t)?.y ?? 0
+    for (const idx of arr) {
+      const w = links[idx].value * scale
+      targetMid.set(idx, cy + w / 2)
+      cy += w
+    }
+  }
+
+  const totalReq = Math.max(...layerTotals, 1)
+
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: 'block' }}>
+      {/* Column headers */}
+      {COLUMN_HEADERS.map((label, depth) => (
+        <text
+          key={label}
+          x={colX(depth) + NODE_W / 2}
+          y={16}
+          textAnchor={depth === 0 ? 'start' : depth === 3 ? 'end' : 'middle'}
+          fontSize={10.5}
+          fontWeight={600}
+          letterSpacing="0.06em"
+          fill="var(--muted)"
+        >
+          {label}
+        </text>
+      ))}
+
+      {/* Ribbons */}
+      {links.map((l, idx) => {
+        const sp = pos.get(l.source)
+        const tp = pos.get(l.target)
+        if (!sp || !tp) return null
+        const x0 = sp.x + NODE_W
+        const y0 = sourceMid.get(idx) ?? sp.y
+        const x1 = tp.x
+        const y1 = targetMid.get(idx) ?? tp.y
+        const mx = (x0 + x1) / 2
+        const width = Math.max(1, l.value * scale)
+        const share = l.value / totalReq
+        const opacity = Math.max(0.18, Math.min(0.5, 0.16 + share * 0.7))
+        return (
+          <path
+            key={idx}
+            d={`M${x0},${y0} C${mx},${y0} ${mx},${y1} ${x1},${y1}`}
+            fill="none"
+            stroke="var(--brand)"
+            strokeOpacity={opacity}
+            strokeWidth={width}
+          >
+            <title>
+              {`${nodes[l.source].name} → ${nodes[l.target].name}\n${fmt(l.value)} req · ${fmt(l.total_tokens)} tokens`}
+            </title>
+          </path>
+        )
+      })}
+
+      {/* Nodes + labels */}
+      {nodes.map((nd, i) => {
+        const p = pos.get(i)
+        if (!p) return null
+        const labelLeft = p.depth === 3
+        const lx = labelLeft ? p.x - 6 : p.x + NODE_W + 6
+        const cy = p.y + p.h / 2
+        return (
+          <g key={i}>
+            <rect
+              x={p.x}
+              y={p.y}
+              width={NODE_W}
+              height={p.h}
+              rx={2}
+              fill={KIND_FILL[nd.kind] ?? 'var(--brand)'}
+            >
+              <title>{`${nd.name}\n${fmt(valOf(i))} req`}</title>
+            </rect>
+            <text
+              x={lx}
+              y={cy - 4}
+              textAnchor={labelLeft ? 'end' : 'start'}
+              fontSize={12}
+              fontWeight={500}
+              fill="var(--ink)"
+              style={{ paintOrder: 'stroke', stroke: 'var(--surface)', strokeWidth: 3 }}
+            >
+              {nd.name}
+            </text>
+            <text
+              x={lx}
+              y={cy + 9}
+              textAnchor={labelLeft ? 'end' : 'start'}
+              fontSize={10}
+              fontFamily="var(--font-mono)"
+              fill="var(--muted)"
+              style={{ paintOrder: 'stroke', stroke: 'var(--surface)', strokeWidth: 3 }}
+            >
+              {`${fmt(valOf(i))} req`}
+            </text>
+          </g>
+        )
+      })}
+    </svg>
+  )
+}
+
+/** Compact fallback: 4 columns of cards. Good for very dense graphs. */
+function CompactTopology({ flows }: { flows: FlowSummary[] }) {
   type Col = { header: string; items: { name: string; value: number }[] }
+  const dedupe = (pairs: [string, number][]) => {
+    const m = new Map<string, number>()
+    for (const [name, v] of pairs) m.set(name, (m.get(name) ?? 0) + v)
+    return [...m.entries()].sort((a, b) => b[1] - a[1]).map(([name, value]) => ({ name, value }))
+  }
   const cols: Col[] = [
-    { header: 'Teams', items: [...new Map(flows.map((f) => [f.team_id, f])).values()].map((f) => ({ name: f.team_id, value: f.requests })) },
-    { header: 'Routers', items: [...new Map(flows.map((f) => [f.router, f])).values()].map((f) => ({ name: f.router, value: f.requests })) },
-    { header: 'Channels', items: [...new Map(flows.map((f) => [f.channel, f])).values()].map((f) => ({ name: f.channel, value: f.requests })) },
-    { header: 'Models', items: [...new Map(flows.map((f) => [f.model, f])).values()].map((f) => ({ name: f.model, value: f.requests })) },
+    { header: 'Teams', items: dedupe(flows.map((f) => [f.team_id, f.requests])) },
+    { header: 'Routers', items: dedupe(flows.map((f) => [f.router, f.requests])) },
+    { header: 'Channels', items: dedupe(flows.map((f) => [f.channel, f.requests])) },
+    { header: 'Models', items: dedupe(flows.map((f) => [f.model, f.requests])) },
   ]
   const allMax = Math.max(...cols.flatMap((c) => c.items.map((i) => i.value)), 1)
 
   return (
-    <div className="card" style={{ marginBottom: 16 }}>
-      <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: 14 }}>
-        Traffic Topology
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', padding: '16px 0' }}>
-        {cols.map((col, ci) => (
-          <div key={col.header} style={{
-            borderRight: ci < 3 ? '1px solid var(--border)' : undefined,
-            padding: '0 16px',
-          }}>
-            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', fontWeight: 500, marginBottom: 10 }}>
-              {col.header}
-            </div>
-            {col.items.slice(0, 4).map((item) => (
-              <div key={item.name} className="card" style={{
-                padding: '10px 12px', marginBottom: 8, position: 'relative', overflow: 'hidden',
-              }}>
-                <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {item.name}
-                </div>
-                <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--muted)' }}>{fmt(item.value)} req</div>
-                <div style={{
-                  position: 'absolute', bottom: 0, left: 0,
-                  height: 3, borderRadius: '0 2px 0 0',
-                  background: 'var(--brand)',
-                  width: `${(item.value / allMax) * 100}%`,
-                }} />
-              </div>
-            ))}
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', padding: '16px 0' }}>
+      {cols.map((col, ci) => (
+        <div key={col.header} style={{ borderRight: ci < 3 ? '1px solid var(--border)' : undefined, padding: '0 16px' }}>
+          <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', fontWeight: 500, marginBottom: 10 }}>
+            {col.header}
           </div>
-        ))}
-      </div>
+          {col.items.slice(0, 6).map((item) => (
+            <div key={item.name} className="card" style={{ padding: '10px 12px', marginBottom: 8, position: 'relative', overflow: 'hidden' }}>
+              <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {item.name}
+              </div>
+              <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--muted)' }}>{fmt(item.value)} req</div>
+              <div style={{ position: 'absolute', bottom: 0, left: 0, height: 3, borderRadius: '0 2px 0 0', background: 'var(--brand)', width: `${(item.value / allMax) * 100}%` }} />
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   )
 }
 
-function overviewSeries(overview: Overview): { req: number[]; tok: number[]; lat: number[]; ok: number[] } {
-  // Backend doesn't return per-card sparkline series; generate flat lines as fallback
-  return {
-    req: [overview.total_requests],
-    tok: [overview.total_tokens],
-    lat: [overview.avg_latency_ms],
-    ok: [overview.success_rate * 100],
-  }
+function TopologySection({
+  topology,
+}: {
+  topology: { nodes: TopologyNode[]; links: TopologyLink[]; flows: FlowSummary[]; render_mode: string }
+}) {
+  const hasGraph = topology.nodes.length > 0 && topology.links.length > 0
+  // Default to the compact card view when the backend flags a collapsed graph.
+  const [view, setView] = useState<'sankey' | 'compact'>(
+    topology.render_mode === 'summary' ? 'compact' : 'sankey'
+  )
+
+  if (!hasGraph && !topology.flows.length) return null
+
+  const TabButton = ({ value, label }: { value: 'sankey' | 'compact'; label: string }) => (
+    <button
+      type="button"
+      onClick={() => setView(value)}
+      className="btn btn-sm"
+      style={{
+        height: 26, fontSize: 12,
+        background: view === value ? 'var(--brand-soft)' : 'transparent',
+        color: view === value ? 'var(--brand-ink)' : 'var(--muted)',
+        borderColor: view === value ? 'transparent' : 'var(--border)',
+      }}
+    >
+      {label}
+    </button>
+  )
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', borderBottom: '1px solid var(--border)' }}>
+        <span style={{ fontWeight: 600, fontSize: 14 }}>Traffic Topology</span>
+        {hasGraph && (
+          <div style={{ display: 'flex', gap: 6 }}>
+            <TabButton value="sankey" label="Sankey" />
+            <TabButton value="compact" label="Compact" />
+          </div>
+        )}
+      </div>
+      {view === 'sankey' && hasGraph ? (
+        <div style={{ padding: '12px 16px' }}>
+          <SankeyDiagram nodes={topology.nodes} links={topology.links} />
+        </div>
+      ) : (
+        <CompactTopology flows={topology.flows} />
+      )}
+    </div>
+  )
 }
 
 export default function OverviewPage() {
-  const [range, setRange] = useState<TimeRange>('24h')
+  const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTERS)
 
+  const params = filterValuesToParams(filters)
   const { data, isLoading, error } = useQuery({
-    queryKey: ['analytics', range],
-    queryFn: () => api.analytics({ range }),
+    queryKey: ['analytics', params],
+    queryFn: () => api.analytics(params),
   })
 
   const actions = (
-    <div style={{ display: 'flex', gap: 8 }}>
-      <select
-        className="select btn-sm"
-        value={range}
-        onChange={(e) => setRange(e.target.value as TimeRange)}
-        style={{ height: 28, fontSize: 12 }}
-      >
-        {RANGES.map((r) => (
-          <option key={r.value} value={r.value}>{r.label}</option>
-        ))}
-      </select>
-    </div>
+    <FiltersBar
+      values={filters}
+      options={data?.filter_options}
+      onChange={setFilters}
+    />
   )
 
   return (
@@ -226,7 +431,6 @@ export default function OverviewPage() {
 
         {data && (() => {
           const ov = data.overview
-          void overviewSeries(ov)
           const trendPts = data.trend.points
           return (
             <>
@@ -255,9 +459,9 @@ export default function OverviewPage() {
                 />
                 <StatCard
                   label="Success Rate"
-                  value={`${(ov.success_rate * 100).toFixed(1)}%`}
+                  value={`${ov.success_rate.toFixed(1)}%`}
                   delta={ov.delta.success_rate}
-                  series={trendPts.map((p) => p.success_rate * 100)}
+                  series={trendPts.map((p) => p.success_rate)}
                   color="var(--ok)"
                 />
               </div>
@@ -266,7 +470,7 @@ export default function OverviewPage() {
               {trendPts.length > 0 && <TrendChart points={trendPts} />}
 
               {/* Topology */}
-              <TopologySection flows={data.topology.flows} />
+              <TopologySection topology={data.topology} />
 
               {/* Model + Router breakdown */}
               {(data.model_router.model_share.length > 0 || data.system_reliability.channel_latency.length > 0) && (

@@ -172,6 +172,8 @@ pub fn build_config(env: &E2eEnv, config_path: &Path) -> Config {
                 allowed_models: Some(vec![env.test_model.clone()]),
                 rate_limit: None,
             },
+            group: None,
+            enabled: None,
         }]),
         compliance: None,
     }

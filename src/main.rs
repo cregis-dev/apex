@@ -314,6 +314,8 @@ fn handle_team_command(cli: &Cli, command: &TeamCommand) -> anyhow::Result<()> {
                         None
                     },
                 },
+                group: None,
+                enabled: None,
             };
 
             std::sync::Arc::make_mut(&mut config.teams).push(team.clone());

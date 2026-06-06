@@ -1,3 +1,9 @@
+// Every HTTP handler in this module returns a full `Response<Body>`, and the
+// admin write path threads that same type through `Result<_, Response<Body>>`
+// (including the closures passed to `commit_config`). `result_large_err` is
+// fundamentally at odds with that design, so allow it module-wide.
+#![allow(clippy::result_large_err)]
+
 use crate::config::Config;
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::database::{Database, UsageRecord as DashboardUsageRecord, UsageRecordQuery};
@@ -21,7 +27,7 @@ use axum::http::{
     HeaderMap, HeaderValue, Method, Request, Response as HttpResponse, StatusCode, Uri,
 };
 use axum::response::{Redirect, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use chrono::{Duration as ChronoDuration, Local, NaiveDateTime};
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::json;
@@ -275,9 +281,42 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 
     // Admin/System Routes (no auth required)
     let admin_routes = Router::new()
-        .route("/admin/teams", get(handle_admin_teams))
-        .route("/admin/routers", get(handle_admin_routers))
-        .route("/admin/channels", get(handle_admin_channels))
+        .route(
+            "/admin/teams",
+            get(handle_admin_teams).post(handle_admin_create_team),
+        )
+        // Order matters: this static path must be registered before the
+        // `:team_id` route below so it isn't shadowed by the path-param match.
+        .route("/admin/teams/api_keys", get(handle_admin_teams_api_keys))
+        .route(
+            "/admin/teams/:team_id",
+            patch(handle_admin_update_team).delete(handle_admin_delete_team),
+        )
+        .route(
+            "/admin/routers",
+            get(handle_admin_routers).post(handle_admin_create_router),
+        )
+        .route(
+            "/admin/routers/:router_name",
+            patch(handle_admin_update_router).delete(handle_admin_delete_router),
+        )
+        .route(
+            "/admin/channels",
+            get(handle_admin_channels).post(handle_admin_create_channel),
+        )
+        // Static path must be registered before the `:channel_name` path-param.
+        .route(
+            "/admin/channels/api_keys",
+            get(handle_admin_channels_api_keys),
+        )
+        .route(
+            "/admin/channels/:channel_name",
+            patch(handle_admin_update_channel).delete(handle_admin_delete_channel),
+        )
+        .route(
+            "/api/cp/provider-templates",
+            get(handle_cp_provider_templates),
+        )
         .route("/api/cp/info", get(handle_cp_info));
 
     // Metrics (Protected by Global API Key)
@@ -1608,27 +1647,123 @@ async fn handle_gemini_native(
     process_request(state, req, RouteKind::GeminiNative, None, None).await
 }
 
+/// `GET /v1/models` (and `/models`). Returns the list of concrete model ids
+/// the *team* associated with the inbound API key is allowed to call, in
+/// OpenAI's list-models format. Admin / global keys are intentionally
+/// rejected here — this endpoint exists to bootstrap end-user clients, not
+/// to power admin tooling.
 async fn handle_models(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response<Body> {
-    let (parts, _body) = req.into_parts();
-    let headers = &parts.headers;
+    let team_id = match req.extensions().get::<TeamContext>() {
+        Some(ctx) => ctx.team_id.clone(),
+        None => {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "Team API Key required: /v1/models only resolves models for a specific team",
+            );
+        }
+    };
 
     let config = state.config.read().unwrap().clone();
+    let Some(team) = config.teams.iter().find(|t| t.id == team_id) else {
+        return error_response(StatusCode::UNAUTHORIZED, "Team not found");
+    };
 
-    // Check Team Context or global auth required
-    if parts.extensions.get::<TeamContext>().is_none() && !config.global.auth_keys.is_empty() {
-        return error_response(StatusCode::UNAUTHORIZED, "Team API Key Required");
+    // -- 1. Collect candidate model ids ------------------------------------
+    // Anything that is a literal model name in the rules of a router this
+    // team is allowed to use. Glob patterns like "*" / "deepseek-*" are
+    // skipped because OpenAI's list-models payload requires concrete ids.
+    let mut candidates: BTreeSet<String> = BTreeSet::new();
+    for router_name in &team.policy.allowed_routers {
+        let Some(router) = config.routers.iter().find(|r| &r.name == router_name) else {
+            continue;
+        };
+        for rule in &router.rules {
+            for pattern in &rule.match_spec.models {
+                if !is_glob_pattern(pattern) {
+                    candidates.insert(pattern.clone());
+                }
+            }
+        }
     }
 
-    // Try Authorization header first, then x-api-key (for Anthropic)
-    let _vkey =
-        read_auth_token(headers, "authorization").or_else(|| read_auth_token(headers, "x-api-key"));
+    // Augment with concrete model ids actually observed in the usage log for
+    // this team. This covers the common case where the only router rule is
+    // a glob (e.g. `deepseek-*`) — without history the team would otherwise
+    // see an empty list.
+    if let Ok(history) = state.database.distinct_models_for_team(&team_id) {
+        candidates.extend(history);
+    }
 
-    // Placeholder response for models
+    // -- 2. Filter by team policy + verify a router can actually route it --
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(candidates.len());
+    for model in candidates {
+        if !team.policy.is_model_allowed(&model) {
+            continue;
+        }
+
+        let Some((router_name, channel_name)) =
+            resolve_model_to_router_channel(&config, &team.policy.allowed_routers, &model, &state)
+        else {
+            continue;
+        };
+
+        let owned_by = config
+            .channels
+            .iter()
+            .find(|c| c.name == channel_name)
+            .map(|c| format!("{:?}", c.provider_type).to_lowercase())
+            .unwrap_or_else(|| "apex".to_string());
+
+        entries.push(json!({
+            "id": model,
+            "object": "model",
+            "created": 0,
+            "owned_by": owned_by,
+            "apex": {
+                "router": router_name,
+                "channel": channel_name,
+            }
+        }));
+    }
+
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"object":"list","data":[]}"#))
+        .body(Body::from(
+            json!({
+                "object": "list",
+                "data": entries,
+            })
+            .to_string(),
+        ))
         .unwrap()
+}
+
+/// A pattern is "glob-like" if it contains any of the meta-characters glob
+/// would interpret. Bare literal model ids (which is what OpenAI's list
+/// endpoint must return) contain none of these.
+fn is_glob_pattern(pattern: &str) -> bool {
+    pattern.chars().any(|c| matches!(c, '*' | '?' | '[' | ']'))
+}
+
+/// Try each of the team's allowed routers; if one can route the given model
+/// to a concrete channel, return `(router_name, channel_name)`. We avoid
+/// returning models the gateway would actually 404 on.
+fn resolve_model_to_router_channel(
+    config: &Config,
+    allowed_routers: &[String],
+    model: &str,
+    state: &AppState,
+) -> Option<(String, String)> {
+    for router_name in allowed_routers {
+        let Some(router) = config.routers.iter().find(|r| &r.name == router_name) else {
+            continue;
+        };
+        if let Some(channel) = state.selector.select_channel(router, model) {
+            return Some((router.name.clone(), channel));
+        }
+    }
+    None
 }
 
 async fn handle_admin_teams(
@@ -1653,9 +1788,12 @@ async fn handle_admin_teams(
                     "tpm": l.tpm
                 })
             });
+            // NOTE: api_key is intentionally NOT included in the list
+            // response. Fetch it explicitly via GET /admin/teams/api_keys.
             json!({
                 "id": team.id,
-                "api_key": mask_secret(&team.api_key),
+                "group": team.group,
+                "enabled": team.enabled.unwrap_or(true),
                 "policy": {
                     "allowed_routers": team.policy.allowed_routers,
                     "allowed_models": team.policy.allowed_models,
@@ -1675,6 +1813,368 @@ async fn handle_admin_teams(
             })
             .to_string(),
         ))
+        .unwrap()
+}
+
+// -------- Teams CRUD --------
+
+#[derive(serde::Deserialize, Default)]
+struct CreateTeamRequest {
+    id: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    allowed_routers: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_models: Option<Vec<String>>,
+    #[serde(default)]
+    rate_limit: Option<TeamRateLimitInput>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct UpdateTeamRequest {
+    #[serde(default)]
+    group: Option<Option<String>>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    allowed_routers: Option<Vec<String>>,
+    /// `Some(None)` means "clear" (no allowlist → all models). `Some(Some(_))` sets.
+    /// `None` leaves the field unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_optional_vec")]
+    allowed_models: Option<Option<Vec<String>>>,
+    #[serde(default, deserialize_with = "deserialize_optional_optional_rate_limit")]
+    rate_limit: Option<Option<TeamRateLimitInput>>,
+}
+
+#[derive(serde::Deserialize, Default, Clone)]
+struct TeamRateLimitInput {
+    #[serde(default)]
+    rpm: Option<i32>,
+    #[serde(default)]
+    tpm: Option<i32>,
+}
+
+fn deserialize_optional_optional_vec<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<Vec<String>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    // Accept null (= clear) or array.
+    let value: serde_json::Value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(Some(None)),
+        serde_json::Value::Array(items) => {
+            let parsed = items
+                .into_iter()
+                .map(|item| match item {
+                    serde_json::Value::String(s) => Ok(s),
+                    other => Err(serde::de::Error::custom(format!(
+                        "allowed_models entries must be strings, got {other:?}"
+                    ))),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Some(Some(parsed)))
+        }
+        other => Err(serde::de::Error::custom(format!(
+            "allowed_models must be null or an array, got {other:?}"
+        ))),
+    }
+}
+
+fn deserialize_optional_optional_rate_limit<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<TeamRateLimitInput>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value: serde_json::Value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(Some(None)),
+        other => {
+            let parsed: TeamRateLimitInput =
+                serde_json::from_value(other).map_err(serde::de::Error::custom)?;
+            Ok(Some(Some(parsed)))
+        }
+    }
+}
+
+fn generate_team_api_key() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // Hex-encoded timestamp + a small random suffix from process state.
+    // Not cryptographically strong but unique per-team for in-config usage.
+    let pid = std::process::id() as u128;
+    let entropy = nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(pid);
+    format!("sk-apex-{entropy:032x}")
+}
+
+fn persist_config(config: &Config) -> Result<(), String> {
+    let path = PathBuf::from(&config.hot_reload.config_path);
+    if path.as_os_str().is_empty() {
+        return Err("hot_reload.config_path is empty".into());
+    }
+    crate::config::save_config(&path, config).map_err(|e| e.to_string())
+}
+
+/// Atomically apply a configuration mutation.
+///
+/// This is the single write path shared by every admin CRUD handler. It closes
+/// two classes of bug that arise when validation, mutation and persistence are
+/// done across separate lock acquisitions:
+///
+///   * **TOCTOU** — the closure runs while the write lock is held and validates
+///     against a private `candidate` clone of the *current* config, so a
+///     concurrent writer can't invalidate a check between validate and apply.
+///   * **memory/disk divergence** — the candidate is persisted to disk *before*
+///     it is committed to the in-memory `Config`. If the disk write fails, the
+///     live config is left untouched and the handler returns an error, instead
+///     of silently keeping an unpersisted change that vanishes on restart.
+///
+/// The closure receives `&mut Config` (the candidate) and returns either a
+/// success value (used to build the response) or an error `Response` to abort
+/// the whole operation with no change.
+///
+/// Note: the file write happens while the write lock is held. Admin mutations
+/// are rare and the proxy hot-path only takes *read* locks, so the brief stall
+/// is an acceptable tradeoff for atomicity.
+fn commit_config<T>(
+    state: &AppState,
+    mutate: impl FnOnce(&mut Config) -> Result<T, Response<Body>>,
+) -> Result<T, Response<Body>> {
+    let mut guard = state.config.write().unwrap();
+    let mut candidate = guard.clone();
+    let value = mutate(&mut candidate)?;
+    if let Err(err) = persist_config(&candidate) {
+        tracing::error!("Failed to persist config change: {err}");
+        return Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to persist config: {err}"),
+        ));
+    }
+    *guard = candidate;
+    Ok(value)
+}
+
+fn teams_json_response(team: &crate::config::Team) -> serde_json::Value {
+    let rate_limit = team
+        .policy
+        .rate_limit
+        .as_ref()
+        .map(|l| json!({"rpm": l.rpm, "tpm": l.tpm}));
+    // NOTE: api_key is intentionally NOT included in the standard response.
+    // Create responses overlay it afterwards (only-time reveal); other reads
+    // go through GET /admin/teams/api_keys.
+    json!({
+        "id": team.id,
+        "group": team.group,
+        "enabled": team.enabled.unwrap_or(true),
+        "policy": {
+            "allowed_routers": team.policy.allowed_routers,
+            "allowed_models": team.policy.allowed_models,
+            "rate_limit": rate_limit,
+        }
+    })
+}
+
+async fn handle_admin_create_team(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = req.into_parts();
+    let config_snapshot = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config_snapshot, &parts.headers) {
+        return resp;
+    }
+
+    let bytes = match axum::body::to_bytes(body, 64 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Failed to read body"),
+    };
+    let payload: CreateTeamRequest = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(err) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {err}"));
+        }
+    };
+
+    let id = payload.id.trim().to_string();
+    if id.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "id must not be empty");
+    }
+
+    let api_key = payload
+        .api_key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(generate_team_api_key);
+
+    let allowed_routers = payload.allowed_routers.unwrap_or_default();
+    let rate_limit = payload.rate_limit.map(|r| crate::config::TeamRateLimit {
+        rpm: r.rpm,
+        tpm: r.tpm,
+    });
+
+    let new_team = crate::config::Team {
+        id: id.clone(),
+        api_key: api_key.clone(),
+        group: payload.group.and_then(|g| {
+            let g = g.trim().to_string();
+            if g.is_empty() { None } else { Some(g) }
+        }),
+        enabled: payload.enabled.or(Some(true)),
+        policy: crate::config::TeamPolicy {
+            allowed_routers,
+            allowed_models: payload.allowed_models,
+            rate_limit,
+        },
+    };
+
+    // Validate uniqueness + apply + persist atomically under the write lock.
+    if let Err(resp) = commit_config(&state, |cfg| {
+        if cfg.teams.iter().any(|t| t.id == id) {
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "A team with this id already exists",
+            ));
+        }
+        if cfg.teams.iter().any(|t| t.api_key == api_key) {
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "A team with this api_key already exists",
+            ));
+        }
+        Arc::make_mut(&mut cfg.teams).push(new_team.clone());
+        Ok(())
+    }) {
+        return resp;
+    }
+
+    // For create only: return the *unmasked* api_key once, so the operator
+    // can record it. Subsequent reads will be masked.
+    let mut payload_value = teams_json_response(&new_team);
+    if let Some(obj) = payload_value.as_object_mut() {
+        obj.insert(
+            "api_key".to_string(),
+            serde_json::Value::String(api_key.clone()),
+        );
+        obj.insert(
+            "api_key_revealed".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+
+    Response::builder()
+        .status(StatusCode::CREATED)
+        .header("content-type", "application/json")
+        .body(Body::from(payload_value.to_string()))
+        .unwrap()
+}
+
+async fn handle_admin_update_team(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(team_id): axum::extract::Path<String>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = req.into_parts();
+    let config_snapshot = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config_snapshot, &parts.headers) {
+        return resp;
+    }
+
+    let bytes = match axum::body::to_bytes(body, 64 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Failed to read body"),
+    };
+    let payload: UpdateTeamRequest = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(err) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {err}"));
+        }
+    };
+
+    let updated_team = match commit_config(&state, |cfg| {
+        let teams = Arc::make_mut(&mut cfg.teams);
+        let Some(team) = teams.iter_mut().find(|t| t.id == team_id) else {
+            return Err(error_response(StatusCode::NOT_FOUND, "Team not found"));
+        };
+
+        if let Some(group) = payload.group {
+            team.group = group.and_then(|g| {
+                let trimmed = g.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            });
+        }
+        if let Some(enabled) = payload.enabled {
+            team.enabled = Some(enabled);
+        }
+        if let Some(allowed_routers) = payload.allowed_routers {
+            team.policy.allowed_routers = allowed_routers;
+        }
+        if let Some(allowed_models) = payload.allowed_models {
+            team.policy.allowed_models = allowed_models;
+        }
+        if let Some(rate_limit) = payload.rate_limit {
+            team.policy.rate_limit = rate_limit.map(|r| crate::config::TeamRateLimit {
+                rpm: r.rpm,
+                tpm: r.tpm,
+            });
+        }
+
+        Ok(team.clone())
+    }) {
+        Ok(team) => team,
+        Err(resp) => return resp,
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(teams_json_response(&updated_team).to_string()))
+        .unwrap()
+}
+
+async fn handle_admin_delete_team(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(team_id): axum::extract::Path<String>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let config_snapshot = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config_snapshot, &parts.headers) {
+        return resp;
+    }
+
+    if let Err(resp) = commit_config(&state, |cfg| {
+        let teams = Arc::make_mut(&mut cfg.teams);
+        let before = teams.len();
+        teams.retain(|t| t.id != team_id);
+        if teams.len() == before {
+            return Err(error_response(StatusCode::NOT_FOUND, "Team not found"));
+        }
+        Ok(())
+    }) {
+        return resp;
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"deleted": team_id}).to_string()))
         .unwrap()
 }
 
@@ -1725,11 +2225,12 @@ async fn handle_admin_channels(
         .channels
         .iter()
         .map(|channel| {
+            // NOTE: api_key is intentionally NOT included in the list
+            // response. Fetch it explicitly via GET /admin/channels/api_keys.
             json!({
                 "name": channel.name,
                 "provider_type": channel.provider_type,
                 "base_url": channel.base_url,
-                "api_key": mask_secret(&channel.api_key),
                 "anthropic_base_url": channel.anthropic_base_url
             })
         })
@@ -1744,6 +2245,760 @@ async fn handle_admin_channels(
                 "data": data
             })
             .to_string(),
+        ))
+        .unwrap()
+}
+
+// -------- Channels CRUD --------
+//
+// Channels write paths share the same shape as Teams: the in-memory `Config`
+// is mutated under the write-lock, then `persist_config` writes the new JSON
+// to disk so the change survives restart. Hot-reload picks it up too.
+//
+// Safety invariants:
+//   * name uniqueness on create
+//   * before delete, refuse if any router rule (or legacy fallback) still
+//     references the channel — silent removal would break routing at runtime.
+
+#[derive(serde::Deserialize)]
+struct CreateChannelRequest {
+    name: String,
+    provider_type: crate::config::ProviderType,
+    base_url: String,
+    api_key: String,
+    #[serde(default)]
+    anthropic_base_url: Option<String>,
+    #[serde(default)]
+    headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    model_map: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct UpdateChannelRequest {
+    #[serde(default)]
+    provider_type: Option<crate::config::ProviderType>,
+    #[serde(default)]
+    base_url: Option<String>,
+    /// Bearer token / upstream secret. `None` leaves it unchanged.
+    /// (No way to *clear* the key via PATCH — empty key would break the
+    /// channel at runtime. Delete + recreate instead.)
+    #[serde(default)]
+    api_key: Option<String>,
+    /// `Some(None)` clears the anthropic URL; `Some(Some(_))` sets it.
+    #[serde(default, deserialize_with = "deserialize_optional_optional_string")]
+    anthropic_base_url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_optional_str_map")]
+    headers: Option<Option<std::collections::HashMap<String, String>>>,
+    #[serde(default, deserialize_with = "deserialize_optional_optional_str_map")]
+    model_map: Option<Option<std::collections::HashMap<String, String>>>,
+}
+
+fn deserialize_optional_optional_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value: serde_json::Value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(Some(None)),
+        serde_json::Value::String(s) => Ok(Some(Some(s))),
+        other => Err(serde::de::Error::custom(format!(
+            "expected string or null, got {other:?}"
+        ))),
+    }
+}
+
+fn deserialize_optional_optional_str_map<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<std::collections::HashMap<String, String>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value: serde_json::Value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(Some(None)),
+        other => {
+            let parsed: std::collections::HashMap<String, String> =
+                serde_json::from_value(other).map_err(serde::de::Error::custom)?;
+            Ok(Some(Some(parsed)))
+        }
+    }
+}
+
+fn channel_json_response(channel: &crate::config::Channel) -> serde_json::Value {
+    json!({
+        "name": channel.name,
+        "provider_type": channel.provider_type,
+        "base_url": channel.base_url,
+        "anthropic_base_url": channel.anthropic_base_url,
+    })
+}
+
+/// Collect router names + rule indices that reference the given channel.
+/// Used by delete handlers to produce a helpful 409 instead of silently
+/// leaving the gateway pointing at a deleted channel.
+fn collect_channel_references(config: &Config, channel_name: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    for router in config.routers.iter() {
+        for (idx, rule) in router.rules.iter().enumerate() {
+            if rule.channels.iter().any(|c| c.name == channel_name) {
+                refs.push(format!("router '{}' rule #{}", router.name, idx + 1));
+            }
+        }
+        if router.channels.iter().any(|c| c.name == channel_name) {
+            refs.push(format!("router '{}' legacy channels", router.name));
+        }
+        if router.fallback_channels.iter().any(|c| c == channel_name) {
+            refs.push(format!("router '{}' fallback", router.name));
+        }
+    }
+    refs
+}
+
+async fn handle_admin_create_channel(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = req.into_parts();
+    let config_snapshot = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config_snapshot, &parts.headers) {
+        return resp;
+    }
+
+    let bytes = match axum::body::to_bytes(body, 64 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Failed to read body"),
+    };
+    let payload: CreateChannelRequest = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(err) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {err}"));
+        }
+    };
+
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "name must not be empty");
+    }
+    if payload.base_url.trim().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "base_url must not be empty");
+    }
+    if payload.api_key.trim().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "api_key must not be empty");
+    }
+
+    let new_channel = crate::config::Channel {
+        name: name.clone(),
+        provider_type: payload.provider_type,
+        base_url: payload.base_url.trim().to_string(),
+        api_key: payload.api_key,
+        anthropic_base_url: payload
+            .anthropic_base_url
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        headers: payload.headers,
+        model_map: payload.model_map,
+        timeouts: None,
+    };
+
+    if let Err(resp) = commit_config(&state, |cfg| {
+        if cfg.channels.iter().any(|c| c.name == name) {
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "A channel with this name already exists",
+            ));
+        }
+        Arc::make_mut(&mut cfg.channels).push(new_channel.clone());
+        Ok(())
+    }) {
+        return resp;
+    }
+
+    Response::builder()
+        .status(StatusCode::CREATED)
+        .header("content-type", "application/json")
+        .body(Body::from(channel_json_response(&new_channel).to_string()))
+        .unwrap()
+}
+
+async fn handle_admin_update_channel(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(channel_name): axum::extract::Path<String>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = req.into_parts();
+    let config_snapshot = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config_snapshot, &parts.headers) {
+        return resp;
+    }
+
+    let bytes = match axum::body::to_bytes(body, 64 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Failed to read body"),
+    };
+    let payload: UpdateChannelRequest = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(err) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {err}"));
+        }
+    };
+
+    let snapshot = match commit_config(&state, |cfg| {
+        let channels = Arc::make_mut(&mut cfg.channels);
+        let Some(channel) = channels.iter_mut().find(|c| c.name == channel_name) else {
+            return Err(error_response(StatusCode::NOT_FOUND, "Channel not found"));
+        };
+
+        if let Some(pt) = payload.provider_type {
+            channel.provider_type = pt;
+        }
+        if let Some(base_url) = payload.base_url {
+            let trimmed = base_url.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "base_url must not be empty",
+                ));
+            }
+            channel.base_url = trimmed;
+        }
+        if let Some(api_key) = payload.api_key {
+            if api_key.trim().is_empty() {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "api_key must not be empty (omit field to keep current)",
+                ));
+            }
+            channel.api_key = api_key;
+        }
+        if let Some(anthropic) = payload.anthropic_base_url {
+            channel.anthropic_base_url = anthropic
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
+        }
+        if let Some(headers) = payload.headers {
+            channel.headers = headers;
+        }
+        if let Some(model_map) = payload.model_map {
+            channel.model_map = model_map;
+        }
+
+        Ok(channel.clone())
+    }) {
+        Ok(snapshot) => snapshot,
+        Err(resp) => return resp,
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(channel_json_response(&snapshot).to_string()))
+        .unwrap()
+}
+
+async fn handle_admin_delete_channel(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(channel_name): axum::extract::Path<String>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let config_snapshot = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config_snapshot, &parts.headers) {
+        return resp;
+    }
+
+    // Reference check + delete + persist atomically: a concurrent router
+    // create/update can't slip a new reference in between check and delete.
+    if let Err(resp) = commit_config(&state, |cfg| {
+        let refs = collect_channel_references(cfg, &channel_name);
+        if !refs.is_empty() {
+            return Err(Response::builder()
+                .status(StatusCode::CONFLICT)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "error": format!(
+                            "Channel '{channel_name}' is still referenced by: {}",
+                            refs.join(", ")
+                        ),
+                        "references": refs,
+                    })
+                    .to_string(),
+                ))
+                .unwrap());
+        }
+        let channels = Arc::make_mut(&mut cfg.channels);
+        let before = channels.len();
+        channels.retain(|c| c.name != channel_name);
+        if channels.len() == before {
+            return Err(error_response(StatusCode::NOT_FOUND, "Channel not found"));
+        }
+        Ok(())
+    }) {
+        return resp;
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"deleted": channel_name}).to_string()))
+        .unwrap()
+}
+
+// -------- Routers CRUD --------
+//
+// Routers are heavier than channels: a router carries an ordered list of
+// `RouterRule` (match patterns + strategy + target channels) plus optional
+// fallback channels. The write payload mirrors the on-disk JSON shape so
+// the same blob can round-trip through `save_config`.
+//
+// Safety invariants:
+//   * name uniqueness on create
+//   * every channel referenced by any rule (or fallback / legacy channels)
+//     must already exist
+//   * before delete, refuse if any team.allowed_routers still references it
+
+#[derive(serde::Deserialize, Default)]
+struct RouterRuleInput {
+    #[serde(default)]
+    models: Vec<String>,
+    #[serde(default)]
+    channels: Vec<TargetChannelInput>,
+    #[serde(default)]
+    strategy: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default, Clone)]
+struct TargetChannelInput {
+    name: String,
+    #[serde(default = "default_target_weight")]
+    weight: u32,
+}
+
+fn default_target_weight() -> u32 {
+    1
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CreateRouterRequest {
+    name: String,
+    #[serde(default)]
+    rules: Vec<RouterRuleInput>,
+    #[serde(default)]
+    fallback_channels: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct UpdateRouterRequest {
+    #[serde(default)]
+    rules: Option<Vec<RouterRuleInput>>,
+    #[serde(default)]
+    fallback_channels: Option<Vec<String>>,
+}
+
+fn router_json_response(router: &crate::config::Router) -> serde_json::Value {
+    serde_json::to_value(router).unwrap_or(serde_json::Value::Null)
+}
+
+fn build_rule(input: RouterRuleInput) -> Result<crate::config::RouterRule, String> {
+    if input.channels.is_empty() {
+        return Err("each rule must have at least one channel".into());
+    }
+    let strategy = input
+        .strategy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("round_robin")
+        .to_string();
+    match strategy.as_str() {
+        "round_robin" | "random" | "priority" => {}
+        other => return Err(format!("unknown strategy '{other}'")),
+    }
+    let channels = input
+        .channels
+        .into_iter()
+        .map(|c| crate::config::TargetChannel {
+            name: c.name,
+            weight: c.weight.max(1),
+        })
+        .collect();
+    Ok(crate::config::RouterRule {
+        match_spec: crate::config::MatchSpec {
+            models: input.models,
+        },
+        channels,
+        strategy,
+    })
+}
+
+/// Verify every channel referenced by a router exists. Returns the list of
+/// missing channel names (empty if all OK).
+fn missing_channels(
+    config: &Config,
+    rules: &[crate::config::RouterRule],
+    fallback: &[String],
+) -> Vec<String> {
+    let known: std::collections::HashSet<&str> =
+        config.channels.iter().map(|c| c.name.as_str()).collect();
+    let mut missing = std::collections::BTreeSet::new();
+    for rule in rules {
+        for tc in &rule.channels {
+            if !known.contains(tc.name.as_str()) {
+                missing.insert(tc.name.clone());
+            }
+        }
+    }
+    for name in fallback {
+        if !known.contains(name.as_str()) {
+            missing.insert(name.clone());
+        }
+    }
+    missing.into_iter().collect()
+}
+
+async fn handle_admin_create_router(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = req.into_parts();
+    let config_snapshot = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config_snapshot, &parts.headers) {
+        return resp;
+    }
+
+    let bytes = match axum::body::to_bytes(body, 256 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Failed to read body"),
+    };
+    let payload: CreateRouterRequest = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(err) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {err}"));
+        }
+    };
+
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "name must not be empty");
+    }
+    if payload.rules.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "rules must contain at least one rule",
+        );
+    }
+
+    let mut built_rules = Vec::with_capacity(payload.rules.len());
+    for rule in payload.rules {
+        match build_rule(rule) {
+            Ok(r) => built_rules.push(r),
+            Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+        }
+    }
+
+    let new_router = crate::config::Router {
+        name: name.clone(),
+        rules: built_rules,
+        channels: vec![],
+        strategy: "round_robin".to_string(),
+        metadata: None,
+        fallback_channels: payload.fallback_channels,
+    };
+
+    // Name uniqueness + channel-existence validation + persist, all atomic.
+    if let Err(resp) = commit_config(&state, |cfg| {
+        if cfg.routers.iter().any(|r| r.name == name) {
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "A router with this name already exists",
+            ));
+        }
+        let missing = missing_channels(cfg, &new_router.rules, &new_router.fallback_channels);
+        if !missing.is_empty() {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Unknown channels: {}", missing.join(", ")),
+            ));
+        }
+        Arc::make_mut(&mut cfg.routers).push(new_router.clone());
+        Ok(())
+    }) {
+        return resp;
+    }
+
+    Response::builder()
+        .status(StatusCode::CREATED)
+        .header("content-type", "application/json")
+        .body(Body::from(router_json_response(&new_router).to_string()))
+        .unwrap()
+}
+
+async fn handle_admin_update_router(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(router_name): axum::extract::Path<String>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = req.into_parts();
+    let config_snapshot = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config_snapshot, &parts.headers) {
+        return resp;
+    }
+
+    let bytes = match axum::body::to_bytes(body, 256 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Failed to read body"),
+    };
+    let payload: UpdateRouterRequest = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(err) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {err}"));
+        }
+    };
+
+    let mut built_rules = None;
+    if let Some(rules) = payload.rules {
+        if rules.is_empty() {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "rules must contain at least one rule",
+            );
+        }
+        let mut tmp = Vec::with_capacity(rules.len());
+        for rule in rules {
+            match build_rule(rule) {
+                Ok(r) => tmp.push(r),
+                Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+            }
+        }
+        built_rules = Some(tmp);
+    }
+
+    let snapshot = match commit_config(&state, |cfg| {
+        // Compute the resulting rules/fallback first, then validate channel
+        // references against the *live* config before mutating.
+        let (final_rules, final_fallback) = {
+            let Some(router) = cfg.routers.iter().find(|r| r.name == router_name) else {
+                return Err(error_response(StatusCode::NOT_FOUND, "Router not found"));
+            };
+            let final_rules = built_rules.clone().unwrap_or_else(|| router.rules.clone());
+            let final_fallback = payload
+                .fallback_channels
+                .clone()
+                .unwrap_or_else(|| router.fallback_channels.clone());
+            (final_rules, final_fallback)
+        };
+
+        let missing = missing_channels(cfg, &final_rules, &final_fallback);
+        if !missing.is_empty() {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Unknown channels: {}", missing.join(", ")),
+            ));
+        }
+
+        let routers = Arc::make_mut(&mut cfg.routers);
+        let router = routers
+            .iter_mut()
+            .find(|r| r.name == router_name)
+            .expect("router existence already checked above under the same lock");
+        if let Some(rules) = built_rules {
+            router.rules = rules;
+        }
+        if let Some(fallback) = payload.fallback_channels {
+            router.fallback_channels = fallback;
+        }
+        Ok(router.clone())
+    }) {
+        Ok(snapshot) => snapshot,
+        Err(resp) => return resp,
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(router_json_response(&snapshot).to_string()))
+        .unwrap()
+}
+
+async fn handle_admin_delete_router(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(router_name): axum::extract::Path<String>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let config_snapshot = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config_snapshot, &parts.headers) {
+        return resp;
+    }
+
+    if let Err(resp) = commit_config(&state, |cfg| {
+        let referring_teams: Vec<String> = cfg
+            .teams
+            .iter()
+            .filter(|t| t.policy.allowed_routers.iter().any(|r| r == &router_name))
+            .map(|t| t.id.clone())
+            .collect();
+        if !referring_teams.is_empty() {
+            return Err(Response::builder()
+                .status(StatusCode::CONFLICT)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "error": format!(
+                            "Router '{router_name}' is still in allowed_routers of: {}",
+                            referring_teams.join(", ")
+                        ),
+                        "references": referring_teams,
+                    })
+                    .to_string(),
+                ))
+                .unwrap());
+        }
+        let routers = Arc::make_mut(&mut cfg.routers);
+        let before = routers.len();
+        routers.retain(|r| r.name != router_name);
+        if routers.len() == before {
+            return Err(error_response(StatusCode::NOT_FOUND, "Router not found"));
+        }
+        Ok(())
+    }) {
+        return resp;
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"deleted": router_name}).to_string()))
+        .unwrap()
+}
+
+// ---- masked api_key reveal endpoints --------------------------------------
+//
+// These are dedicated endpoints so the bulk list responses can stay
+// secret-free. A separate request makes it easier to:
+//   - audit who reads keys vs. who just browses the config,
+//   - extend later to require an extra confirmation / scope per key, and
+//   - keep the list endpoints cacheable.
+
+async fn handle_admin_teams_api_keys(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let config = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config, &parts.headers) {
+        return resp;
+    }
+
+    let data = config
+        .teams
+        .iter()
+        .map(|team| {
+            json!({
+                "id": team.id,
+                "api_key": mask_secret(&team.api_key),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "object": "list", "data": data }).to_string(),
+        ))
+        .unwrap()
+}
+
+async fn handle_admin_channels_api_keys(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let config = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config, &parts.headers) {
+        return resp;
+    }
+
+    let data = config
+        .channels
+        .iter()
+        .map(|channel| {
+            json!({
+                "name": channel.name,
+                "api_key": mask_secret(&channel.api_key),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "object": "list", "data": data }).to_string(),
+        ))
+        .unwrap()
+}
+
+// providers.json embedded at build time so the provider-templates endpoint
+// always has data even when the file isn't present in the process CWD (e.g.
+// installed deployments). A runtime providers.json, when present, takes
+// precedence so operators can customize the default catalog.
+const EMBEDDED_PROVIDERS_JSON: &str = include_str!("../providers.json");
+
+#[derive(serde::Deserialize)]
+struct CpProviderFile {
+    #[serde(default)]
+    provider_templates: Vec<CpProviderTemplate>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Clone)]
+struct CpProviderTemplate {
+    provider_type: String,
+    base_url: String,
+    #[serde(default)]
+    anthropic_base_url: Option<String>,
+}
+
+fn load_cp_provider_templates() -> Vec<CpProviderTemplate> {
+    // Prefer a runtime providers.json next to the working directory.
+    if let Ok(cwd) = std::env::current_dir() {
+        let path = cwd.join("providers.json");
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(file) = serde_json::from_str::<CpProviderFile>(&content)
+        {
+            return file.provider_templates;
+        }
+    }
+    // Fall back to the catalog embedded at build time.
+    serde_json::from_str::<CpProviderFile>(EMBEDDED_PROVIDERS_JSON)
+        .map(|f| f.provider_templates)
+        .unwrap_or_default()
+}
+
+/// `GET /api/cp/provider-templates` — the default base_url / anthropic_base_url
+/// per provider type, used by the control plane to pre-fill the channel form.
+async fn handle_cp_provider_templates(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let config = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config, &parts.headers) {
+        return resp;
+    }
+
+    let data = load_cp_provider_templates();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "object": "list", "data": data }).to_string(),
         ))
         .unwrap()
 }
@@ -3549,6 +4804,8 @@ mod tests {
                 allowed_models: Some(vec!["gpt-4".to_string()]),
                 rate_limit: None,
             },
+            group: None,
+            enabled: None,
         });
 
         let config_arc = Arc::new(RwLock::new(config));
@@ -3601,5 +4858,340 @@ mod tests {
 
         let resp = handle_openai(State(state.clone()), req).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ----- /v1/models -------------------------------------------------
+
+    fn build_models_state(
+        rules: Vec<crate::config::RouterRule>,
+        allowed_models: Option<Vec<String>>,
+    ) -> (Arc<AppState>, TempDir) {
+        let mut config = create_test_config();
+
+        Arc::make_mut(&mut config.routers).clear();
+        Arc::make_mut(&mut config.routers).push(crate::config::Router {
+            name: "test-router".to_string(),
+            rules,
+            channels: vec![],
+            strategy: "round_robin".to_string(),
+            metadata: None,
+            fallback_channels: vec![],
+        });
+
+        Arc::make_mut(&mut config.teams).push(crate::config::Team {
+            id: "test-team".to_string(),
+            api_key: "sk-ap-test".to_string(),
+            policy: crate::config::TeamPolicy {
+                allowed_routers: vec!["test-router".to_string()],
+                allowed_models,
+                rate_limit: None,
+            },
+            group: None,
+            enabled: None,
+        });
+
+        let (dir, database) = create_test_database();
+        let state = Arc::new(AppState {
+            config: Arc::new(RwLock::new(config)),
+            metrics: Arc::new(MetricsState::new().unwrap()),
+            providers: Arc::new(ProviderRegistry::new()),
+            access_audit: Arc::new(MockAccessAudit {
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            rate_limiter: Arc::new(MockRateLimiter { allow: true }),
+            team_rate_limiter: Arc::new(TeamRateLimiter::new()),
+            selector: Arc::new(RouterSelector::new()),
+            gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
+            client: reqwest::Client::new(),
+            usage_logger: Arc::new(UsageLogger::new(database.clone())),
+            database,
+            web_dir: "target/web".to_string(),
+        });
+        (state, dir)
+    }
+
+    async fn fetch_models(
+        state: Arc<AppState>,
+        team_ctx: Option<TeamContext>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder().method("GET").uri("/v1/models");
+        if let Some(ctx) = team_ctx {
+            builder = builder.extension(ctx);
+        }
+        let req = builder.body(Body::empty()).unwrap();
+        let resp = handle_models(State(state), req).await;
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, body)
+    }
+
+    fn rule_matching(models: &[&str]) -> crate::config::RouterRule {
+        crate::config::RouterRule {
+            match_spec: crate::config::MatchSpec {
+                models: models.iter().map(|s| s.to_string()).collect(),
+            },
+            channels: vec![crate::config::TargetChannel {
+                name: "test-channel".to_string(),
+                weight: 1,
+            }],
+            strategy: "round_robin".to_string(),
+        }
+    }
+
+    fn ids_in(body: &serde_json::Value) -> Vec<String> {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn handle_models_requires_team_context() {
+        let (state, _dir) = build_models_state(vec![rule_matching(&["*"])], None);
+        let (status, _) = fetch_models(state, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn handle_models_lists_literal_models_from_router_rules() {
+        let (state, _dir) = build_models_state(
+            vec![rule_matching(&["deepseek-v4-pro", "deepseek-v4-flash"])],
+            None,
+        );
+        let (status, body) = fetch_models(
+            state,
+            Some(TeamContext {
+                team_id: "test-team".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let ids = ids_in(&body);
+        assert!(ids.contains(&"deepseek-v4-pro".to_string()));
+        assert!(ids.contains(&"deepseek-v4-flash".to_string()));
+    }
+
+    #[tokio::test]
+    async fn handle_models_skips_pure_glob_patterns() {
+        let (state, _dir) = build_models_state(
+            vec![rule_matching(&["*", "deepseek-*", "claude-3-haiku"])],
+            None,
+        );
+        let (_, body) = fetch_models(
+            state,
+            Some(TeamContext {
+                team_id: "test-team".to_string(),
+            }),
+        )
+        .await;
+        let ids = ids_in(&body);
+        assert!(ids.contains(&"claude-3-haiku".to_string()));
+        // glob patterns must never leak into the OpenAI list payload
+        assert!(!ids.iter().any(|id| id.contains('*')));
+        assert!(!ids.iter().any(|id| id.contains('?')));
+    }
+
+    #[tokio::test]
+    async fn handle_models_includes_history_distinct_models() {
+        let (state, _dir) = build_models_state(vec![rule_matching(&["*"])], None);
+        state.database.log_usage(
+            Some("req-1"),
+            "test-team",
+            "test-router",
+            Some("*"),
+            "test-channel",
+            "gpt-4o-mini", // observed in traffic
+            10,
+            5,
+            Some(120.0),
+            false,
+            "success",
+            Some(200),
+            None,
+            None,
+            None,
+        );
+
+        let (status, body) = fetch_models(
+            state,
+            Some(TeamContext {
+                team_id: "test-team".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let ids = ids_in(&body);
+        // log_usage lower-cases the model name; the canonical OpenAI id is
+        // whatever the gateway has actually seen, so that's what we return.
+        assert!(ids.contains(&"gpt-4o-mini".to_string()));
+    }
+
+    #[tokio::test]
+    async fn handle_models_respects_team_allowed_models() {
+        let (state, _dir) = build_models_state(
+            vec![rule_matching(&["gpt-4", "gpt-4o", "claude-3-haiku"])],
+            Some(vec!["gpt-4*".to_string()]),
+        );
+
+        let (_, body) = fetch_models(
+            state,
+            Some(TeamContext {
+                team_id: "test-team".to_string(),
+            }),
+        )
+        .await;
+        let ids = ids_in(&body);
+        assert!(ids.contains(&"gpt-4".to_string()));
+        assert!(ids.contains(&"gpt-4o".to_string()));
+        // claude-3-haiku exists in the router rule but is filtered out by
+        // the team's allowed_models glob.
+        assert!(!ids.contains(&"claude-3-haiku".to_string()));
+    }
+
+    #[tokio::test]
+    async fn handle_models_marks_owned_by_with_provider_type() {
+        let (state, _dir) = build_models_state(vec![rule_matching(&["gpt-4"])], None);
+        let (_, body) = fetch_models(
+            state,
+            Some(TeamContext {
+                team_id: "test-team".to_string(),
+            }),
+        )
+        .await;
+        let entry = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "gpt-4")
+            .unwrap();
+        assert_eq!(entry["owned_by"], "openai"); // test-channel's provider_type
+        assert_eq!(entry["apex"]["router"], "test-router");
+        assert_eq!(entry["apex"]["channel"], "test-channel");
+    }
+
+    // ----- commit_config atomicity ------------------------------------
+
+    #[test]
+    fn commit_config_persists_and_commits_on_success() {
+        let dir = tempdir().unwrap();
+        let cfg_path = dir.path().join("config.json");
+        let mut config = create_test_config();
+        config.hot_reload.config_path = cfg_path.to_string_lossy().to_string();
+        let (state, _db_dir) = state_with_config(config);
+
+        let result = commit_config(&state, |cfg| {
+            Arc::make_mut(&mut cfg.channels).push(crate::config::Channel {
+                name: "added".to_string(),
+                provider_type: ProviderType::Openai,
+                base_url: "http://x".to_string(),
+                api_key: "sk-x".to_string(),
+                anthropic_base_url: None,
+                headers: None,
+                model_map: None,
+                timeouts: None,
+            });
+            Ok::<_, Response<Body>>(())
+        });
+        assert!(result.is_ok());
+
+        // In-memory committed
+        assert!(
+            state
+                .config
+                .read()
+                .unwrap()
+                .channels
+                .iter()
+                .any(|c| c.name == "added")
+        );
+        // Disk persisted
+        let on_disk = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(on_disk.contains("\"added\""));
+    }
+
+    #[test]
+    fn commit_config_does_not_commit_when_persist_fails() {
+        let mut config = create_test_config();
+        // Empty path makes persist_config fail deterministically.
+        config.hot_reload.config_path = String::new();
+        let before = config.channels.len();
+        let (state, _db_dir) = state_with_config(config);
+
+        let result = commit_config(&state, |cfg| {
+            Arc::make_mut(&mut cfg.channels).push(crate::config::Channel {
+                name: "ghost".to_string(),
+                provider_type: ProviderType::Openai,
+                base_url: "http://x".to_string(),
+                api_key: "sk-x".to_string(),
+                anthropic_base_url: None,
+                headers: None,
+                model_map: None,
+                timeouts: None,
+            });
+            Ok::<_, Response<Body>>(())
+        });
+        assert!(result.is_err(), "persist failure should surface as Err");
+
+        // In-memory MUST be untouched — no divergence from disk.
+        let after = state.config.read().unwrap().channels.len();
+        assert_eq!(after, before);
+        assert!(
+            !state
+                .config
+                .read()
+                .unwrap()
+                .channels
+                .iter()
+                .any(|c| c.name == "ghost")
+        );
+    }
+
+    #[test]
+    fn commit_config_aborts_without_change_when_closure_errors() {
+        let dir = tempdir().unwrap();
+        let cfg_path = dir.path().join("config.json");
+        let mut config = create_test_config();
+        config.hot_reload.config_path = cfg_path.to_string_lossy().to_string();
+        let before = config.channels.len();
+        let (state, _db_dir) = state_with_config(config);
+
+        let result = commit_config(&state, |cfg| {
+            Arc::make_mut(&mut cfg.channels).clear();
+            Err::<(), _>(error_response(StatusCode::CONFLICT, "nope"))
+        });
+        assert!(result.is_err());
+        // Closure error => no persist, no commit.
+        assert_eq!(state.config.read().unwrap().channels.len(), before);
+        assert!(
+            !cfg_path.exists(),
+            "must not have written config on closure error"
+        );
+    }
+
+    fn state_with_config(config: Config) -> (Arc<AppState>, TempDir) {
+        let (dir, database) = create_test_database();
+        let state = Arc::new(AppState {
+            config: Arc::new(RwLock::new(config)),
+            metrics: Arc::new(MetricsState::new().unwrap()),
+            providers: Arc::new(ProviderRegistry::new()),
+            access_audit: Arc::new(MockAccessAudit {
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            rate_limiter: Arc::new(MockRateLimiter { allow: true }),
+            team_rate_limiter: Arc::new(TeamRateLimiter::new()),
+            selector: Arc::new(RouterSelector::new()),
+            gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
+            client: reqwest::Client::new(),
+            usage_logger: Arc::new(UsageLogger::new(database.clone())),
+            database,
+            web_dir: "target/web".to_string(),
+        });
+        (state, dir)
     }
 }

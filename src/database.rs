@@ -415,6 +415,24 @@ impl Database {
         Ok((records, total))
     }
 
+    /// Distinct model names previously observed for the given team in the
+    /// usage log. Used by `GET /v1/models` to surface concrete model ids that
+    /// the team has actually been able to call, beyond the literal model
+    /// names declared in the router config.
+    pub fn distinct_models_for_team(&self, team_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT model FROM usage_records \
+             WHERE team_id = ? AND model IS NOT NULL AND model != '' \
+             ORDER BY model",
+        )?;
+        let rows = stmt
+            .query_map([team_id], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     pub fn get_usage_records_for_analytics(
         &self,
         query: &UsageRecordQuery,

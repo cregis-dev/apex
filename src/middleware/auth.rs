@@ -40,6 +40,17 @@ pub async fn team_auth(
         let config = state.config.read().unwrap();
         // 1. Check Teams
         if let Some(team) = config.teams.iter().find(|t| t.api_key == api_key) {
+            // Paused team: reject before any upstream work happens.
+            if team.is_paused() {
+                tracing::warn!("Auth Failed: Team '{}' is paused (enabled=false)", team.id);
+                return Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"error": "Team is paused. Contact your administrator."}"#,
+                    ))
+                    .unwrap();
+            }
             Some(team.id.clone())
         } else {
             // 2. Invalid Key -> Reject (Global keys are NOT allowed for model requests)

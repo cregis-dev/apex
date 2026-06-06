@@ -44,6 +44,25 @@ pub struct Team {
     pub id: String,
     pub api_key: String,
     pub policy: TeamPolicy,
+    /// Optional group label used by the control plane to organize teams in
+    /// the UI. Free-form string (e.g. "engineering", "data-platform").
+    /// Defaults to `None` (rendered as "Default").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Whether this team is currently allowed to make requests. `None`
+    /// behaves like `Some(true)` for backward compatibility; `Some(false)`
+    /// hard-pauses the team — all model requests are rejected before they
+    /// reach the upstream provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl Team {
+    /// True when the team is paused (`enabled == Some(false)`). Missing /
+    /// `Some(true)` are both considered active.
+    pub fn is_paused(&self) -> bool {
+        matches!(self.enabled, Some(false))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

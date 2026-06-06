@@ -25,6 +25,8 @@ async fn e2e_openai_route_success() {
             allowed_models: None,
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
     std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
@@ -89,6 +91,8 @@ async fn e2e_openai_embeddings_route_forwards_path_and_body() {
             allowed_models: None,
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
     std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
@@ -219,6 +223,8 @@ async fn e2e_fallback_on_failure() {
             allowed_models: None,
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
     std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "bad".to_string(),
@@ -305,6 +311,8 @@ async fn admin_list_masks_keys() {
                 tpm: None,
             }),
         },
+        group: None,
+        enabled: None,
     });
     std::sync::Arc::make_mut(&mut config.teams).push(Team {
         id: "team-b".to_string(),
@@ -314,6 +322,8 @@ async fn admin_list_masks_keys() {
             allowed_models: None,
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
     std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "primary".to_string(),
@@ -329,13 +339,28 @@ async fn admin_list_masks_keys() {
     let state = build_state(config).unwrap();
     let app = build_app(state);
 
-    let req = axum::http::Request::builder()
-        .method("GET")
-        .uri("/admin/teams")
-        .header("Authorization", "Bearer admin-key")
-        .body(Body::empty())
+    let get = |uri: &'static str| {
+        axum::http::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("Authorization", "Bearer admin-key")
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    // List endpoints must stay secret-free: no api_key field at all.
+    let resp = app.clone().oneshot(get("/admin/teams")).await.unwrap();
+    let (status, body) = response_text(resp).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(value["data"][0].get("api_key").is_none() || value["data"][0]["api_key"].is_null());
+
+    // Masked keys come from the dedicated reveal endpoint.
+    let resp = app
+        .clone()
+        .oneshot(get("/admin/teams/api_keys"))
+        .await
         .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
     let (status, body) = response_text(resp).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -343,16 +368,18 @@ async fn admin_list_masks_keys() {
     assert!(api_key.starts_with("sk-"));
     assert!(api_key.ends_with("3456"));
     assert_ne!(api_key, "sk-ant-abcdef123456");
+    // Short secrets are fully starred, never returned in (near-)plaintext.
     let api_key = value["data"][1]["api_key"].as_str().unwrap();
     assert_eq!(api_key, "*****");
 
-    let req = axum::http::Request::builder()
-        .method("GET")
-        .uri("/admin/channels")
-        .header("Authorization", "Bearer admin-key")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
+    // Channels: list is secret-free, masked key via the reveal endpoint.
+    let resp = app.clone().oneshot(get("/admin/channels")).await.unwrap();
+    let (status, body) = response_text(resp).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(value["data"][0].get("api_key").is_none() || value["data"][0]["api_key"].is_null());
+
+    let resp = app.oneshot(get("/admin/channels/api_keys")).await.unwrap();
     let (status, body) = response_text(resp).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
