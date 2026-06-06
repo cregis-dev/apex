@@ -2001,10 +2001,7 @@ async fn handle_admin_create_team(
     let payload: CreateTeamRequest = match serde_json::from_slice(&bytes) {
         Ok(p) => p,
         Err(err) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Invalid JSON: {err}"),
-            );
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {err}"));
         }
     };
 
@@ -2068,7 +2065,10 @@ async fn handle_admin_create_team(
             "api_key".to_string(),
             serde_json::Value::String(api_key.clone()),
         );
-        obj.insert("api_key_revealed".to_string(), serde_json::Value::Bool(true));
+        obj.insert(
+            "api_key_revealed".to_string(),
+            serde_json::Value::Bool(true),
+        );
     }
 
     Response::builder()
@@ -2096,10 +2096,7 @@ async fn handle_admin_update_team(
     let payload: UpdateTeamRequest = match serde_json::from_slice(&bytes) {
         Ok(p) => p,
         Err(err) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Invalid JSON: {err}"),
-            );
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {err}"));
         }
     };
 
@@ -2112,7 +2109,11 @@ async fn handle_admin_update_team(
         if let Some(group) = payload.group {
             team.group = group.and_then(|g| {
                 let trimmed = g.trim().to_string();
-                if trimmed.is_empty() { None } else { Some(trimmed) }
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
             });
         }
         if let Some(enabled) = payload.enabled {
@@ -2455,7 +2456,10 @@ async fn handle_admin_update_channel(
         if let Some(base_url) = payload.base_url {
             let trimmed = base_url.trim().to_string();
             if trimmed.is_empty() {
-                return Err(error_response(StatusCode::BAD_REQUEST, "base_url must not be empty"));
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "base_url must not be empty",
+                ));
             }
             channel.base_url = trimmed;
         }
@@ -2631,7 +2635,11 @@ fn build_rule(input: RouterRuleInput) -> Result<crate::config::RouterRule, Strin
 
 /// Verify every channel referenced by a router exists. Returns the list of
 /// missing channel names (empty if all OK).
-fn missing_channels(config: &Config, rules: &[crate::config::RouterRule], fallback: &[String]) -> Vec<String> {
+fn missing_channels(
+    config: &Config,
+    rules: &[crate::config::RouterRule],
+    fallback: &[String],
+) -> Vec<String> {
     let known: std::collections::HashSet<&str> =
         config.channels.iter().map(|c| c.name.as_str()).collect();
     let mut missing = std::collections::BTreeSet::new();
@@ -5090,7 +5098,15 @@ mod tests {
         assert!(result.is_ok());
 
         // In-memory committed
-        assert!(state.config.read().unwrap().channels.iter().any(|c| c.name == "added"));
+        assert!(
+            state
+                .config
+                .read()
+                .unwrap()
+                .channels
+                .iter()
+                .any(|c| c.name == "added")
+        );
         // Disk persisted
         let on_disk = std::fs::read_to_string(&cfg_path).unwrap();
         assert!(on_disk.contains("\"added\""));
@@ -5122,7 +5138,15 @@ mod tests {
         // In-memory MUST be untouched — no divergence from disk.
         let after = state.config.read().unwrap().channels.len();
         assert_eq!(after, before);
-        assert!(!state.config.read().unwrap().channels.iter().any(|c| c.name == "ghost"));
+        assert!(
+            !state
+                .config
+                .read()
+                .unwrap()
+                .channels
+                .iter()
+                .any(|c| c.name == "ghost")
+        );
     }
 
     #[test]
@@ -5141,7 +5165,10 @@ mod tests {
         assert!(result.is_err());
         // Closure error => no persist, no commit.
         assert_eq!(state.config.read().unwrap().channels.len(), before);
-        assert!(!cfg_path.exists(), "must not have written config on closure error");
+        assert!(
+            !cfg_path.exists(),
+            "must not have written config on closure error"
+        );
     }
 
     fn state_with_config(config: Config) -> (Arc<AppState>, TempDir) {

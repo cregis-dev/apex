@@ -42,10 +42,7 @@ pub async fn team_auth(
         if let Some(team) = config.teams.iter().find(|t| t.api_key == api_key) {
             // Paused team: reject before any upstream work happens.
             if team.is_paused() {
-                tracing::warn!(
-                    "Auth Failed: Team '{}' is paused (enabled=false)",
-                    team.id
-                );
+                tracing::warn!("Auth Failed: Team '{}' is paused (enabled=false)", team.id);
                 return Response::builder()
                     .status(StatusCode::FORBIDDEN)
                     .header("content-type", "application/json")
