@@ -4,10 +4,11 @@ import Topbar from '../components/Topbar.tsx'
 import Empty from '../components/Empty.tsx'
 import Icon from '../components/Icon.tsx'
 import Modal from '../components/Modal.tsx'
+import RateLimitEditor from '../components/RateLimitEditor.tsx'
 import StatusPill from '../components/StatusPill.tsx'
 import { useToast } from '../components/Toast.tsx'
 import { api } from '../lib/api.ts'
-import type { AdminRouter, AdminTeam, CreateTeamRequest, UpdateTeamRequest } from '../lib/types.ts'
+import type { AdminRouter, AdminTeam, CreateTeamRequest, RateLimit, UpdateTeamRequest } from '../lib/types.ts'
 
 const DEFAULT_GROUP_LABEL = 'Default'
 
@@ -355,6 +356,8 @@ export default function TeamsPage() {
   const [createdKey, setCreatedKey] = useState<AdminTeam | null>(null)
   const [pendingDelete, setPendingDelete] = useState<AdminTeam | null>(null)
   const [deleteError, setDeleteError] = useState<string | undefined>()
+  const [rlTeam, setRlTeam] = useState<AdminTeam | null>(null)
+  const [rlError, setRlError] = useState<string | undefined>()
 
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: ['teams'] })
@@ -408,6 +411,20 @@ export default function TeamsPage() {
     },
     onError: (err: unknown) => {
       setDeleteError(err instanceof Error ? err.message : 'Failed to delete team')
+    },
+  })
+
+  const rateLimitMutation = useMutation({
+    mutationFn: ({ id, rate_limit }: { id: string; rate_limit: RateLimit | null }) =>
+      api.updateTeam(id, { rate_limit }),
+    onSuccess: (updated) => {
+      invalidate()
+      const has = updated.policy.rate_limit?.rpm != null || updated.policy.rate_limit?.tpm != null
+      push(`Rate limit ${has ? 'saved' : 'removed'} for "${updated.id}"`, 'ok')
+      setRlTeam(null)
+    },
+    onError: (err: unknown) => {
+      setRlError(err instanceof Error ? err.message : 'Failed to update rate limit')
     },
   })
 
@@ -490,6 +507,29 @@ export default function TeamsPage() {
 
   function copy(text: string, label = 'Copied') {
     void navigator.clipboard.writeText(text).then(() => push(label, 'ok'))
+  }
+
+  // Fetch and copy a team's *full* api_key. The key is fetched async, so we hand
+  // ClipboardItem a promise where available to keep the write inside the user
+  // gesture (Safari is strict); otherwise fall back to fetch-then-writeText.
+  async function copyFullKey(id: string) {
+    try {
+      if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            'text/plain': api
+              .revealTeamApiKey(id)
+              .then((r) => new Blob([r.api_key], { type: 'text/plain' })),
+          }),
+        ])
+      } else {
+        const r = await api.revealTeamApiKey(id)
+        await navigator.clipboard.writeText(r.api_key)
+      }
+      push('API key copied', 'ok')
+    } catch (err) {
+      push(err instanceof Error ? `Failed to copy key: ${err.message}` : 'Failed to copy key')
+    }
   }
 
   return (
@@ -672,9 +712,9 @@ export default function TeamsPage() {
                                 return (
                                   <button
                                     className="btn btn-ghost btn-sm"
-                                    onClick={() => copy(masked, 'Masked key copied')}
+                                    onClick={() => copyFullKey(team.id)}
                                     style={{ padding: '2px 6px', fontFamily: 'var(--font-mono)' }}
-                                    title="Copy masked key"
+                                    title="Copy full API key"
                                   >
                                     {masked}
                                     <Icon name="copy" size={11} />
@@ -708,14 +748,22 @@ export default function TeamsPage() {
                                 </div>
                               ) : <span className="muted" style={{ fontSize: 12 }}>all</span>}
                             </td>
-                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                              {rl?.rpm != null || rl?.tpm != null ? (
-                                <span>
-                                  {rl?.rpm != null ? `${fmt(rl.rpm)} rpm` : ''}
-                                  {rl?.rpm != null && rl?.tpm != null ? ' / ' : ''}
-                                  {rl?.tpm != null ? `${fmt(rl.tpm)} tpm` : ''}
-                                </span>
-                              ) : <span className="muted">no limit</span>}
+                            <td>
+                              <button
+                                className="btn btn-ghost btn-sm"
+                                title="Edit rate limit"
+                                onClick={() => { setRlError(undefined); setRlTeam(team) }}
+                                style={{ fontFamily: 'var(--font-mono)', fontSize: 12, padding: '2px 6px', gap: 6 }}
+                              >
+                                {rl?.rpm != null || rl?.tpm != null ? (
+                                  <span>
+                                    {rl?.rpm != null ? `${fmt(rl.rpm)} rpm` : ''}
+                                    {rl?.rpm != null && rl?.tpm != null ? ' / ' : ''}
+                                    {rl?.tpm != null ? `${fmt(rl.tpm)} tpm` : ''}
+                                  </span>
+                                ) : <span className="muted">no limit</span>}
+                                <Icon name="edit" size={11} style={{ color: 'var(--muted-2)' }} />
+                              </button>
                             </td>
                             <td style={{ textAlign: 'right' }}>
                               <div style={{ display: 'inline-flex', gap: 4 }}>
@@ -870,6 +918,17 @@ export default function TeamsPage() {
           </div>
         )}
       </Modal>
+
+      {rlTeam && (
+        <RateLimitEditor
+          key={rlTeam.id}
+          team={rlTeam}
+          busy={rateLimitMutation.isPending}
+          error={rlError}
+          onCancel={() => setRlTeam(null)}
+          onSubmit={(rate_limit) => { setRlError(undefined); rateLimitMutation.mutate({ id: rlTeam.id, rate_limit }) }}
+        />
+      )}
     </>
   )
 }

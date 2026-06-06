@@ -14,6 +14,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PII masking engine for data compliance
 - Team governance features
 
+## [0.5.1] - 2026-06-07
+
+Control-plane observability and management additions on top of the 0.5.0 dashboard.
+
+### Added
+- **Client (tool) attribution**: every request is tagged with the calling tool —
+  Claude Code, Codex, Gemini CLI, official SDKs, scripts, etc. — classified from
+  request headers. New `usage_records.client` / `user_agent` columns, a "Clients"
+  breakdown on the dashboard, and a Client column + filter on the Records page.
+- **Dashboard rankings**: Top Teams / Models / Channels, with a Requests/Tokens toggle.
+- **Inline rate-limit editor** on the Rate Limits and Teams pages, with usage-based
+  suggestions derived from each team's busiest-hour traffic.
+- **Per-team API key reveal**: `GET /admin/teams/{id}/api_key` returns the full key
+  (admin-authenticated); the dashboard's copy action now copies the real key instead
+  of the masked form.
+
+### Changed
+- Account menu moved from the top bar to the sidebar footer.
+- Rate Limits page redesigned with summary stats and sorted, searchable team lists.
+
+## [0.5.0] - 2026-06-06
+
+### Added
+- Control-plane admin CRUD for channels, routers, and teams.
+- Team-scoped `/v1/models` listing.
+- Full dashboard overhaul (analytics, topology, records, rate limits).
+
 ## [0.4.4] - 2026-06-04
 
 Patch release that closes the residual placeholder-credential hole from 0.4.3.

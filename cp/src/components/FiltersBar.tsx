@@ -21,6 +21,7 @@ export interface FilterValues {
   router: string
   channel: string
   model: string
+  client: string
   status: string
 }
 
@@ -30,6 +31,7 @@ export const DEFAULT_FILTERS: FilterValues = {
   router: '',
   channel: '',
   model: '',
+  client: '',
   status: '',
 }
 
@@ -83,7 +85,7 @@ export default function FiltersBar({
   showRange = true,
 }: FiltersBarProps) {
   const isFiltered =
-    values.team_id || values.router || values.channel || values.model || values.status
+    values.team_id || values.router || values.channel || values.model || values.client || values.status
 
   const setOne = <K extends keyof FilterValues>(key: K, v: FilterValues[K]) => {
     onChange({ ...values, [key]: v })
@@ -135,6 +137,13 @@ export default function FiltersBar({
         placeholder="All models"
         onChange={(v) => setOne('model', v)}
       />
+      <Select
+        label="Client"
+        value={values.client}
+        options={options?.clients ?? []}
+        placeholder="All clients"
+        onChange={(v) => setOne('client', v)}
+      />
       {showStatus && (
         <Select
           label="Status"
@@ -165,6 +174,7 @@ export function filterValuesToParams(v: FilterValues): Record<string, string> {
   if (v.router) out.router = v.router
   if (v.channel) out.channel = v.channel
   if (v.model) out.model = v.model
+  if (v.client) out.client = v.client
   if (v.status) out.status = v.status
   return out
 }

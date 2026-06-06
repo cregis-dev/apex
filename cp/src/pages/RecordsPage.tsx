@@ -58,6 +58,7 @@ function buildCsv(rows: UsageRecord[]): string {
     'final_channel', 'channel', 'model', 'input_tokens', 'output_tokens',
     'latency_ms', 'status', 'status_code', 'fallback_triggered',
     'error_message', 'provider_trace_id', 'provider_error_body',
+    'client', 'user_agent',
   ]
   const out = [header.join(',')]
   for (const r of rows) {
@@ -67,6 +68,7 @@ function buildCsv(rows: UsageRecord[]): string {
       r.input_tokens, r.output_tokens, r.latency_ms ?? '',
       r.status, r.status_code ?? '', r.fallback_triggered ? 'true' : 'false',
       r.error_message ?? '', r.provider_trace_id ?? '', r.provider_error_body ?? '',
+      r.client ?? '', r.user_agent ?? '',
     ].map(csvEscape).join(','))
   }
   return out.join('\n')
@@ -101,6 +103,8 @@ function RecordInspector({ record, onClose }: { record: UsageRecord; onClose: ()
             ['Request ID', record.request_id ?? '—'],
             ['Status code', record.status_code?.toString() ?? '—'],
             ['Fallback', record.fallback_triggered ? 'Yes' : 'No'],
+            ['Client', record.client ?? '—'],
+            ['User agent', record.user_agent ?? '—'],
           ].map(([k, v]) => (
             <tr key={k as string} style={{ borderBottom: '1px solid var(--divider)' }}>
               <td style={{ padding: '8px 0', color: 'var(--muted)', width: '40%' }}>{k}</td>
@@ -303,6 +307,7 @@ export default function RecordsPage() {
                       <th>Time</th>
                       <th>Request ID</th>
                       <th>Team</th>
+                      <th>Client</th>
                       <th>Model</th>
                       <th>Channel</th>
                       <th>Status</th>
@@ -325,6 +330,9 @@ export default function RecordsPage() {
                           {r.request_id ?? '—'}
                         </td>
                         <td style={{ fontSize: 13 }}>{r.team_id}</td>
+                        <td style={{ fontSize: 12, color: r.client ? 'var(--ink-2)' : 'var(--muted-2)' }}>
+                          {r.client ?? '—'}
+                        </td>
                         <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{r.model}</td>
                         <td style={{ fontSize: 12, color: 'var(--muted)' }}>{r.channel}</td>
                         <td>

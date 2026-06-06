@@ -17,6 +17,7 @@ pub struct UsageRecordQuery {
     pub channel: Option<String>,
     pub model: Option<String>,
     pub status: Option<String>,
+    pub client: Option<String>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
 }
@@ -72,7 +73,9 @@ impl Database {
                 status_code INTEGER,
                 error_message TEXT,
                 provider_trace_id TEXT,
-                provider_error_body TEXT
+                provider_error_body TEXT,
+                client TEXT,
+                user_agent TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_records(timestamp);
@@ -158,6 +161,13 @@ impl Database {
             "ALTER TABLE usage_records ADD COLUMN provider_error_body TEXT",
             [],
         );
+        // Client/tool attribution (Claude Code, Codex, SDKs, …) from request headers.
+        let _ = conn.execute("ALTER TABLE usage_records ADD COLUMN client TEXT", []);
+        let _ = conn.execute("ALTER TABLE usage_records ADD COLUMN user_agent TEXT", []);
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_client ON usage_records(client)",
+            [],
+        );
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -182,14 +192,16 @@ impl Database {
         error_message: Option<&str>,
         provider_trace_id: Option<&str>,
         provider_error_body: Option<&str>,
+        client: Option<&str>,
+        user_agent: Option<&str>,
     ) {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let model_lower = model.to_lowercase();
 
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
-                "INSERT INTO usage_records (timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                "INSERT INTO usage_records (timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     timestamp,
                     request_id,
@@ -207,6 +219,8 @@ impl Database {
                     error_message,
                     provider_trace_id,
                     provider_error_body,
+                    client,
+                    user_agent,
                 ],
             );
         }
@@ -356,6 +370,7 @@ impl Database {
             channel: channel.map(str::to_owned),
             model: model.map(str::to_owned),
             status: status.map(str::to_owned),
+            client: None,
             start_time: start_date.map(str::to_owned),
             end_time: end_date.map(str::to_owned),
         };
@@ -373,7 +388,7 @@ impl Database {
 
         // Get records
         let mut sql = String::from(
-            "SELECT id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body FROM usage_records WHERE 1=1",
+            "SELECT id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent FROM usage_records WHERE 1=1",
         );
         sql.push_str(&where_clause);
         sql.push_str(" ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?");
@@ -407,6 +422,8 @@ impl Database {
                     error_message: row.get(14)?,
                     provider_trace_id: row.get(15)?,
                     provider_error_body: row.get(16)?,
+                    client: row.get(17)?,
+                    user_agent: row.get(18)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -440,7 +457,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
         let (where_clause, params_vec) = Self::build_usage_record_filters(query, false);
         let mut sql = String::from(
-            "SELECT id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body FROM usage_records WHERE 1=1",
+            "SELECT id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent FROM usage_records WHERE 1=1",
         );
         sql.push_str(&where_clause);
 
@@ -472,6 +489,8 @@ impl Database {
                     error_message: row.get(14)?,
                     provider_trace_id: row.get(15)?,
                     provider_error_body: row.get(16)?,
+                    client: row.get(17)?,
+                    user_agent: row.get(18)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -502,6 +521,10 @@ impl Database {
         if let Some(model) = query.model.as_deref() {
             where_clause.push_str(" AND model = ?");
             params_vec.push(Box::new(model.to_string()));
+        }
+        if let Some(client) = query.client.as_deref() {
+            where_clause.push_str(" AND client = ?");
+            params_vec.push(Box::new(client.to_string()));
         }
         if let Some(status) = query.status.as_deref() {
             match status {
@@ -880,6 +903,8 @@ pub struct UsageRecord {
     pub error_message: Option<String>,
     pub provider_trace_id: Option<String>,
     pub provider_error_body: Option<String>,
+    pub client: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone)]
