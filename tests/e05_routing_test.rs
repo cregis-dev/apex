@@ -26,6 +26,8 @@ async fn test_rule_based_routing_priority() {
             allowed_models: None, // Allow all models
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
 
     // Channels

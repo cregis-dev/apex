@@ -56,6 +56,8 @@ async fn test_team_allowed_models_case_insensitive() {
             allowed_models: Some(vec!["GPT-4".to_string()]), // Uppercase config
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
 
     let state = build_state(config).unwrap();
@@ -126,6 +128,8 @@ async fn test_team_allowed_models_glob() {
             allowed_models: Some(vec!["gpt-*".to_string()]), // Glob pattern
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
 
     let state = build_state(config).unwrap();
@@ -196,6 +200,8 @@ async fn test_team_policy_enforcement() {
             allowed_models: Some(vec!["gpt-4".to_string()]),
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
 
     let state = build_state(config).unwrap();
@@ -267,6 +273,8 @@ async fn test_team_auth_x_api_key() {
             allowed_models: Some(vec!["claude-3".to_string()]),
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
 
     let state = build_state(config).unwrap();
@@ -336,6 +344,8 @@ async fn test_team_auth_x_api_key_policy() {
             allowed_models: Some(vec!["claude-3".to_string()]), // Only allow claude-3
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
 
     let state = build_state(config).unwrap();
@@ -412,6 +422,8 @@ async fn test_invalid_key_rejection() {
             allowed_models: None,
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
 
     let state = build_state(config).unwrap();
@@ -485,6 +497,8 @@ async fn test_valid_global_key_acceptance() {
             allowed_models: None,
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
 
     // Channel & Router (Standard)

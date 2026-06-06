@@ -63,6 +63,8 @@ async fn test_observability_metrics() {
             allowed_models: None,
             rate_limit: None,
         },
+        group: None,
+        enabled: None,
     });
 
     let state = build_state(config).unwrap();
