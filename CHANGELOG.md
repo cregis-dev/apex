@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Planned
+- MCP Prompts API implementation
+- MCP Tools execution framework
+- Rule-based routing with content filtering
+- PII masking engine for data compliance
+- Team governance features
+
+## [0.6.0] - 2026-06-07
+
+Retire the legacy Next.js dashboard; the Control Plane at `/cp` is now the sole web UI.
+
 ### Removed
 - **Legacy Next.js dashboard** (`/dashboard`): the old web UI under `web/` has been
   retired in favor of the Control Plane at `/cp`. Removed the `web/` frontend source,
@@ -16,15 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Control Plane consumes them.
 
 ### Changed
-- Root page (`/`) and `install.sh` now point at the Control Plane (`/cp`); the
-  source build instructions use `cd cp && pnpm build` instead of the old web build.
-
-### Planned
-- MCP Prompts API implementation
-- MCP Tools execution framework
-- Rule-based routing with content filtering
-- PII masking engine for data compliance
-- Team governance features
+- The `/dashboard` routes and the `/_next/static/*` asset route are gone; the root
+  page (`/`) no longer serves the dashboard `index.html` and now links to `/cp`.
+- `install.sh` and the source build instructions use `cd cp && pnpm build` instead of
+  the old web build, and point operators at `/cp`.
 
 ## [0.5.1] - 2026-06-07
 
