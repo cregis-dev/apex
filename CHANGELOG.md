@@ -14,6 +14,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PII masking engine for data compliance
 - Team governance features
 
+## [0.7.0] - 2026-06-08
+
+Bound the usage/metrics SQLite database and stop dashboard queries from blocking request-path logging.
+
+### Added
+- **Data retention**: new top-level `retention { days, interval_hours }` config
+  (defaults: 90 days / 24h; `days: 0` disables). A background task prunes
+  `usage_records` and the `metrics_*` tables and reclaims freed pages so the
+  SQLite database stays bounded over time.
+- SQLite now opens with `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout`,
+  and `auto_vacuum=INCREMENTAL`, removing the per-request fsync on the logging
+  path. Added timestamp indexes on `metrics_errors`, `metrics_fallbacks`, and
+  `metrics_latency`.
+
+### Changed
+- Dashboard analytics/records endpoints now paginate and aggregate in SQL instead
+  of loading entire time windows into memory, and read through a dedicated
+  read-only connection so a slow dashboard query no longer blocks request-path
+  logging.
+
 ## [0.6.0] - 2026-06-07
 
 Retire the legacy Next.js dashboard; the Control Plane at `/cp` is now the sole web UI.
