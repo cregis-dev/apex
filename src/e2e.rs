@@ -176,6 +176,7 @@ pub fn build_config(env: &E2eEnv, config_path: &Path) -> Config {
             enabled: None,
         }]),
         compliance: None,
+        retention: Default::default(),
     }
 }
 

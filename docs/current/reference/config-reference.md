@@ -27,7 +27,8 @@
   "routers": [ ... ],
   "teams": [ ... ],
   "metrics": { ... },
-  "hot_reload": { ... }
+  "hot_reload": { ... },
+  "retention": { ... }
 }
 ```
 
@@ -42,6 +43,27 @@
 | `teams` | array | 否 | 团队列表，默认为空 |
 | `metrics` | object | 是 | 指标配置 |
 | `hot_reload` | object | 是 | 热重载配置 |
+| `retention` | object | 否 | 历史数据保留策略 |
+
+---
+
+## Retention 数据保留
+
+控制 SQLite 中使用记录(`usage_records`)与请求/错误/回退/延迟指标的保留期，避免 `apex.db` 无限增长。后台任务会在启动后不久执行一次，之后按 `interval_hours` 周期运行，删除超过 `days` 的旧数据并把释放的页归还给操作系统(依赖 `auto_vacuum=INCREMENTAL`)。
+
+```json
+"retention": {
+  "days": 90,
+  "interval_hours": 24
+}
+```
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `days` | number | 90 | 保留天数，超过即清理；设为 `0` 关闭清理(永久保留) |
+| `interval_hours` | number | 24 | 清理任务运行周期(小时) |
+
+> 注:对升级前已存在的库，增量回收需先做一次性 `VACUUM` 来激活 `auto_vacuum=INCREMENTAL`(见下方运维说明)。
 
 ---
 

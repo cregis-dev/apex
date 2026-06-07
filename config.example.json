@@ -89,5 +89,9 @@
   "hot_reload": {
     "config_path": "/absolute/path/to/apex/config.json",
     "watch": true
+  },
+  "retention": {
+    "days": 90,
+    "interval_hours": 24
   }
 }

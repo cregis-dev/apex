@@ -6,7 +6,10 @@
 
 use crate::config::Config;
 use crate::converters::convert_openai_response_to_anthropic;
-use crate::database::{Database, UsageRecord as DashboardUsageRecord, UsageRecordQuery};
+use crate::database::{
+    Database, UsageAggregate, UsageRecord as DashboardUsageRecord, UsageRecordPage,
+    UsageRecordQuery,
+};
 use crate::gemini_compat::{GeminiAnthropicReplayCache, gemini_replay_missing_signature};
 use crate::metrics::MetricsState;
 use crate::middleware::auth::{TeamContext, global_auth, team_auth};
@@ -81,6 +84,34 @@ pub async fn run_server(path: PathBuf) -> anyhow::Result<()> {
         tokio::spawn(async move {
             if let Err(e) = watch_config(path_clone, state_clone).await {
                 error!("Config watcher failed: {}", e);
+            }
+        });
+    }
+
+    // Prune old usage/metrics rows in the background so the SQLite file stays
+    // bounded. Runs once shortly after startup, then on a fixed interval.
+    if config.retention.days > 0 {
+        let db = state.database.clone();
+        let retention = config.retention.clone();
+        tokio::spawn(async move {
+            let period = Duration::from_secs(retention.interval_hours.max(1) * 3600);
+            // Delay the first sweep so a large prune on a freshly-started gateway
+            // doesn't contend with the startup traffic ramp for the write lock.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let mut ticker = tokio::time::interval(period);
+            loop {
+                ticker.tick().await;
+                let db = db.clone();
+                let days = retention.days;
+                match tokio::task::spawn_blocking(move || db.cleanup_old_records(days)).await {
+                    Ok(Ok(0)) => {}
+                    Ok(Ok(n)) => info!(
+                        "Retention: pruned {} usage/metrics rows older than {} days",
+                        n, days
+                    ),
+                    Ok(Err(e)) => error!("Retention cleanup failed: {}", e),
+                    Err(e) => error!("Retention task panicked: {}", e),
+                }
             }
         });
     }
@@ -951,35 +982,9 @@ fn percentile(values: &mut [f64], percentile: f64) -> f64 {
     values.get(rank).copied().unwrap_or(0.0)
 }
 
-fn build_filter_options(records: &[DashboardUsageRecord]) -> DashboardFilterOptions {
-    let mut teams = BTreeSet::new();
-    let mut models = BTreeSet::new();
-    let mut routers = BTreeSet::new();
-    let mut channels = BTreeSet::new();
-    let mut clients = BTreeSet::new();
-
-    for record in records {
-        teams.insert(record.team_id.clone());
-        models.insert(record.model.clone());
-        routers.insert(record.router.clone());
-        channels.insert(record.final_channel.clone());
-        if let Some(client) = record.client.as_ref().filter(|c| !c.is_empty()) {
-            clients.insert(client.clone());
-        }
-    }
-
-    DashboardFilterOptions {
-        teams: teams.into_iter().collect(),
-        models: models.into_iter().collect(),
-        routers: routers.into_iter().collect(),
-        channels: channels.into_iter().collect(),
-        clients: clients.into_iter().collect(),
-    }
-}
-
 fn build_overview(
     current_records: &[DashboardUsageRecord],
-    previous_records: &[DashboardUsageRecord],
+    previous: &UsageAggregate,
 ) -> DashboardOverview {
     let total_requests = current_records.len() as i64;
     let input_tokens = current_records
@@ -1013,25 +1018,10 @@ fn build_overview(
         }
     };
 
-    let previous_requests = previous_records.len() as f64;
-    let previous_tokens = previous_records
-        .iter()
-        .map(usage_record_total_tokens)
-        .sum::<i64>() as f64;
-    let previous_latency_values = previous_records
-        .iter()
-        .filter_map(|record| record.latency_ms)
-        .filter(|latency| latency.is_finite())
-        .collect::<Vec<_>>();
-    let previous_latency = if previous_latency_values.is_empty() {
-        0.0
-    } else {
-        previous_latency_values.iter().sum::<f64>() / previous_latency_values.len() as f64
-    };
-    let previous_errors = previous_records
-        .iter()
-        .filter(|record| usage_record_is_error(record))
-        .count() as f64;
+    let previous_requests = previous.requests as f64;
+    let previous_tokens = previous.total_tokens as f64;
+    let previous_latency = previous.avg_latency_ms;
+    let previous_errors = previous.error_count as f64;
     let previous_success_rate = if previous_requests > 0.0 {
         ((previous_requests - previous_errors) / previous_requests) * 100.0
     } else {
@@ -1462,26 +1452,6 @@ fn latest_cursor(records: &[DashboardUsageRecord]) -> Option<DashboardRecordCurs
     })
 }
 
-fn count_new_records(
-    records: &[DashboardUsageRecord],
-    since_timestamp: Option<&str>,
-    since_id: Option<i64>,
-) -> usize {
-    let (Some(since_timestamp), Some(since_id)) = (since_timestamp, since_id) else {
-        return 0;
-    };
-
-    let mut count = 0;
-    for record in records {
-        if record.timestamp == since_timestamp && record.id == since_id {
-            break;
-        }
-        count += 1;
-    }
-
-    count
-}
-
 async fn dashboard_analytics_api_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
@@ -1505,11 +1475,11 @@ async fn dashboard_analytics_api_handler(
                 .unwrap();
         }
     };
-    let previous_records = match state
-        .database
-        .get_usage_records_for_analytics(&previous_query)
-    {
-        Ok(records) => records,
+    // Period-over-period deltas only need aggregates of the previous window, and
+    // the filter dropdowns only need its distinct values — compute both in SQL
+    // instead of loading every row of those windows into memory.
+    let previous = match state.database.get_usage_aggregate(&previous_query) {
+        Ok(aggregate) => aggregate,
         Err(err) => {
             return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -1517,11 +1487,14 @@ async fn dashboard_analytics_api_handler(
                 .unwrap();
         }
     };
-    let option_records = match state
-        .database
-        .get_usage_records_for_analytics(&options_query)
-    {
-        Ok(records) => records,
+    let filter_options = match state.database.get_filter_options(&options_query) {
+        Ok(options) => DashboardFilterOptions {
+            teams: options.teams,
+            models: options.models,
+            routers: options.routers,
+            channels: options.channels,
+            clients: options.clients,
+        },
         Err(err) => {
             return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -1534,8 +1507,8 @@ async fn dashboard_analytics_api_handler(
     let response = DashboardAnalyticsResponse {
         generated_at: format_dashboard_timestamp(Local::now().naive_local()),
         range: window.range,
-        filter_options: build_filter_options(&option_records),
-        overview: build_overview(&current_records, &previous_records),
+        filter_options,
+        overview: build_overview(&current_records, &previous),
         topology: build_topology_section(&current_records),
         team_usage: build_team_usage_section(&current_records),
         system_reliability: build_system_reliability_section(&current_records, &trend),
@@ -1577,23 +1550,27 @@ async fn dashboard_records_api_handler(
         .get("since_id")
         .and_then(|value| value.parse::<i64>().ok());
 
-    match state.database.get_usage_records_for_analytics(&query) {
-        Ok(records) => {
-            let total = records.len();
-            let latest = latest_cursor(&records);
-            let new_records = count_new_records(&records, since_timestamp, since_id);
-            let data = records
-                .into_iter()
-                .skip(offset)
-                .take(limit)
-                .collect::<Vec<_>>();
+    match state.database.get_usage_records_page(
+        &query,
+        limit as i64,
+        offset as i64,
+        since_timestamp,
+        since_id,
+    ) {
+        Ok(UsageRecordPage {
+            records,
+            total,
+            new_records,
+            latest_cursor,
+        }) => {
             let payload = DashboardRecordsResponse {
-                data,
-                total,
+                data: records,
+                total: total as usize,
                 limit,
                 offset,
-                latest_cursor: latest,
-                new_records,
+                latest_cursor: latest_cursor
+                    .map(|(id, timestamp)| DashboardRecordCursor { id, timestamp }),
+                new_records: new_records as usize,
             };
 
             Response::builder()
@@ -4430,6 +4407,7 @@ mod tests {
             },
             teams: Arc::new(vec![]),
             compliance: None,
+            retention: Default::default(),
             channels: Arc::new(vec![
                 crate::config::Channel {
                     name: "test-channel".to_string(),
