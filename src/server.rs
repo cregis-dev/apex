@@ -23,9 +23,7 @@ use crate::web_assets::{WebAssetError, load_web_asset};
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{OriginalUri, State};
-use axum::http::{
-    HeaderMap, HeaderValue, Method, Request, Response as HttpResponse, StatusCode, Uri,
-};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, Response as HttpResponse, StatusCode};
 use axum::response::{Redirect, Response};
 use axum::routing::{delete, get, patch, post};
 use chrono::{Duration as ChronoDuration, Local, NaiveDateTime};
@@ -355,45 +353,12 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         app = app.merge(metrics);
     }
 
-    // Next.js static resources (shared across all pages)
-    let next_static_routes = Router::new().route(
-        "/_next/static/*path",
-        get(
-            move |State(state): State<Arc<AppState>>,
-                  axum::extract::Path(path): axum::extract::Path<String>| async move {
-                serve_web_asset(&state.web_dir, &format!("_next/static/{path}"), "Not found")
-            },
-        ),
-    );
-
-    // Dashboard static files (Next.js static export)
-    // Serve from web directory configured in config.json, default to "web"
-    let dashboard_routes = Router::new()
-        .route(
-            "/dashboard",
-            get(|OriginalUri(uri): OriginalUri| async move {
-                Redirect::permanent(&dashboard_redirect_target(&uri))
-            }),
-        )
-        .route(
-            "/dashboard/",
-            get(move |State(state): State<Arc<AppState>>| async move {
-                serve_web_asset(
-                    &state.web_dir,
-                    "dashboard/index.html",
-                    "Dashboard not found",
-                )
-            }),
-        )
-        .route(
-            "/dashboard/*path",
-            get(
-                move |State(state): State<Arc<AppState>>,
-                      axum::extract::Path(path): axum::extract::Path<String>| async move {
-                    serve_web_asset(&state.web_dir, &format!("dashboard/{path}"), "Not found")
-                },
-            ),
-        )
+    // Root landing page (links to the Control Plane UI).
+    // The legacy Next.js dashboard (`/dashboard`, `/_next/static/*`) has been
+    // retired; the Control Plane at `/cp` is the sole web UI. The shared
+    // `/api/dashboard/*` analytics endpoints stay in place — the Control Plane
+    // consumes them.
+    let root_routes = Router::new()
         .route(
             "/",
             get(move |State(state): State<Arc<AppState>>| async move {
@@ -442,8 +407,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             ),
         );
 
-    app = app.merge(next_static_routes);
-    app = app.merge(dashboard_routes);
+    app = app.merge(root_routes);
     app = app.merge(cp_routes);
 
     app.layer(
@@ -513,27 +477,16 @@ fn build_cors_allow_origin(cors_allowed_origins: &[String]) -> tower_http::cors:
     origins.into()
 }
 
-fn dashboard_redirect_target(uri: &Uri) -> String {
-    match uri.query() {
-        Some(query) if !query.is_empty() => format!("/dashboard/?{query}"),
-        _ => "/dashboard/".to_string(),
-    }
-}
-
-async fn serve_index(state: State<Arc<AppState>>) -> Response<Body> {
-    match load_web_asset(&state.web_dir, "index.html") {
-        Ok(asset) => build_asset_response(StatusCode::OK, asset),
-        Err(err) => {
-            tracing::error!(
-                "Failed to load index.html from {}: {:?}",
-                state.web_dir,
-                err
-            );
-            Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", "text/html")
-                .body(Body::from(
-                    r#"<!DOCTYPE html>
+async fn serve_index(_state: State<Arc<AppState>>) -> Response<Body> {
+    // The legacy Next.js dashboard has been retired. The root page is now a
+    // minimal landing page that points at the Control Plane UI (`/cp`). We no
+    // longer serve the dashboard's `index.html`, so the old UI stays offline
+    // even if its build artifacts remain on disk.
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html")
+        .body(Body::from(
+            r#"<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -550,14 +503,12 @@ async fn serve_index(state: State<Arc<AppState>>) -> Response<Body> {
 <body>
     <div class="container">
         <h1>Apex Gateway</h1>
-        <p><a href="/dashboard/">Go to Dashboard</a></p>
+        <p><a href="/cp/">Go to Control Plane</a></p>
     </div>
 </body>
 </html>"#,
-                ))
-                .unwrap()
-        }
-    }
+        ))
+        .unwrap()
 }
 
 fn serve_web_asset(web_dir: &str, relative_path: &str, not_found_body: &'static str) -> Response {
@@ -4657,18 +4608,6 @@ mod tests {
             read_auth_token(&headers, "authorization"),
             Some("token".to_string())
         );
-    }
-
-    #[test]
-    fn test_dashboard_redirect_target_preserves_query() {
-        let uri: Uri = "/dashboard?auth_token=goodluck".parse().unwrap();
-        assert_eq!(
-            dashboard_redirect_target(&uri),
-            "/dashboard/?auth_token=goodluck"
-        );
-
-        let uri: Uri = "/dashboard".parse().unwrap();
-        assert_eq!(dashboard_redirect_target(&uri), "/dashboard/");
     }
 
     #[test]

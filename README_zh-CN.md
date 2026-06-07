@@ -133,14 +133,16 @@ curl -fsSL https://raw.githubusercontent.com/cregis-dev/apex/main/install-releas
 如果您更喜欢从源码构建：
 
 ```bash
-cd web
-npm install
-npm run build
+cd cp
+pnpm install
+pnpm build
 
 cd ..
 cargo build --release --features embedded-web
 ./target/release/apex gateway start --config ./config.json
 ```
+
+构建产物为内嵌的控制台 (Control Plane) UI，启动后访问 `http://localhost:12356/cp`。
 
 ## 📚 文档
 

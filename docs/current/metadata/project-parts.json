@@ -16,13 +16,13 @@
       "has_components": false
     },
     {
-      "id": "web",
-      "name": "Web Dashboard",
+      "id": "cp",
+      "name": "Control Plane",
       "type": "web",
-      "path": "/web",
+      "path": "/cp",
       "language": "TypeScript",
-      "entry_point": "web/src/app/page.tsx",
-      "tech_stack": ["Next.js", "React", "shadcn/ui", "Tailwind CSS", "Recharts"],
+      "entry_point": "cp/src/main.tsx",
+      "tech_stack": ["Vite", "React", "React Router", "TanStack Query"],
       "has_api": false,
       "has_data_models": false,
       "has_components": true
@@ -30,16 +30,13 @@
   ],
   "integration": {
     "type": "static_file_serving",
-    "description": "Backend serves static files from target/web directory"
+    "description": "Backend serves the Control Plane static files from target/web/cp at /cp"
   },
   "documentation_parts": [
     "architecture-backend.md",
     "api-contracts-backend.md",
     "data-models-backend.md",
     "development-guide-backend.md",
-    "architecture-web.md",
-    "component-inventory-web.md",
-    "development-guide-web.md",
     "integration-architecture.md"
   ]
 }

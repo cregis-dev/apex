@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **Legacy Next.js dashboard** (`/dashboard`): the old web UI under `web/` has been
+  retired in favor of the Control Plane at `/cp`. Removed the `web/` frontend source,
+  its Playwright tests, the `scripts/dashboard/` smoke scripts, the `frontend-tests`
+  CI workflow, and the dashboard build step from the release workflow. The shared
+  `/api/dashboard/analytics` and `/api/dashboard/records` endpoints are unchanged —
+  the Control Plane consumes them.
+
+### Changed
+- Root page (`/`) and `install.sh` now point at the Control Plane (`/cp`); the
+  source build instructions use `cd cp && pnpm build` instead of the old web build.
+
 ### Planned
 - MCP Prompts API implementation
 - MCP Tools execution framework

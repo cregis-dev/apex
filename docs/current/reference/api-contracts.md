@@ -17,7 +17,9 @@ Apex Gateway 提供以下 API 端点：
 | `/api/metrics/trends` | GET | 趋势数据 | Required |
 | `/api/metrics/rankings` | GET | 排行榜数据 | Required |
 | `/metrics` | GET | Prometheus 指标 | Optional |
-| `/dashboard` | GET | Web Dashboard | Required |
+| `/api/dashboard/analytics` | GET | 控制台分析数据 | Required |
+| `/api/dashboard/records` | GET | 控制台明细记录 | Required |
+| `/cp` | GET | 控制台 (Control Plane) | Public |
 
 ---
 
@@ -376,20 +378,20 @@ apex_upstream_latency_ms_count{route="/v1/chat/completions"} 1000
 
 ## Static Files
 
-### GET /dashboard/*
+### GET /cp, /cp/*
 
-Web Dashboard 静态文件。
+控制台 (Control Plane) 静态文件。
 
 **Request Example:**
 ```
-GET /dashboard/
-GET /dashboard/index.html
-GET /dashboard/_next/static/...
+GET /cp/
+GET /cp/index.html
+GET /cp/assets/...
 ```
 
 **Response:**
 - HTML/JS/CSS 静态文件
-- 需要有效的 API Key 认证 (通过 localStorage 存储)
+- 静态资源公开可访问；登录后由控制台携带 API Key 调用受保护的 `/api/*` 接口
 
 ---
 

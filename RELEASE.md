@@ -74,11 +74,11 @@ If `.env.e2e` is available, also run:
 ./scripts/test-real-smoke.sh
 ```
 
-If web or packaging changed, also run:
+If the control plane UI or packaging changed, also run:
 
 ```bash
-cd web
-npm run build
+cd cp
+pnpm build
 cd ..
 bash -n install-release.sh
 ./install-release.sh --version v0.1.1 --skip-checksum /tmp/apex-release-smoke

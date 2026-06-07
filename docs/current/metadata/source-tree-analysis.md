@@ -64,29 +64,22 @@ tests/
 └── common/                 # 测试工具
 ```
 
-### `/web` - Next.js 前端
+### `/cp` - 控制台前端 (Vite + React)
 
 ```
-web/
-├── package.json            # Node.js 依赖配置
-├── next.config.ts          # Next.js 配置
-├── tsconfig.json           # TypeScript 配置
-├── tailwind.config.ts      # Tailwind CSS 配置
-├── playwright.config.ts    # Playwright 测试配置
-├── components.json         # shadcn/ui 配置
-├── eslint.config.mjs       # ESLint 配置
+cp/
+├── package.json            # Node.js 依赖配置 (pnpm)
+├── vite.config.ts          # Vite 配置 (base: /cp/, outDir: target/web/cp)
+├── tsconfig*.json          # TypeScript 配置
+├── index.html              # SPA 入口
 ├── src/                    # 源代码
-│   ├── app/                # App Router 页面
-│   │   ├── layout.tsx      # 根布局
-│   │   ├── page.tsx        # 首页
-│   │   └── dashboard/      # Dashboard 页面
-│   └── components/         # React 组件
-│       ├── ui/             # shadcn/ui 基础组件
-│       └── ...             # 业务组件
-├── dashboard/              # 构建后的 dashboard 页面
-├── public/                 # 静态资源
-├── tests/                  # Playwright E2E 测试
-└── target/web/             # 生产构建输出 (由 backend 服务)
+│   ├── main.tsx            # 应用入口
+│   ├── App.tsx             # 路由 (hash routing)
+│   ├── pages/              # 页面 (Overview/Channels/Models/…)
+│   ├── components/         # 共享组件
+│   ├── lib/                # API 客户端、类型、鉴权
+│   └── styles/             # 样式 tokens
+└── ../target/web/cp/       # 生产构建输出 (由 backend 服务于 /cp)
 ```
 
 ### `/docs` - 项目文档
@@ -164,7 +157,7 @@ target/
 ├── release/                # Release 构建
 ├── flycheck0/              # Flycheck 增量检查
 ├── tmp/                    # 临时文件
-└── web/                    # Web 前端构建输出
+└── web/                    # 控制台前端构建输出 (cp/ 子目录)
 ```
 
 ## 关键文件详解
@@ -190,7 +183,7 @@ target/
 
 **职责:**
 - HTTP 服务器启动和配置
-- 路由注册 (OpenAI, Anthropic, Dashboard)
+- 路由注册 (OpenAI, Anthropic, Control Plane)
 - 中间件链组装
 - API 端点实现
 
@@ -201,7 +194,8 @@ target/
 /v1/models            → 模型列表
 /api/usage            → Usage API
 /api/metrics          → Metrics API
-/dashboard/*          → Web Dashboard 静态文件
+/api/dashboard/*      → 控制台分析/记录 API
+/cp, /cp/*            → 控制台 (Control Plane) 静态文件
 /metrics              → Prometheus 指标
 ```
 
@@ -275,7 +269,7 @@ Client Response
 |------|--------|---------------|
 | src/ | 15 | 5,500 |
 | tests/ | 12 | 2,000 |
-| web/src/ | ~20 | 3,000 |
+| cp/src/ | ~25 | 3,000 |
 | docs/ | 30+ | 10,000+ |
 
 ---

@@ -16,7 +16,7 @@ Apex Gateway 后端采用分层架构设计，以 Axum 作为 Web 框架，Tokio
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      Axum Router Layer                       │
-│  /v1/chat/completions │ /v1/messages │ /api/* │ /dashboard/* │
+│  /v1/chat/completions │ /v1/messages │ /api/* │ /cp, /cp/*   │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -78,7 +78,9 @@ pub struct AppState {
 | `/api/metrics` | GET | Metrics 汇总 API |
 | `/api/metrics/trends` | GET | 趋势数据 API |
 | `/api/metrics/rankings` | GET | 排行榜 API |
-| `/dashboard/*` | GET | Web Dashboard 静态文件 |
+| `/api/dashboard/analytics` | GET | 控制台分析数据 API |
+| `/api/dashboard/records` | GET | 控制台明细记录 API |
+| `/cp`, `/cp/*` | GET | 控制台 (Control Plane) 静态文件 |
 | `/metrics` | GET | Prometheus 指标 |
 
 ### 2. Config 模块 (`src/config.rs`)
