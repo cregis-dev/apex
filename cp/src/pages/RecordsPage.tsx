@@ -74,7 +74,7 @@ function buildCsv(rows: UsageRecord[]): string {
   return out.join('\n')
 }
 
-function RecordInspector({ record, onClose }: { record: UsageRecord; onClose: () => void }) {
+function RecordInspector({ record, group, onClose }: { record: UsageRecord; group?: string; onClose: () => void }) {
   return (
     <Drawer open title="Request Detail" sub={record.id.toString()} onClose={onClose} width={480}>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 20 }}>
@@ -96,6 +96,7 @@ function RecordInspector({ record, onClose }: { record: UsageRecord; onClose: ()
           {[
             ['Time', fmtTs(record.timestamp)],
             ['Team', record.team_id],
+            ...(group ? [['Group', group]] : []),
             ['Router', record.router],
             ['Model', record.model],
             ['Input tokens', record.input_tokens.toLocaleString()],
@@ -163,6 +164,24 @@ export default function RecordsPage() {
     queryFn: () => api.analytics({ range: filters.range }),
     staleTime: 60_000,
   })
+
+  // Teams carry an optional group label; records only store team_id, so resolve
+  // the group client-side to show it alongside the team. Only teams with a
+  // non-empty group are mapped, so records for ungrouped teams render no group.
+  const { data: teamsData } = useQuery({
+    queryKey: ['teams-groups'],
+    queryFn: () => api.teams(),
+    staleTime: 60_000,
+  })
+
+  const groupByTeam = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const t of teamsData?.data ?? []) {
+      const g = t.group?.trim()
+      if (g) m.set(t.id, g)
+    }
+    return m
+  }, [teamsData])
 
   const allRecords = data?.data ?? []
   const total = data?.total ?? 0
@@ -316,7 +335,9 @@ export default function RecordsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {records.map((r) => (
+                    {records.map((r) => {
+                      const group = groupByTeam.get(r.team_id)
+                      return (
                       <tr
                         key={r.id}
                         className="row-hover"
@@ -329,7 +350,12 @@ export default function RecordsPage() {
                         <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.request_id ?? ''}>
                           {r.request_id ?? '—'}
                         </td>
-                        <td style={{ fontSize: 13 }}>{r.team_id}</td>
+                        <td style={{ fontSize: 13 }}>
+                          {r.team_id}
+                          {group && (
+                            <div style={{ fontSize: 11, color: 'var(--muted)' }}>{group}</div>
+                          )}
+                        </td>
                         <td style={{ fontSize: 12, color: r.client ? 'var(--ink-2)' : 'var(--muted-2)' }}>
                           {r.client ?? '—'}
                         </td>
@@ -347,7 +373,8 @@ export default function RecordsPage() {
                           {fmt(r.input_tokens + r.output_tokens)}
                         </td>
                       </tr>
-                    ))}
+                      )
+                    })}
                   </tbody>
                 </table>
 
@@ -368,7 +395,7 @@ export default function RecordsPage() {
         )}
       </div>
 
-      {selected && <RecordInspector record={selected} onClose={() => setSelected(null)} />}
+      {selected && <RecordInspector record={selected} group={groupByTeam.get(selected.team_id)} onClose={() => setSelected(null)} />}
     </>
   )
 }

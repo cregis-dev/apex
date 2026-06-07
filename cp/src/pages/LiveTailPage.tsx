@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import Topbar from '../components/Topbar.tsx'
 import Icon from '../components/Icon.tsx'
@@ -27,7 +27,7 @@ function fmtTs(ts: string) {
   catch { return ts }
 }
 
-function RecordDetail({ record, onClose }: { record: UsageRecord; onClose: () => void }) {
+function RecordDetail({ record, group, onClose }: { record: UsageRecord; group?: string; onClose: () => void }) {
   const curlCmd = `curl -X POST http://localhost/v1/chat/completions \\
   -H "Authorization: Bearer <team-key>" \\
   -H "Content-Type: application/json" \\
@@ -60,6 +60,7 @@ function RecordDetail({ record, onClose }: { record: UsageRecord; onClose: () =>
           POST /v1/chat/completions{'\n'}
           model: {record.model}{'\n'}
           team: {record.team_id}{'\n'}
+          {group ? <>group: {group}{'\n'}</> : null}
           channel: {record.final_channel || record.channel}
         </pre>
       </div>
@@ -116,6 +117,24 @@ export default function LiveTailPage() {
     queryFn: () => api.analytics({ range: '1h' }),
     staleTime: 60_000,
   })
+
+  // Teams carry an optional group label; records only store team_id, so resolve
+  // the group client-side to show it alongside the team. Only teams with a
+  // non-empty group are mapped, so rows for ungrouped teams render no group.
+  const { data: teamsData } = useQuery({
+    queryKey: ['teams-groups'],
+    queryFn: () => api.teams(),
+    staleTime: 60_000,
+  })
+
+  const groupByTeam = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const t of teamsData?.data ?? []) {
+      const g = t.group?.trim()
+      if (g) m.set(t.id, g)
+    }
+    return m
+  }, [teamsData])
 
   const fetchRecords = useCallback(async (initial = false) => {
     try {
@@ -294,6 +313,11 @@ export default function LiveTailPage() {
                     </td>
                     <td style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {r.team_id}
+                      {groupByTeam.get(r.team_id) && (
+                        <div style={{ fontSize: 11, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {groupByTeam.get(r.team_id)}
+                        </div>
+                      )}
                     </td>
                     <td style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 12, color: r.latency_ms != null && r.latency_ms > 1000 ? 'var(--warn)' : undefined }}>
                       {fmtMs(r.latency_ms)}
@@ -309,7 +333,7 @@ export default function LiveTailPage() {
         </div>
       </div>
 
-      {selected && <RecordDetail record={selected} onClose={() => setSelected(null)} />}
+      {selected && <RecordDetail record={selected} group={groupByTeam.get(selected.team_id)} onClose={() => setSelected(null)} />}
     </>
   )
 }
