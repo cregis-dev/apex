@@ -27,6 +27,38 @@ pub struct Config {
     pub teams: Arc<Vec<Team>>,
     #[serde(default)]
     pub compliance: Option<Compliance>,
+    #[serde(default)]
+    pub retention: Retention,
+}
+
+/// Controls pruning of usage history and request/error/latency metrics so the
+/// SQLite file stays bounded over time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Retention {
+    /// Days of history to keep. Rows older than this are pruned by a background
+    /// task. `0` disables pruning entirely (keep forever).
+    #[serde(default = "default_retention_days")]
+    pub days: u64,
+    /// How often the pruning task runs, in hours.
+    #[serde(default = "default_retention_interval_hours")]
+    pub interval_hours: u64,
+}
+
+fn default_retention_days() -> u64 {
+    90
+}
+
+fn default_retention_interval_hours() -> u64 {
+    24
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            days: default_retention_days(),
+            interval_hours: default_retention_interval_hours(),
+        }
+    }
 }
 
 fn default_data_dir() -> String {

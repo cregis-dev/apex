@@ -1179,6 +1179,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
         web_dir: "target/web".to_string(),
         teams: std::sync::Arc::new(Vec::new()),
         compliance: None,
+        retention: Default::default(),
     };
     config::save_config(path, &config)
         .with_context(|| format!("failed to write config: {}", path.display()))?;
