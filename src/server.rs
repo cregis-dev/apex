@@ -423,6 +423,17 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             }),
         )
         .route(
+            "/cp/favicon.svg",
+            get(move |State(state): State<Arc<AppState>>| async move {
+                let mut resp = serve_web_asset(&state.web_dir, "cp/favicon.svg", "Not found");
+                resp.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("public, max-age=86400"),
+                );
+                resp
+            }),
+        )
+        .route(
             "/cp/assets/*path",
             get(
                 move |State(state): State<Arc<AppState>>,

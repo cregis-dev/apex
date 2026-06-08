@@ -14,6 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PII masking engine for data compliance
 - Team governance features
 
+## [0.7.1] - 2026-06-08
+
+Control plane polish: correct the router detail view for multi-rule routers and add a brand favicon.
+
+### Fixed
+- **Control plane — Routers**: the router detail panel collapsed every rule into a
+  single global strategy plus a flattened channel list, so a channel reused across
+  rules appeared multiple times (e.g. "Gemini, Gemini") and each rule's own strategy
+  was hidden. The detail view is now rule-centric — each rule shows its own match
+  models, strategy, and channels.
+
+### Added
+- The control plane now ships a brand favicon, served at `/cp/favicon.svg`, so the
+  dashboard tab no longer falls back to the browser default icon.
+
 ## [0.7.0] - 2026-06-08
 
 Bound the usage/metrics SQLite database and stop dashboard queries from blocking request-path logging.

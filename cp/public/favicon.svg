@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-label="Apex">
+  <defs>
+    <linearGradient id="apexBrand" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#B85C2E"/>
+      <stop offset="1" stop-color="#9D4616"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7" fill="url(#apexBrand)"/>
+  <g transform="translate(7 7) scale(0.75)" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+    <path d="M2 17l10 5 10-5"/>
+    <path d="M2 12l10 5 10-5"/>
+  </g>
+</svg>
