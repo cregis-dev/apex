@@ -6,6 +6,7 @@ use crate::converters::{
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
+use futures::TryStreamExt;
 use futures::future::FutureExt;
 use futures::stream;
 use std::collections::HashMap;
@@ -483,16 +484,12 @@ fn handle_openai_compatible_response(
         });
 
         let future = stream
-            .fold(Vec::new(), |mut acc, item| {
-                if let Ok(bytes) = item {
-                    acc.extend_from_slice(&bytes);
-                }
-                acc
+            .try_fold(Vec::new(), |mut acc, bytes| async move {
+                acc.extend_from_slice(&bytes);
+                Ok(acc)
             })
-            .map(|bytes| {
-                let b = Bytes::from(bytes);
-                let converted = convert_openai_response_to_anthropic(b);
-                Ok::<_, io::Error>(converted)
+            .map(|result| {
+                result.map(|bytes| convert_openai_response_to_anthropic(Bytes::from(bytes)))
             });
 
         builder

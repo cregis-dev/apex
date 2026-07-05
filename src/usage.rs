@@ -2,6 +2,7 @@ use crate::database::Database;
 use crate::metrics::MetricsState;
 use anyhow::Result;
 use axum::body::{Body, Bytes};
+use axum::http::StatusCode;
 use axum::response::Response;
 use futures::Stream;
 use serde_json::Value;
@@ -295,6 +296,16 @@ where
     }
 }
 
+fn upstream_body_error_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"error":{"type":"upstream_body_error","message":"failed to read upstream response body"}}"#,
+        ))
+        .unwrap()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn wrap_response(
     response: Response<Body>,
@@ -344,7 +355,25 @@ pub async fn wrap_response(
         // Non-SSE: read full body
         let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
             Ok(b) => b,
-            Err(_) => return Response::from_parts(parts, Body::empty()), // Should not happen often
+            Err(err) => {
+                tracing::warn!("Failed to read upstream response body: {}", err);
+                logger.log_failure(
+                    request_id.as_deref(),
+                    &team_id,
+                    &router,
+                    matched_rule.as_deref(),
+                    &channel,
+                    &model,
+                    latency_ms,
+                    fallback_triggered,
+                    StatusCode::BAD_GATEWAY.as_u16() as i64,
+                    "failed to read upstream response body",
+                    None,
+                    Some(&err.to_string()),
+                    &client_info,
+                );
+                return upstream_body_error_response();
+            }
         };
 
         // Process usage
@@ -482,6 +511,55 @@ mod tests {
         assert_eq!(records[0].model, "gemini-3.1-pro-preview");
         assert_eq!(records[0].input_tokens, 0);
         assert_eq!(records[0].output_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn wrap_response_non_sse_body_error_returns_bad_gateway_body() {
+        let (dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let failing_stream = futures::stream::once(async {
+            Err::<Bytes, std::io::Error>(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "response timeout",
+            ))
+        });
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from_stream(failing_stream))
+            .unwrap();
+
+        let wrapped = wrap_response(
+            response,
+            Some("req-1".to_string()),
+            "team1".to_string(),
+            "r1".to_string(),
+            Some("m1-*".to_string()),
+            "minimax".to_string(),
+            "minimax-m3".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+            crate::utils::ClientInfo::default(),
+        )
+        .await;
+
+        assert_eq!(wrapped.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(wrapped.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body_text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_text.contains("failed to read upstream response body"));
+
+        let db = Database::new(Some(dir.path().to_string_lossy().to_string())).unwrap();
+        let (records, total) = db
+            .get_usage_records(None, None, None, None, None, None, None, 10, 0)
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, "error");
+        assert_eq!(records[0].status_code, Some(502));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 // fundamentally at odds with that design, so allow it module-wide.
 #![allow(clippy::result_large_err)]
 
-use crate::config::Config;
+use crate::config::{Channel, Config, Timeouts};
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::database::{
     Database, UsageAggregate, UsageRecord as DashboardUsageRecord, UsageRecordPage,
@@ -3378,6 +3378,10 @@ fn truncate_for_storage(input: &str, limit: usize) -> String {
     input.chars().take(limit).collect()
 }
 
+fn response_timeout_for(global: &Timeouts, channel: &Channel) -> Duration {
+    Duration::from_millis(channel.timeouts.as_ref().unwrap_or(global).response_ms)
+}
+
 async fn process_request(
     state: Arc<AppState>,
     req: Request<Body>,
@@ -3888,7 +3892,7 @@ async fn process_request(
                         let mut response = adapter.handle_response(
                             route,
                             resp,
-                            Duration::from_millis(config.global.timeouts.response_ms),
+                            response_timeout_for(&config.global.timeouts, channel),
                         );
                         if channel.provider_type == crate::config::ProviderType::Gemini
                             && matches!(route, RouteKind::Anthropic)
@@ -4336,7 +4340,7 @@ async fn process_gemini_native_direct_pass(
     let response = adapter.handle_response(
         route,
         resp,
-        Duration::from_millis(config.global.timeouts.response_ms),
+        response_timeout_for(&config.global.timeouts, channel),
     );
     crate::usage::wrap_response(
         response,

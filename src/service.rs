@@ -424,10 +424,13 @@ mod tests {
             ServiceManager::Systemd,
         );
         let unit = render_systemd_unit(&definition);
+        let binary = definition.binary_path().display().to_string();
+        let config_path = definition.config_path.display().to_string();
+        let install_dir = definition.install_dir.display().to_string();
 
-        assert!(unit.contains("ExecStart=/opt/apex/current/apex gateway run"));
-        assert!(unit.contains("Environment=APEX_CONFIG=/opt/apex/config.json"));
-        assert!(unit.contains("WorkingDirectory=/opt/apex"));
+        assert!(unit.contains(&format!("ExecStart={binary} gateway run")));
+        assert!(unit.contains(&format!("Environment=APEX_CONFIG={config_path}")));
+        assert!(unit.contains(&format!("WorkingDirectory={install_dir}")));
         assert!(unit.contains("Restart=always"));
     }
 
@@ -455,14 +458,18 @@ mod tests {
             ServiceManager::Launchd,
         );
         let plist = render_launchd_plist(&definition);
+        let binary = definition.binary_path().display().to_string();
+        let config_path = definition.config_path.display().to_string();
+        let stdout = definition.install_dir.join("logs").join("stdout.log");
+        let stderr = definition.install_dir.join("logs").join("stderr.log");
 
-        assert!(plist.contains("<string>/opt/apex/current/apex</string>"));
+        assert!(plist.contains(&format!("<string>{binary}</string>")));
         assert!(plist.contains("<string>gateway</string>"));
         assert!(plist.contains("<string>run</string>"));
         assert!(plist.contains("<key>APEX_CONFIG</key>"));
-        assert!(plist.contains("<string>/opt/apex/config.json</string>"));
-        assert!(plist.contains("<string>/opt/apex/logs/stdout.log</string>"));
-        assert!(plist.contains("<string>/opt/apex/logs/stderr.log</string>"));
+        assert!(plist.contains(&format!("<string>{config_path}</string>")));
+        assert!(plist.contains(&format!("<string>{}</string>", stdout.display())));
+        assert!(plist.contains(&format!("<string>{}</string>", stderr.display())));
     }
 
     #[test]

@@ -594,20 +594,28 @@ fn main() -> anyhow::Result<()> {
     let log_dir = get_log_dir(log_dir_override);
 
     if is_daemon {
-        std::fs::create_dir_all(&log_dir).context("failed to create log dir")?;
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!("daemon mode is only supported on Unix-like platforms");
+        }
 
-        let stdout = std::fs::File::create(log_dir.join("stdout.log"))
-            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-        let stderr = std::fs::File::create(log_dir.join("stderr.log"))
-            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(&log_dir).context("failed to create log dir")?;
 
-        daemonize::Daemonize::new()
-            .pid_file(log_dir.join("apex.pid"))
-            .working_directory(".")
-            .stdout(stdout)
-            .stderr(stderr)
-            .start()
-            .context("failed to start daemon")?;
+            let stdout = std::fs::File::create(log_dir.join("stdout.log"))
+                .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+            let stderr = std::fs::File::create(log_dir.join("stderr.log"))
+                .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+
+            daemonize::Daemonize::new()
+                .pid_file(log_dir.join("apex.pid"))
+                .working_directory(".")
+                .stdout(stdout)
+                .stderr(stderr)
+                .start()
+                .context("failed to start daemon")?;
+        }
     }
 
     let env_filter = format!("apex={},tower_http={}", log_level, log_level);
