@@ -593,6 +593,70 @@ APEX_UPSTREAM_2_MODEL=good-model
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_blackbox_body_read_error_falls_back_to_secondary_channel() {
+    let bad_upstream = MockProvider::spawn_body_error_chat().await.unwrap();
+    let good_upstream = MockProvider::spawn("mock-good-body-fallback")
+        .await
+        .unwrap();
+    let listen = pick_listen_addr().unwrap();
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("generated.e2e.config.json");
+
+    let env: E2eEnv = format!(
+        r#"
+APEX_E2E_LISTEN={listen}
+APEX_E2E_TEAM_ID=body-fallback-team
+APEX_E2E_TEAM_KEY=sk-body-fallback-team
+APEX_E2E_ROUTER_NAME=body-fallback-router
+APEX_E2E_TEST_MODEL=apex-test-chat
+
+APEX_UPSTREAM_1_ENABLED=true
+APEX_UPSTREAM_1_NAME=bad_primary
+APEX_UPSTREAM_1_TYPE=openai
+APEX_UPSTREAM_1_BASE_URL={}
+APEX_UPSTREAM_1_MODEL=bad-model
+
+APEX_UPSTREAM_2_ENABLED=true
+APEX_UPSTREAM_2_NAME=good_fallback
+APEX_UPSTREAM_2_TYPE=openai
+APEX_UPSTREAM_2_BASE_URL={}
+APEX_UPSTREAM_2_MODEL=good-model
+"#,
+        bad_upstream.base_url(),
+        good_upstream.base_url(),
+    )
+    .parse()
+    .unwrap();
+
+    let mut config = harness::config_builder::build_config(&env, &config_path);
+    std::sync::Arc::make_mut(&mut config.routers)[0].fallback_channels =
+        vec!["good_fallback".to_string()];
+    save_config(&config_path, &config).unwrap();
+
+    let mut gateway = GatewayProcess::spawn(&config_path, &listen).unwrap();
+    gateway.wait_until_ready(Duration::from_secs(10)).unwrap();
+
+    let chat = Client::new()
+        .post(format!("{}/v1/chat/completions", gateway.base_url()))
+        .header("Authorization", "Bearer sk-body-fallback-team")
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "model": "apex-test-chat",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(chat.status(), 200, "gateway logs:\n{}", gateway.read_logs());
+    let chat_body: serde_json::Value = chat.json().await.unwrap();
+    assert_eq!(
+        chat_body["choices"][0]["message"]["content"],
+        "response from mock-good-body-fallback"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_blackbox_hot_reload_switches_channel() {
     let first_upstream = MockProvider::spawn("mock-before").await.unwrap();
     let second_upstream = MockProvider::spawn("mock-after").await.unwrap();

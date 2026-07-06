@@ -33,6 +33,26 @@ impl MockProvider {
         Self::spawn_with_status(name, status, StatusCode::OK, StatusCode::OK).await
     }
 
+    pub async fn spawn_body_error_chat() -> anyhow::Result<Self> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind mock provider listener")?;
+        let addr = listener
+            .local_addr()
+            .context("failed to get mock provider addr")?;
+
+        let app = Router::new()
+            .route("/healthz", get(healthz))
+            .route("/v1/chat/completions", post(chat_body_error))
+            .route("/chat/completions", post(chat_body_error));
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        Ok(Self { addr, handle })
+    }
+
     async fn spawn_with_status(
         name: impl Into<String>,
         chat_status: StatusCode,
@@ -192,6 +212,22 @@ async fn chat_completions(State(state): State<MockState>, Json(body): Json<Value
         }
     }))
     .into_response()
+}
+
+async fn chat_body_error() -> Response {
+    let stream = futures::stream::once(async {
+        Err::<Bytes, std::io::Error>(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "mock response body timeout",
+        ))
+    });
+    let mut response = Response::new(axum::body::Body::from_stream(stream));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
 async fn messages(State(state): State<MockState>, Json(body): Json<Value>) -> Response {

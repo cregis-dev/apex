@@ -3886,9 +3886,6 @@ async fn process_request(
                     let status = resp.status();
                     if status.is_success() {
                         tracing::info!("Upstream Success: {} ({}ms)", status, elapsed);
-                        state
-                            .access_audit
-                            .audit(&channel.provider_type, route, true);
                         let mut response = adapter.handle_response(
                             route,
                             resp,
@@ -3903,7 +3900,7 @@ async fn process_request(
                                 .wrap_response(team_id.clone(), effective_bytes.clone(), response)
                                 .await;
                         }
-                        return crate::usage::wrap_response(
+                        let wrapped = crate::usage::wrap_response(
                             response,
                             route,
                             request_id.clone(),
@@ -3919,6 +3916,52 @@ async fn process_request(
                             client_info.clone(),
                         )
                         .await;
+                        if crate::usage::is_upstream_body_error_response(&wrapped) {
+                            tracing::warn!(
+                                "Upstream response body failed: channel={} attempt={}/{}",
+                                channel.name,
+                                attempt + 1,
+                                max_attempts
+                            );
+                            state
+                                .access_audit
+                                .audit(&channel.provider_type, route, false);
+                            if attempt + 1 < max_attempts {
+                                tokio::time::sleep(Duration::from_millis(
+                                    config.global.retries.backoff_ms,
+                                ))
+                                .await;
+                                continue;
+                            }
+                            if index == channels.len() - 1
+                                && !fallback_triggered
+                                && !router.fallback_channels.is_empty()
+                            {
+                                tracing::warn!(
+                                    "Upstream body failed: Channel '{}' failed, trying fallback...",
+                                    channel.name
+                                );
+                                fallback_triggered = true;
+                                for fb_name in &router.fallback_channels {
+                                    if let Some(fb_ch) =
+                                        config.channels.iter().find(|c| c.name == *fb_name).filter(
+                                            |fb_ch| !channels.iter().any(|c| c.name == fb_ch.name),
+                                        )
+                                    {
+                                        channels.push(fb_ch);
+                                    }
+                                }
+                                break;
+                            }
+                            if index == channels.len() - 1 {
+                                return wrapped;
+                            }
+                            break;
+                        }
+                        state
+                            .access_audit
+                            .audit(&channel.provider_type, route, true);
+                        return wrapped;
                     }
 
                     tracing::warn!("Upstream Failed: {} ({}ms)", status, elapsed);
@@ -4334,16 +4377,13 @@ async fn process_gemini_native_direct_pass(
         return response_from_upstream_bytes(status, &response_headers, error_body_bytes);
     }
 
-    state
-        .access_audit
-        .audit(&channel.provider_type, route, true);
     let adapter = state.providers.adapter_for(channel, route);
     let response = adapter.handle_response(
         route,
         resp,
         response_timeout_for(&config.global.timeouts, channel),
     );
-    crate::usage::wrap_response(
+    let wrapped = crate::usage::wrap_response(
         response,
         route,
         request_id,
@@ -4358,7 +4398,13 @@ async fn process_gemini_native_direct_pass(
         false,
         client_info.clone(),
     )
-    .await
+    .await;
+    state.access_audit.audit(
+        &channel.provider_type,
+        route,
+        !crate::usage::is_upstream_body_error_response(&wrapped),
+    );
+    wrapped
 }
 
 #[cfg(test)]
