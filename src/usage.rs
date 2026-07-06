@@ -1,10 +1,13 @@
 use crate::database::Database;
 use crate::metrics::MetricsState;
+use crate::providers::RouteKind;
 use anyhow::Result;
 use axum::body::{Body, Bytes};
+use axum::http::StatusCode;
 use axum::response::Response;
 use futures::Stream;
 use serde_json::Value;
+use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -98,6 +101,10 @@ impl UsageLogger {
             client_info.client.as_deref(),
             client_info.user_agent.as_deref(),
         );
+    }
+
+    pub fn log_gateway_error(&self, route: &str, router: &str) {
+        self.db.log_error(route, router);
     }
 }
 
@@ -261,20 +268,51 @@ impl UsageTrackerState {
             &self.client_info,
         );
     }
+
+    fn flush_failure(&self, route: RouteKind, provider_error_body: &str) {
+        self.metrics
+            .error_total
+            .with_label_values(&[route_label(route), &self.router])
+            .inc();
+        self.logger
+            .log_gateway_error(route_label(route), &self.router);
+        self.logger.log_failure(
+            self.request_id.as_deref(),
+            &self.team_id,
+            &self.router,
+            self.matched_rule.as_deref(),
+            &self.channel,
+            &self.model,
+            self.latency_ms,
+            self.fallback_triggered,
+            StatusCode::BAD_GATEWAY.as_u16() as i64,
+            UPSTREAM_BODY_ERROR_MESSAGE,
+            None,
+            Some(provider_error_body),
+            &self.client_info,
+        );
+    }
 }
 
 pub struct UsageStream<S> {
     inner: S,
     state: Arc<Mutex<UsageTrackerState>>,
+    route: RouteKind,
+    failed: bool,
 }
 
 impl<S, E> Stream for UsageStream<S>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
 {
-    type Item = Result<Bytes, E>;
+    type Item = Result<Bytes, io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.failed {
+            return Poll::Ready(None);
+        }
+
         let poll = Pin::new(&mut self.inner).poll_next(cx);
         match poll {
             Poll::Ready(Some(Ok(bytes))) => {
@@ -283,6 +321,13 @@ where
                 }
                 Poll::Ready(Some(Ok(bytes)))
             }
+            Poll::Ready(Some(Err(err))) => {
+                if let Ok(state) = self.state.lock() {
+                    state.flush_failure(self.route, &err.to_string());
+                }
+                self.failed = true;
+                Poll::Ready(Some(Ok(stream_error_event(self.route))))
+            }
             Poll::Ready(None) => {
                 // Stream finished
                 if let Ok(state) = self.state.lock() {
@@ -290,14 +335,91 @@ where
                 }
                 Poll::Ready(None)
             }
-            other => other,
+            Poll::Pending => Poll::Pending,
         }
     }
+}
+
+pub const UPSTREAM_BODY_ERROR_MESSAGE: &str = "failed to read upstream response body";
+const UPSTREAM_BODY_ERROR_HEADER: &str = "x-apex-upstream-body-error";
+
+pub fn is_upstream_body_error_response(response: &Response<Body>) -> bool {
+    response.headers().contains_key(UPSTREAM_BODY_ERROR_HEADER)
+}
+
+fn route_label(route: RouteKind) -> &'static str {
+    match route {
+        RouteKind::Openai => "openai",
+        RouteKind::Anthropic => "anthropic",
+        RouteKind::GeminiNative => "gemini_native",
+    }
+}
+
+fn stream_error_event(route: RouteKind) -> Bytes {
+    let body = match route {
+        RouteKind::Anthropic => serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "upstream_body_error",
+                "message": UPSTREAM_BODY_ERROR_MESSAGE,
+            }
+        }),
+        RouteKind::GeminiNative => serde_json::json!({
+            "error": {
+                "code": StatusCode::BAD_GATEWAY.as_u16(),
+                "message": UPSTREAM_BODY_ERROR_MESSAGE,
+                "status": "UNAVAILABLE",
+            }
+        }),
+        RouteKind::Openai => serde_json::json!({
+            "error": {
+                "type": "upstream_body_error",
+                "message": UPSTREAM_BODY_ERROR_MESSAGE,
+            }
+        }),
+    };
+
+    match route {
+        RouteKind::Anthropic => Bytes::from(format!("event: error\ndata: {body}\n\n")),
+        RouteKind::Openai | RouteKind::GeminiNative => Bytes::from(format!("data: {body}\n\n")),
+    }
+}
+
+fn upstream_body_error_response(route: RouteKind) -> Response<Body> {
+    let body = match route {
+        RouteKind::Anthropic => serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "upstream_body_error",
+                "message": UPSTREAM_BODY_ERROR_MESSAGE,
+            }
+        }),
+        RouteKind::GeminiNative => serde_json::json!({
+            "error": {
+                "code": StatusCode::BAD_GATEWAY.as_u16(),
+                "message": UPSTREAM_BODY_ERROR_MESSAGE,
+                "status": "UNAVAILABLE",
+            }
+        }),
+        RouteKind::Openai => serde_json::json!({
+            "error": {
+                "type": "upstream_body_error",
+                "message": UPSTREAM_BODY_ERROR_MESSAGE,
+            }
+        }),
+    };
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .header("content-type", "application/json")
+        .header(UPSTREAM_BODY_ERROR_HEADER, "1")
+        .body(Body::from(body.to_string()))
+        .unwrap()
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn wrap_response(
     response: Response<Body>,
+    route: RouteKind,
     request_id: Option<String>,
     team_id: String,
     router: String,
@@ -338,13 +460,38 @@ pub async fn wrap_response(
         let usage_stream = UsageStream {
             inner: stream,
             state,
+            route,
+            failed: false,
         };
         Response::from_parts(parts, Body::from_stream(usage_stream))
     } else {
         // Non-SSE: read full body
         let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
             Ok(b) => b,
-            Err(_) => return Response::from_parts(parts, Body::empty()), // Should not happen often
+            Err(err) => {
+                tracing::warn!("Failed to read upstream response body: {}", err);
+                metrics
+                    .error_total
+                    .with_label_values(&[route_label(route), &router])
+                    .inc();
+                logger.log_gateway_error(route_label(route), &router);
+                logger.log_failure(
+                    request_id.as_deref(),
+                    &team_id,
+                    &router,
+                    matched_rule.as_deref(),
+                    &channel,
+                    &model,
+                    latency_ms,
+                    fallback_triggered,
+                    StatusCode::BAD_GATEWAY.as_u16() as i64,
+                    UPSTREAM_BODY_ERROR_MESSAGE,
+                    None,
+                    Some(&err.to_string()),
+                    &client_info,
+                );
+                return upstream_body_error_response(route);
+            }
         };
 
         // Process usage
@@ -482,6 +629,154 @@ mod tests {
         assert_eq!(records[0].model, "gemini-3.1-pro-preview");
         assert_eq!(records[0].input_tokens, 0);
         assert_eq!(records[0].output_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn wrap_response_non_sse_body_error_returns_bad_gateway_body() {
+        let (dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let failing_stream = futures::stream::once(async {
+            Err::<Bytes, std::io::Error>(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "response timeout",
+            ))
+        });
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from_stream(failing_stream))
+            .unwrap();
+
+        let wrapped = wrap_response(
+            response,
+            crate::providers::RouteKind::Openai,
+            Some("req-1".to_string()),
+            "team1".to_string(),
+            "r1".to_string(),
+            Some("m1-*".to_string()),
+            "minimax".to_string(),
+            "minimax-m3".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+            crate::utils::ClientInfo::default(),
+        )
+        .await;
+
+        assert_eq!(wrapped.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(wrapped.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body_text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_text.contains("failed to read upstream response body"));
+
+        let db = Database::new(Some(dir.path().to_string_lossy().to_string())).unwrap();
+        let (records, total) = db
+            .get_usage_records(None, None, None, None, None, None, None, 10, 0)
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, "error");
+        assert_eq!(records[0].status_code, Some(502));
+        assert_eq!(db.get_metrics_summary().unwrap().total_errors, 1);
+    }
+
+    #[tokio::test]
+    async fn wrap_response_anthropic_body_error_uses_anthropic_error_shape() {
+        let (_dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let failing_stream = futures::stream::once(async {
+            Err::<Bytes, std::io::Error>(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "response timeout",
+            ))
+        });
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from_stream(failing_stream))
+            .unwrap();
+
+        let wrapped = wrap_response(
+            response,
+            crate::providers::RouteKind::Anthropic,
+            Some("req-1".to_string()),
+            "team1".to_string(),
+            "r1".to_string(),
+            Some("m1-*".to_string()),
+            "minimax".to_string(),
+            "minimax-m3".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+            crate::utils::ClientInfo::default(),
+        )
+        .await;
+
+        assert_eq!(wrapped.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(wrapped.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body_json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["type"], "error");
+        assert_eq!(body_json["error"]["type"], "upstream_body_error");
+        assert_eq!(
+            body_json["error"]["message"],
+            "failed to read upstream response body"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrap_response_sse_body_error_emits_error_event_and_logs_failure() {
+        let (dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let failing_stream = futures::stream::once(async {
+            Err::<Bytes, std::io::Error>(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "response timeout",
+            ))
+        });
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(Body::from_stream(failing_stream))
+            .unwrap();
+
+        let wrapped = wrap_response(
+            response,
+            crate::providers::RouteKind::Anthropic,
+            Some("req-1".to_string()),
+            "team1".to_string(),
+            "r1".to_string(),
+            Some("m1-*".to_string()),
+            "minimax".to_string(),
+            "minimax-m3".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+            crate::utils::ClientInfo::default(),
+        )
+        .await;
+
+        assert_eq!(wrapped.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(wrapped.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body_text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_text.contains("event: error"));
+        assert!(body_text.contains("upstream_body_error"));
+
+        let db = Database::new(Some(dir.path().to_string_lossy().to_string())).unwrap();
+        let (records, total) = db
+            .get_usage_records(None, None, None, None, None, None, None, 10, 0)
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(records[0].status, "error");
+        assert_eq!(records[0].status_code, Some(502));
+        assert_eq!(db.get_metrics_summary().unwrap().total_errors, 1);
     }
 
     #[test]

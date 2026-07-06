@@ -361,22 +361,32 @@ mod tests {
 
     #[test]
     fn platform_artifact_name_matches_release_contract() {
-        let artifact = platform_artifact_name().unwrap();
-        if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
-            assert_eq!(artifact, "apex-x86_64-linux");
-        } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-            assert_eq!(artifact, "apex-aarch64-macos");
-        } else {
-            assert!(artifact.starts_with("apex-"));
+        match platform_artifact_name() {
+            Ok(artifact) => {
+                if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+                    assert_eq!(artifact, "apex-x86_64-linux");
+                } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+                    assert_eq!(artifact, "apex-aarch64-macos");
+                } else {
+                    assert!(artifact.starts_with("apex-"));
+                }
+            }
+            Err(err) => {
+                assert!(err.to_string().contains("unsupported platform"));
+            }
         }
     }
 
     #[tokio::test]
     async fn build_plan_uses_versioned_release_paths() {
         let temp = tempfile::tempdir().unwrap();
-        let plan = build_plan(&metadata(temp.path()), Some("v0.2.0".to_string()))
-            .await
-            .unwrap();
+        let result = build_plan(&metadata(temp.path()), Some("v0.2.0".to_string())).await;
+        if platform_artifact_name().is_err() {
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("unsupported platform"));
+            return;
+        }
+        let plan = result.unwrap();
 
         assert_eq!(plan.current_version, "v0.1.0");
         assert_eq!(plan.target_version, "v0.2.0");

@@ -6,6 +6,7 @@ use moka::sync::Cache;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
+use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -258,7 +259,12 @@ impl GeminiAnthropicReplayCache {
         } else {
             let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
                 Ok(bytes) => bytes,
-                Err(_) => return Response::from_parts(parts, Body::empty()),
+                Err(err) => {
+                    let stream = futures::stream::once(async move {
+                        Err::<Bytes, io::Error>(io::Error::other(err))
+                    });
+                    return Response::from_parts(parts, Body::from_stream(stream));
+                }
             };
             self.store_from_anthropic_response(&team_id, &request_body, &bytes);
             Response::from_parts(parts, Body::from(bytes))

@@ -23,6 +23,10 @@ fn load_fixture(name: &str) -> String {
     fs::read_to_string(fixture_path(name)).unwrap()
 }
 
+fn normalize_line_endings(value: &str) -> String {
+    value.replace("\r\n", "\n")
+}
+
 fn assert_json_fixture(name: &str, actual: &str) {
     let expected: Value = serde_json::from_str(&load_fixture(name)).unwrap();
     let actual: Value = serde_json::from_str(actual).unwrap();
@@ -187,5 +191,8 @@ APEX_UPSTREAM_1_HEADERS_JSON={{"anthropic-version":"2023-06-01"}}
         .await
         .unwrap();
 
-    assert_eq!(body, load_fixture("anthropic_messages_stream.sse"));
+    assert_eq!(
+        normalize_line_endings(&body),
+        normalize_line_endings(&load_fixture("anthropic_messages_stream.sse"))
+    );
 }
