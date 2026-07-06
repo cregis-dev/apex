@@ -3905,6 +3905,7 @@ async fn process_request(
                         }
                         return crate::usage::wrap_response(
                             response,
+                            route,
                             request_id.clone(),
                             team_id.clone(),
                             router_name.clone(),
@@ -4344,6 +4345,7 @@ async fn process_gemini_native_direct_pass(
     );
     crate::usage::wrap_response(
         response,
+        route,
         request_id,
         team_id,
         router_name,

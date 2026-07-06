@@ -106,14 +106,18 @@ pub fn convert_openai_response_to_anthropic(body: Bytes) -> Bytes {
 /// - Converting delta content to Anthropic content blocks
 /// - Mapping finish_reason to stop_reason
 /// - Generating necessary Anthropic events (message_start, content_block_start, etc.)
-pub fn convert_openai_stream_to_anthropic<S>(
+pub fn convert_openai_stream_to_anthropic<S, E>(
     stream: S,
 ) -> impl Stream<Item = Result<Bytes, io::Error>> + Send
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send + 'static,
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::error::Error + Send + Sync + 'static,
 {
-    let state: (S, Vec<u8>, StreamConversionState) =
-        (stream, Vec::new(), StreamConversionState::default());
+    let state = (
+        Box::pin(stream),
+        Vec::new(),
+        StreamConversionState::default(),
+    );
 
     stream::unfold(state, |(mut stream, mut buffer, mut state)| async move {
         loop {
@@ -383,7 +387,7 @@ where
             }
 
             // Need more data
-            match stream.next().await {
+            match stream.as_mut().next().await {
                 Some(Ok(bytes)) => {
                     buffer.extend_from_slice(&bytes);
                 }

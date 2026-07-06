@@ -456,7 +456,12 @@ fn handle_openai_compatible_response(
             .unwrap_or(false);
 
         if is_stream {
-            let stream = resp.bytes_stream();
+            let stream = resp.bytes_stream().timeout(timeout);
+            let stream = stream.map(|item| match item {
+                Ok(Ok(bytes)) => Ok(bytes),
+                Ok(Err(err)) => Err(io::Error::other(err)),
+                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
+            });
             let converted_stream = convert_openai_stream_to_anthropic(stream);
 
             return Response::builder()
@@ -966,6 +971,47 @@ impl ProviderAdapter for DualProtocolAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn anthropic_stream_bridge_applies_response_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/stream",
+            axum::routing::get(|| async {
+                let stream = futures::stream::pending::<Result<Bytes, std::io::Error>>();
+                let mut response = Response::new(Body::from_stream(stream));
+                *response.status_mut() = StatusCode::OK;
+                response.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                response
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/stream"))
+            .send()
+            .await
+            .unwrap();
+        let converted = handle_openai_compatible_response(
+            RouteKind::Anthropic,
+            resp,
+            Duration::from_millis(10),
+        );
+        let mut stream = converted.into_body().into_data_stream();
+        let next = tokio::time::timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("stream should fail instead of hanging past response timeout");
+        let item = next.expect("timed out stream should yield an error item");
+
+        handle.abort();
+        assert!(item.is_err());
+    }
 
     #[test]
     fn registry_returns_adapter() {
