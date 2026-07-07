@@ -235,6 +235,7 @@ impl GeminiAnthropicReplayCache {
         team_id: String,
         request_body: Bytes,
         response: Response<Body>,
+        body_read_timeout: Option<Duration>,
     ) -> Response<Body> {
         let is_sse = response
             .headers()
@@ -257,7 +258,20 @@ impl GeminiAnthropicReplayCache {
             };
             Response::from_parts(parts, Body::from_stream(wrapped))
         } else {
-            let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
+            let read = axum::body::to_bytes(body, 10 * 1024 * 1024);
+            let bytes_result =
+                if let Some(timeout) = body_read_timeout.filter(|timeout| !timeout.is_zero()) {
+                    match tokio::time::timeout(timeout, read).await {
+                        Ok(result) => result.map_err(|err| err.to_string()),
+                        Err(_) => Err(format!(
+                            "response body timeout after {}ms",
+                            timeout.as_millis()
+                        )),
+                    }
+                } else {
+                    read.await.map_err(|err| err.to_string())
+                };
+            let bytes = match bytes_result {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     let stream = futures::stream::once(async move {
@@ -799,6 +813,42 @@ mod tests {
             .unwrap(),
         );
         assert!(gemini_replay_missing_signature(&body));
+    }
+
+    #[tokio::test]
+    async fn wrap_response_non_sse_body_timeout_returns_error_stream() {
+        let cache = Arc::new(GeminiAnthropicReplayCache::new());
+        let slow_stream = futures::stream::unfold(0, |index| async move {
+            if index >= 10 {
+                None
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Some((
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x")),
+                    index + 1,
+                ))
+            }
+        });
+        let response = Response::builder()
+            .header("content-type", "application/json")
+            .body(Body::from_stream(slow_stream))
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let wrapped = cache
+            .wrap_response(
+                "team".to_string(),
+                Bytes::from_static(br#"{"messages":[]}"#),
+                response,
+                Some(Duration::from_millis(35)),
+            )
+            .await;
+
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let err = axum::body::to_bytes(wrapped.into_body(), 64 * 1024)
+            .await
+            .expect_err("timed out replay body should remain an error");
+        assert!(err.to_string().contains("response body timeout after 35ms"));
     }
 
     #[test]

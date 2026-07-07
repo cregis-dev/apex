@@ -11,6 +11,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 pub struct UsageLogger {
     db: Arc<Database>,
@@ -416,6 +417,26 @@ fn upstream_body_error_response(route: RouteKind) -> Response<Body> {
         .unwrap()
 }
 
+async fn read_non_sse_body(
+    body: Body,
+    limit: usize,
+    timeout: Option<Duration>,
+) -> Result<Bytes, String> {
+    let read = axum::body::to_bytes(body, limit);
+    let Some(timeout) = timeout.filter(|timeout| !timeout.is_zero()) else {
+        return read.await.map_err(|err| err.to_string());
+    };
+
+    match tokio::time::timeout(timeout, read).await {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => Err(format!(
+            "response body timeout after {}ms",
+            timeout.as_millis()
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn wrap_response(
     response: Response<Body>,
@@ -431,6 +452,7 @@ pub async fn wrap_response(
     latency_ms: Option<f64>,
     fallback_triggered: bool,
     client_info: crate::utils::ClientInfo,
+    body_read_timeout: Option<Duration>,
 ) -> Response<Body> {
     let is_sse = response
         .headers()
@@ -466,7 +488,7 @@ pub async fn wrap_response(
         Response::from_parts(parts, Body::from_stream(usage_stream))
     } else {
         // Non-SSE: read full body
-        let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
+        let bytes = match read_non_sse_body(body, 10 * 1024 * 1024, body_read_timeout).await {
             Ok(b) => b,
             Err(err) => {
                 tracing::warn!("Failed to read upstream response body: {}", err);
@@ -487,7 +509,7 @@ pub async fn wrap_response(
                     StatusCode::BAD_GATEWAY.as_u16() as i64,
                     UPSTREAM_BODY_ERROR_MESSAGE,
                     None,
-                    Some(&err.to_string()),
+                    Some(&err),
                     &client_info,
                 );
                 return upstream_body_error_response(route);
@@ -661,6 +683,7 @@ mod tests {
             Some(42.0),
             false,
             crate::utils::ClientInfo::default(),
+            None,
         )
         .await;
 
@@ -680,6 +703,71 @@ mod tests {
         assert_eq!(records[0].status, "error");
         assert_eq!(records[0].status_code, Some(502));
         assert_eq!(db.get_metrics_summary().unwrap().total_errors, 1);
+    }
+
+    #[tokio::test]
+    async fn wrap_response_non_sse_body_timeout_is_total_duration() {
+        let (dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let slow_stream = futures::stream::unfold(0, |index| async move {
+            if index >= 10 {
+                None
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Some((
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x")),
+                    index + 1,
+                ))
+            }
+        });
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from_stream(slow_stream))
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let wrapped = wrap_response(
+            response,
+            crate::providers::RouteKind::Anthropic,
+            Some("req-1".to_string()),
+            "team1".to_string(),
+            "r1".to_string(),
+            Some("m1-*".to_string()),
+            "deepseek".to_string(),
+            "deepseek-v4-flash".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+            crate::utils::ClientInfo::default(),
+            Some(Duration::from_millis(35)),
+        )
+        .await;
+
+        assert_eq!(wrapped.status(), StatusCode::BAD_GATEWAY);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let body = axum::body::to_bytes(wrapped.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body_json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["type"], "error");
+        assert_eq!(body_json["error"]["type"], "upstream_body_error");
+
+        let db = Database::new(Some(dir.path().to_string_lossy().to_string())).unwrap();
+        let (records, total) = db
+            .get_usage_records(None, None, None, None, None, None, None, 10, 0)
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(records[0].status, "error");
+        assert_eq!(records[0].status_code, Some(502));
+        assert!(
+            records[0]
+                .provider_error_body
+                .as_deref()
+                .unwrap_or_default()
+                .contains("response body timeout after 35ms")
+        );
     }
 
     #[tokio::test]
@@ -712,6 +800,7 @@ mod tests {
             Some(42.0),
             false,
             crate::utils::ClientInfo::default(),
+            None,
         )
         .await;
 
@@ -758,6 +847,7 @@ mod tests {
             Some(42.0),
             false,
             crate::utils::ClientInfo::default(),
+            Some(Duration::from_millis(1)),
         )
         .await;
 

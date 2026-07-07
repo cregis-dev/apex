@@ -125,7 +125,7 @@
 |------|------|------|
 | `connect_ms` | number | 连接超时（毫秒） |
 | `request_ms` | number | 请求超时（毫秒） |
-| `response_ms` | number | 响应超时（毫秒） |
+| `response_ms` | number | 响应超时（毫秒）；非流式响应用于完整 body 读取总时限，流式响应用于相邻 chunk 间隔时限 |
 
 ### retries
 
