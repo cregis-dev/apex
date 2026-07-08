@@ -109,6 +109,11 @@ impl UsageLogger {
     }
 }
 
+/// A single SSE line larger than this cannot be a usage event; drop it
+/// instead of letting a newline-free stream grow the reassembly buffer
+/// without bound.
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+
 struct UsageTrackerState {
     request_id: Option<String>,
     team_id: String,
@@ -170,6 +175,9 @@ impl UsageTrackerState {
                 }
                 if start > 0 {
                     self.accumulated_data.drain(0..start);
+                }
+                if self.accumulated_data.len() > MAX_SSE_LINE_BYTES {
+                    self.accumulated_data = String::new();
                 }
             } else {
                 // For non-SSE, we expect the whole body or chunks of JSON.
@@ -343,6 +351,9 @@ where
 
 pub const UPSTREAM_BODY_ERROR_MESSAGE: &str = "failed to read upstream response body";
 const UPSTREAM_BODY_ERROR_HEADER: &str = "x-apex-upstream-body-error";
+/// Cap for upstream bodies buffered in gateway memory (success reads, error
+/// reads, and SSE replay recording all share it).
+pub const MAX_UPSTREAM_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 pub fn is_upstream_body_error_response(response: &Response<Body>) -> bool {
     response.headers().contains_key(UPSTREAM_BODY_ERROR_HEADER)
@@ -488,7 +499,8 @@ pub async fn wrap_response(
         Response::from_parts(parts, Body::from_stream(usage_stream))
     } else {
         // Non-SSE: read full body
-        let bytes = match read_non_sse_body(body, 10 * 1024 * 1024, body_read_timeout).await {
+        let bytes = match read_non_sse_body(body, MAX_UPSTREAM_BODY_BYTES, body_read_timeout).await
+        {
             Ok(b) => b,
             Err(err) => {
                 tracing::warn!("Failed to read upstream response body: {}", err);
@@ -705,7 +717,11 @@ mod tests {
         assert_eq!(db.get_metrics_summary().unwrap().total_errors, 1);
     }
 
-    #[tokio::test]
+    // start_paused: timers auto-advance in virtual time, so the test is
+    // deterministic on loaded CI. The load-bearing assertion is the status —
+    // if the deadline were per-chunk instead of total, the stream would
+    // complete and return 200.
+    #[tokio::test(start_paused = true)]
     async fn wrap_response_non_sse_body_timeout_is_total_duration() {
         let (dir, logger) = create_test_logger();
         let metrics = create_test_metrics();
@@ -746,7 +762,8 @@ mod tests {
         .await;
 
         assert_eq!(wrapped.status(), StatusCode::BAD_GATEWAY);
-        assert!(started.elapsed() < Duration::from_millis(100));
+        // Under the paused clock no real sleeping may happen at all.
+        assert!(started.elapsed() < Duration::from_secs(5));
         let body = axum::body::to_bytes(wrapped.into_body(), 64 * 1024)
             .await
             .unwrap();
@@ -768,6 +785,39 @@ mod tests {
                 .unwrap_or_default()
                 .contains("response body timeout after 35ms")
         );
+    }
+
+    #[test]
+    fn sse_buffer_is_bounded_for_newline_free_streams() {
+        let (_dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let mut state = UsageTrackerState::new(
+            "team1".to_string(),
+            None,
+            "r1".to_string(),
+            None,
+            "ch".to_string(),
+            "m".to_string(),
+            logger,
+            metrics,
+            None,
+            false,
+        );
+
+        let chunk = vec![b'a'; 512 * 1024];
+        for _ in 0..8 {
+            state.process_chunk(&chunk, true);
+        }
+        // 4MB of newline-free input must not pile up in the line buffer.
+        assert!(state.accumulated_data.len() <= MAX_SSE_LINE_BYTES);
+
+        // Later well-formed usage events still parse after the drop.
+        state.process_chunk(
+            b"\ndata: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n",
+            true,
+        );
+        assert_eq!(state.input_tokens, 3);
+        assert_eq!(state.output_tokens, 5);
     }
 
     #[tokio::test]

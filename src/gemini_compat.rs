@@ -258,7 +258,7 @@ impl GeminiAnthropicReplayCache {
             };
             Response::from_parts(parts, Body::from_stream(wrapped))
         } else {
-            let read = axum::body::to_bytes(body, 10 * 1024 * 1024);
+            let read = axum::body::to_bytes(body, crate::usage::MAX_UPSTREAM_BODY_BYTES);
             let bytes_result =
                 if let Some(timeout) = body_read_timeout.filter(|timeout| !timeout.is_zero()) {
                     match tokio::time::timeout(timeout, read).await {
@@ -437,6 +437,8 @@ struct StreamReplayRecorder {
     request_body: Bytes,
     buffer: String,
     blocks: BTreeMap<usize, RecordedContentBlock>,
+    recorded_bytes: usize,
+    overflowed: bool,
 }
 
 impl StreamReplayRecorder {
@@ -447,13 +449,32 @@ impl StreamReplayRecorder {
             request_body,
             buffer: String::new(),
             blocks: BTreeMap::new(),
+            recorded_bytes: 0,
+            overflowed: false,
         }
     }
 
     fn process_chunk(&mut self, chunk: &Bytes) {
+        if self.overflowed {
+            return;
+        }
         let Ok(text) = std::str::from_utf8(chunk) else {
             return;
         };
+        // Recording only fills the replay cache; past the budget, give it up
+        // and free the accumulated state instead of growing gateway memory.
+        // The client stream itself is untouched.
+        self.recorded_bytes = self.recorded_bytes.saturating_add(text.len());
+        if self.recorded_bytes > crate::usage::MAX_UPSTREAM_BODY_BYTES {
+            tracing::warn!(
+                team_id = %self.team_id,
+                "Gemini replay recording aborted: SSE stream exceeded size budget"
+            );
+            self.overflowed = true;
+            self.buffer = String::new();
+            self.blocks.clear();
+            return;
+        }
         self.buffer.push_str(text);
 
         let mut start = 0usize;
@@ -550,7 +571,7 @@ impl StreamReplayRecorder {
     }
 
     fn finish(&mut self) {
-        if self.blocks.is_empty() {
+        if self.overflowed || self.blocks.is_empty() {
             return;
         }
 
@@ -815,7 +836,10 @@ mod tests {
         assert!(gemini_replay_missing_signature(&body));
     }
 
-    #[tokio::test]
+    // start_paused: timers auto-advance in virtual time, keeping the test
+    // deterministic on loaded CI; the error assertion below carries the
+    // total-deadline semantics.
+    #[tokio::test(start_paused = true)]
     async fn wrap_response_non_sse_body_timeout_returns_error_stream() {
         let cache = Arc::new(GeminiAnthropicReplayCache::new());
         let slow_stream = futures::stream::unfold(0, |index| async move {
@@ -844,11 +868,79 @@ mod tests {
             )
             .await;
 
-        assert!(started.elapsed() < Duration::from_millis(100));
+        // Under the paused clock no real sleeping may happen at all.
+        assert!(started.elapsed() < Duration::from_secs(5));
         let err = axum::body::to_bytes(wrapped.into_body(), 64 * 1024)
             .await
             .expect_err("timed out replay body should remain an error");
         assert!(err.to_string().contains("response body timeout after 35ms"));
+    }
+
+    #[test]
+    fn replay_recorder_stops_recording_past_size_budget() {
+        let cache = Arc::new(GeminiAnthropicReplayCache::new());
+        let request_body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gemini-3.1-pro-preview",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap(),
+        );
+        let mut recorder =
+            StreamReplayRecorder::new(cache.clone(), "team".to_string(), request_body);
+
+        let start_line = format!(
+            "data: {}\n",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_budget",
+                    "name": "run_command",
+                    "extra_content": {"google": {"thought_signature": "sig"}}
+                }
+            })
+        );
+        recorder.process_chunk(&Bytes::from(start_line));
+        assert_eq!(recorder.blocks.len(), 1);
+
+        let big_delta = format!(
+            "data: {}\n",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "A".repeat(1024 * 1024)}
+            })
+        );
+        for _ in 0..11 {
+            recorder.process_chunk(&Bytes::from(big_delta.clone()));
+        }
+
+        // Past the budget the recorder frees its state and stops recording;
+        // the client stream itself is unaffected (the recorder is only a tap).
+        assert!(recorder.overflowed);
+        assert!(recorder.buffer.is_empty());
+        assert!(recorder.blocks.is_empty());
+
+        recorder.finish();
+        let followup = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gemini-3.1-pro-preview",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "toolu_budget", "name": "run_command", "input": {}}
+                    ]},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_budget", "content": "ok"}
+                    ]}
+                ]
+            }))
+            .unwrap(),
+        );
+        let augmented = cache.augment_request("team", &followup);
+        assert_eq!(augmented, followup, "overflowed turn must not be cached");
     }
 
     #[test]

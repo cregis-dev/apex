@@ -3433,19 +3433,39 @@ async fn read_upstream_error_body(
     response: reqwest::Response,
     timeout: Duration,
 ) -> Result<Bytes, String> {
-    let read = response.bytes();
+    let read = read_capped_error_body(response);
     if timeout.is_zero() {
-        return read.await.map_err(|err| err.to_string());
+        return read.await;
     }
 
     match tokio::time::timeout(timeout, read).await {
-        Ok(Ok(bytes)) => Ok(bytes),
-        Ok(Err(err)) => Err(err.to_string()),
+        Ok(result) => result,
         Err(_) => Err(format!(
             "response body timeout after {}ms",
             timeout.as_millis()
         )),
     }
+}
+
+/// reqwest's `bytes()` has no size limit; error bodies must honor the same
+/// cap as the success-path reads so a broken upstream cannot buffer unbounded
+/// data into gateway memory.
+async fn read_capped_error_body(response: reqwest::Response) -> Result<Bytes, String> {
+    use futures::StreamExt as _;
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| err.to_string())?;
+        if buffer.len() + chunk.len() > crate::usage::MAX_UPSTREAM_BODY_BYTES {
+            return Err(format!(
+                "upstream error body exceeded {} bytes",
+                crate::usage::MAX_UPSTREAM_BODY_BYTES
+            ));
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(buffer))
 }
 
 fn truncate_for_storage(input: &str, limit: usize) -> String {
@@ -4705,7 +4725,7 @@ mod tests {
         let app = axum::Router::new().route(
             "/slow",
             axum::routing::get(|| async {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                tokio::time::sleep(Duration::from_millis(1000)).await;
                 "late"
             }),
         );
@@ -4722,7 +4742,9 @@ mod tests {
 
         handle.abort();
         assert!(err.is_timeout());
-        assert!(started.elapsed() < Duration::from_millis(200));
+        // Generous bound (the mock stalls for 1000ms): the timeout must fire
+        // long before the upstream would have answered.
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     #[tokio::test]
@@ -4765,7 +4787,7 @@ mod tests {
                     if index >= 6 {
                         None
                     } else {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
                         Some((
                             Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x")),
                             index + 1,
@@ -4781,10 +4803,10 @@ mod tests {
 
         let client = reqwest::Client::new();
         let request = client.get(format!("http://{addr}/stream")).build().unwrap();
-        let resp = execute_upstream_request(&client, request, Duration::from_millis(50))
+        let resp = execute_upstream_request(&client, request, Duration::from_millis(150))
             .await
             .expect("headers arrive immediately, request_ms must not trip");
-        // Total body time (~120ms) exceeds request_ms (50ms) on purpose.
+        // Total body time (~300ms) exceeds request_ms (150ms) on purpose.
         let body = resp
             .bytes()
             .await
@@ -4882,10 +4904,10 @@ mod tests {
             "/v1/chat/completions",
             axum::routing::post(|| async {
                 let slow_stream = futures::stream::unfold(0, |index| async move {
-                    if index >= 10 {
+                    if index >= 20 {
                         None
                     } else {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
                         Some((
                             Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x")),
                             index + 1,
@@ -4935,12 +4957,30 @@ mod tests {
         handle.abort();
         // The read is still bounded by response_ms, but the client keeps the
         // real upstream status (with an empty body) instead of a generic 502.
+        // Generous bound: the full mock body would take ~1000ms to stream.
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(started.elapsed() < Duration::from_millis(140));
+        assert!(started.elapsed() < Duration::from_millis(500));
         let body = axum::body::to_bytes(response.into_body(), 1024)
             .await
             .unwrap();
         assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upstream_error_body_read_enforces_size_cap() {
+        let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+        let stream =
+            futures::stream::iter((0..11).map(move |_| Ok::<_, std::io::Error>(chunk.clone())));
+        let response = HttpResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(reqwest::Body::wrap_stream(stream))
+            .unwrap();
+        let response = reqwest::Response::from(response);
+
+        let err = read_upstream_error_body(response, Duration::ZERO)
+            .await
+            .expect_err("an error body larger than the cap must be rejected");
+        assert!(err.contains("exceeded"));
     }
 
     #[test]
