@@ -1156,7 +1156,10 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
             auth_keys: vec![],
             timeouts: Timeouts {
                 connect_ms: 2000,
-                request_ms: 30000,
+                // request_ms bounds time-to-response-headers; non-streaming
+                // completions only send headers after full generation, so this
+                // must stay well above realistic generation times (0 disables).
+                request_ms: 300000,
                 response_ms: 30000,
             },
             retries: Retries {

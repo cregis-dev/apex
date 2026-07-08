@@ -236,6 +236,27 @@ pub fn error_response(status: StatusCode, message: &str) -> Response<Body> {
         .unwrap()
 }
 
+/// Streams an upstream body with a per-chunk inactivity deadline. A zero
+/// timeout disables the deadline, matching the `0 = disabled` convention of
+/// the connect/request/body-read timeouts.
+fn upstream_body_stream(
+    resp: reqwest::Response,
+    timeout: Duration,
+) -> futures::stream::BoxStream<'static, Result<Bytes, io::Error>> {
+    if timeout.is_zero() {
+        return Box::pin(
+            resp.bytes_stream()
+                .map(|item| item.map_err(io::Error::other)),
+        );
+    }
+
+    Box::pin(resp.bytes_stream().timeout(timeout).map(|item| match item {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(err)) => Err(io::Error::other(err)),
+        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
+    }))
+}
+
 pub fn convert_response(resp: reqwest::Response, timeout: Duration) -> Response<Body> {
     let status = resp.status();
     let mut builder = Response::builder().status(status);
@@ -244,12 +265,7 @@ pub fn convert_response(resp: reqwest::Response, timeout: Duration) -> Response<
             builder = builder.header(name, value);
         }
     }
-    let stream = resp.bytes_stream().timeout(timeout);
-    let stream = stream.map(|item| match item {
-        Ok(Ok(bytes)) => Ok(bytes),
-        Ok(Err(err)) => Err(io::Error::other(err)),
-        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
-    });
+    let stream = upstream_body_stream(resp, timeout);
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "invalid response"))
@@ -456,12 +472,7 @@ fn handle_openai_compatible_response(
             .unwrap_or(false);
 
         if is_stream {
-            let stream = resp.bytes_stream().timeout(timeout);
-            let stream = stream.map(|item| match item {
-                Ok(Ok(bytes)) => Ok(bytes),
-                Ok(Err(err)) => Err(io::Error::other(err)),
-                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
-            });
+            let stream = upstream_body_stream(resp, timeout);
             let converted_stream = convert_openai_stream_to_anthropic(stream);
 
             return Response::builder()
@@ -481,12 +492,7 @@ fn handle_openai_compatible_response(
             }
         }
 
-        let stream = resp.bytes_stream().timeout(timeout);
-        let stream = stream.map(|item| match item {
-            Ok(Ok(bytes)) => Ok(bytes),
-            Ok(Err(err)) => Err(io::Error::other(err)),
-            Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
-        });
+        let stream = upstream_body_stream(resp, timeout);
 
         let future = stream
             .try_fold(Vec::new(), |mut acc, bytes| async move {
@@ -971,6 +977,47 @@ impl ProviderAdapter for DualProtocolAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn convert_response_zero_timeout_disables_chunk_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/slow",
+            axum::routing::get(|| async {
+                let stream = futures::stream::unfold(0, |index| async move {
+                    if index >= 3 {
+                        None
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        Some((
+                            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x")),
+                            index + 1,
+                        ))
+                    }
+                });
+                Response::new(Body::from_stream(stream))
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/slow"))
+            .send()
+            .await
+            .unwrap();
+        // response_ms = 0 must disable the per-chunk deadline instead of
+        // failing on the first pending poll.
+        let converted = convert_response(resp, Duration::ZERO);
+        let bytes = axum::body::to_bytes(converted.into_body(), 1024)
+            .await
+            .expect("zero timeout must let a slow-but-progressing body finish");
+
+        handle.abort();
+        assert_eq!(&bytes[..], b"xxx");
+    }
 
     #[tokio::test]
     async fn anthropic_stream_bridge_applies_response_timeout() {

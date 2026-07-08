@@ -116,16 +116,16 @@
 ```json
 "timeouts": {
   "connect_ms": 1000,
-  "request_ms": 10000,
+  "request_ms": 300000,
   "response_ms": 30000
 }
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `connect_ms` | number | 连接超时（毫秒） |
-| `request_ms` | number | 请求超时（毫秒） |
-| `response_ms` | number | 响应超时（毫秒）；非流式响应用于完整 body 读取总时限，流式响应用于相邻 chunk 间隔时限 |
+| `connect_ms` | number | 建立上游 TCP 连接的超时（毫秒）；`0` 表示不限制 |
+| `request_ms` | number | 从发出上游请求到收到**响应头**的超时（毫秒）；`0` 表示不限制。注意：非流式（`stream:false`）请求的响应头要等上游生成完整个回答后才返回，所以这个值实际约束的是整个生成时间，请配置得远大于最长预期生成时长。流式响应在响应头到达后不受此限制。Gemini 原生文件上传路由（`:uploadToFileSearchStore`）不受此限制（上传时长由客户端网速决定） |
+| `response_ms` | number | 响应 body 超时（毫秒）；`0` 表示不限制。流式响应（含 SSE 与 Gemini `streamGenerateContent` 的分块 JSON）用于相邻 chunk 间隔时限；非流式响应用于完整 body 读取总时限；上游错误响应的 body 读取也受此时限约束（超时后按空 body 转发真实状态码） |
 
 ### retries
 
@@ -186,7 +186,7 @@ Channels 定义上游 LLM 提供商的连接配置。
     "api_key": "${OPENAI_API_KEY}",
     "headers": { "X-Custom": "value" },
     "model_map": { "gpt-4": "gpt-4-turbo" },
-    "timeouts": { "connect_ms": 2000, "request_ms": 60000, "response_ms": 60000 }
+    "timeouts": { "connect_ms": 2000, "request_ms": 300000, "response_ms": 60000 }
   }
 ]
 ```
@@ -200,7 +200,7 @@ Channels 定义上游 LLM 提供商的连接配置。
 | `anthropic_base_url` | string | 否 | 该 provider 在 Anthropic 协议下使用的基础 URL。适用于原生同时支持 OpenAI / Anthropic 协议的 provider，如 `deepseek`, `moonshot`, `minimax`, `ollama`, `openrouter`, `zai`。`zai` 推荐使用 OpenAI URL `https://api.z.ai/api/coding/paas/v4` 和 Anthropic URL `https://api.z.ai/api/anthropic` |
 | `headers` | object | 否 | 自定义 HTTP 头 |
 | `model_map` | object | 否 | 模型映射：key = 请求模型名，value = 实际提供商模型 |
-| `timeouts` | object | 否 | 通道级别超时覆盖 |
+| `timeouts` | object | 否 | 通道级别超时覆盖。注意是整体覆盖：一旦设置，`connect_ms`/`request_ms`/`response_ms` 三个字段全部以通道值为准，不与全局值逐字段合并 |
 
 ### Gemini native pass-through
 
