@@ -204,7 +204,7 @@ Channels 定义上游 LLM 提供商的连接配置。
 | `anthropic_base_url` | string | 否 | 该 provider 在 Anthropic 协议下使用的基础 URL。适用于原生同时支持 OpenAI / Anthropic 协议的 provider，如 `deepseek`, `moonshot`, `minimax`, `ollama`, `openrouter`, `zai`。`zai` 推荐使用 OpenAI URL `https://api.z.ai/api/coding/paas/v4` 和 Anthropic URL `https://api.z.ai/api/anthropic` |
 | `headers` | object | 否 | 自定义 HTTP 头 |
 | `model_map` | object | 否 | 模型映射：key = 请求模型名，value = 实际提供商模型 |
-| `timeouts` | object | 否 | 通道级别超时覆盖。注意是整体覆盖：一旦设置，`connect_ms`/`request_ms`/`response_ms` 三个字段全部以通道值为准，不与全局值逐字段合并 |
+| `timeouts` | object | 否 | 通道级别的 `request_ms`/`response_ms` 覆盖；该对象仍需提供完整三个字段，但当前连接超时由共享 HTTP client 的全局 `connect_ms` 控制，channel `connect_ms` 不会覆盖全局值 |
 
 ### Gemini native pass-through
 

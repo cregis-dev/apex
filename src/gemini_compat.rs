@@ -237,12 +237,7 @@ impl GeminiAnthropicReplayCache {
         response: Response<Body>,
         body_read_timeout: Option<Duration>,
     ) -> Response<Body> {
-        let is_sse = response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.contains("text/event-stream"))
-            .unwrap_or(false);
+        let is_sse = crate::providers::is_sse_response(response.headers());
         let (parts, body) = response.into_parts();
 
         if is_sse {

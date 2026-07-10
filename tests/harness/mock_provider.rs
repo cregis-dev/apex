@@ -7,6 +7,10 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 #[derive(Clone)]
 struct MockState {
@@ -14,11 +18,13 @@ struct MockState {
     chat_status: StatusCode,
     message_status: StatusCode,
     embeddings_status: StatusCode,
+    chat_calls: Arc<AtomicUsize>,
 }
 
 pub struct MockProvider {
     addr: SocketAddr,
     handle: tokio::task::JoinHandle<()>,
+    chat_calls: Arc<AtomicUsize>,
 }
 
 impl MockProvider {
@@ -41,16 +47,29 @@ impl MockProvider {
             .local_addr()
             .context("failed to get mock provider addr")?;
 
+        let chat_calls = Arc::new(AtomicUsize::new(0));
+        let state = MockState {
+            name: "mock-body-error".to_string(),
+            chat_status: StatusCode::OK,
+            message_status: StatusCode::OK,
+            embeddings_status: StatusCode::OK,
+            chat_calls: chat_calls.clone(),
+        };
         let app = Router::new()
             .route("/healthz", get(healthz))
             .route("/v1/chat/completions", post(chat_body_error))
-            .route("/chat/completions", post(chat_body_error));
+            .route("/chat/completions", post(chat_body_error))
+            .with_state(state);
 
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
-        Ok(Self { addr, handle })
+        Ok(Self {
+            addr,
+            handle,
+            chat_calls,
+        })
     }
 
     async fn spawn_with_status(
@@ -65,11 +84,13 @@ impl MockProvider {
         let addr = listener
             .local_addr()
             .context("failed to get mock provider addr")?;
+        let chat_calls = Arc::new(AtomicUsize::new(0));
         let state = MockState {
             name: name.into(),
             chat_status,
             message_status,
             embeddings_status,
+            chat_calls: chat_calls.clone(),
         };
 
         let app = Router::new()
@@ -120,11 +141,19 @@ impl MockProvider {
             axum::serve(listener, app).await.unwrap();
         });
 
-        Ok(Self { addr, handle })
+        Ok(Self {
+            addr,
+            handle,
+            chat_calls,
+        })
     }
 
     pub fn base_url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    pub fn chat_request_count(&self) -> usize {
+        self.chat_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -154,6 +183,7 @@ async fn models(State(state): State<MockState>) -> Json<Value> {
 }
 
 async fn chat_completions(State(state): State<MockState>, Json(body): Json<Value>) -> Response {
+    state.chat_calls.fetch_add(1, Ordering::SeqCst);
     if state.chat_status != StatusCode::OK {
         return (
             state.chat_status,
@@ -214,7 +244,8 @@ async fn chat_completions(State(state): State<MockState>, Json(body): Json<Value
     .into_response()
 }
 
-async fn chat_body_error() -> Response {
+async fn chat_body_error(State(state): State<MockState>) -> Response {
+    state.chat_calls.fetch_add(1, Ordering::SeqCst);
     let stream = futures::stream::once(async {
         Err::<Bytes, std::io::Error>(std::io::Error::new(
             std::io::ErrorKind::TimedOut,

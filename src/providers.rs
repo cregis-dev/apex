@@ -228,6 +228,14 @@ pub fn should_forward_response_header(name: &HeaderName) -> bool {
     !matches!(lower.as_str(), "transfer-encoding" | "content-length")
 }
 
+pub fn is_sse_response(headers: &HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/event-stream"))
+}
+
 pub fn error_response(status: StatusCode, message: &str) -> Response<Body> {
     Response::builder()
         .status(status)
@@ -464,12 +472,7 @@ fn handle_openai_compatible_response(
     timeout: Duration,
 ) -> Response<Body> {
     if matches!(route, RouteKind::Anthropic) {
-        let is_stream = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.contains("text/event-stream"))
-            .unwrap_or(false);
+        let is_stream = is_sse_response(resp.headers());
 
         if is_stream {
             let stream = upstream_body_stream(resp, timeout);
@@ -983,6 +986,17 @@ impl ProviderAdapter for DualProtocolAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sse_content_type_match_is_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("Text/Event-Stream; Charset=UTF-8"),
+        );
+
+        assert!(is_sse_response(&headers));
+    }
 
     #[tokio::test]
     async fn convert_response_zero_timeout_disables_chunk_deadline() {

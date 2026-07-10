@@ -3449,30 +3449,52 @@ fn response_from_upstream_bytes(
 async fn read_upstream_error_body(
     response: reqwest::Response,
     timeout: Duration,
+    use_total_deadline: bool,
 ) -> Result<Bytes, String> {
-    let read = read_capped_error_body(response);
     if timeout.is_zero() {
-        return read.await;
+        return read_capped_error_body(response, None).await;
     }
 
-    match tokio::time::timeout(timeout, read).await {
-        Ok(result) => result,
-        Err(_) => Err(format!(
-            "response body timeout after {}ms",
-            timeout.as_millis()
-        )),
+    if use_total_deadline {
+        match tokio::time::timeout(timeout, read_capped_error_body(response, None)).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "response body timeout after {}ms",
+                timeout.as_millis()
+            )),
+        }
+    } else {
+        read_capped_error_body(response, Some(timeout)).await
     }
 }
 
 /// reqwest's `bytes()` has no size limit; error bodies must honor the same
 /// cap as the success-path reads so a broken upstream cannot buffer unbounded
 /// data into gateway memory.
-async fn read_capped_error_body(response: reqwest::Response) -> Result<Bytes, String> {
+async fn read_capped_error_body(
+    response: reqwest::Response,
+    chunk_timeout: Option<Duration>,
+) -> Result<Bytes, String> {
     use futures::StreamExt as _;
 
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = match chunk_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    return Err(format!(
+                        "response body chunk timeout after {}ms",
+                        timeout.as_millis()
+                    ));
+                }
+            },
+            None => stream.next().await,
+        };
+        let Some(chunk) = next else {
+            break;
+        };
         let chunk = chunk.map_err(|err| err.to_string())?;
         if buffer.len() + chunk.len() > crate::usage::MAX_UPSTREAM_BODY_BYTES {
             return Err(format!(
@@ -3524,7 +3546,7 @@ fn response_body_total_timeout_for(
     Some(response_timeout_for(&config.global.timeouts, channel))
 }
 
-fn method_allows_body_failure_retry(method: &Method) -> bool {
+fn method_allows_ambiguous_retry(method: &Method) -> bool {
     matches!(*method, Method::GET | Method::HEAD)
 }
 
@@ -4110,7 +4132,7 @@ async fn process_request(
                             state
                                 .access_audit
                                 .audit(&channel.provider_type, route, false);
-                            if !method_allows_body_failure_retry(&parts.method) {
+                            if !method_allows_ambiguous_retry(&parts.method) {
                                 return wrapped;
                             }
                             if attempt + 1 < max_attempts {
@@ -4213,6 +4235,7 @@ async fn process_request(
                         let (error_body_bytes, body_read_error) = match read_upstream_error_body(
                             resp,
                             response_timeout_for(&config.global.timeouts, channel),
+                            crate::config::request_timeout_is_enabled(&config.version),
                         )
                         .await
                         {
@@ -4304,6 +4327,35 @@ async fn process_request(
                         return protocol_error_response(
                             route,
                             StatusCode::GATEWAY_TIMEOUT,
+                            &error_chain,
+                        );
+                    }
+                    if !method_allows_ambiguous_retry(&parts.method) && !e.is_connect() {
+                        let elapsed = start.elapsed().as_millis() as f64;
+                        state
+                            .metrics
+                            .error_total
+                            .with_label_values(&[route_label, &router_name])
+                            .inc();
+                        state.database.log_error(route_label, &router_name);
+                        state.usage_logger.log_failure(
+                            request_id.as_deref(),
+                            &team_id,
+                            &router_name,
+                            matched_rule.as_deref(),
+                            &channel.name,
+                            model_name_str,
+                            Some(elapsed),
+                            fallback_triggered,
+                            StatusCode::BAD_GATEWAY.as_u16() as i64,
+                            &error_chain,
+                            None,
+                            None,
+                            &client_info,
+                        );
+                        return protocol_error_response(
+                            route,
+                            StatusCode::BAD_GATEWAY,
                             &error_chain,
                         );
                     }
@@ -4604,6 +4656,7 @@ async fn process_gemini_native_direct_pass(
         let (error_body_bytes, body_read_error) = match read_upstream_error_body(
             resp,
             response_timeout_for(&config.global.timeouts, channel),
+            crate::config::request_timeout_is_enabled(&config.version),
         )
         .await
         {
@@ -5425,7 +5478,7 @@ mod tests {
     }
 
     #[test]
-    fn timeout_helpers_prefer_channel_overrides() {
+    fn request_and_response_timeout_helpers_prefer_channel_overrides() {
         let global = Timeouts {
             connect_ms: 1000,
             request_ms: 10_000,
@@ -5455,6 +5508,8 @@ mod tests {
         );
 
         channel.timeouts = Some(Timeouts {
+            // connect_ms is client-wide and remains controlled by the global
+            // timeout; only request_ms and response_ms are resolved per channel.
             connect_ms: 1,
             request_ms: 111,
             response_ms: 222,
@@ -5502,12 +5557,12 @@ mod tests {
     }
 
     #[test]
-    fn body_failure_retries_only_safe_read_methods() {
-        assert!(method_allows_body_failure_retry(&Method::GET));
-        assert!(method_allows_body_failure_retry(&Method::HEAD));
-        assert!(!method_allows_body_failure_retry(&Method::POST));
-        assert!(!method_allows_body_failure_retry(&Method::PUT));
-        assert!(!method_allows_body_failure_retry(&Method::DELETE));
+    fn ambiguous_failures_retry_only_safe_read_methods() {
+        assert!(method_allows_ambiguous_retry(&Method::GET));
+        assert!(method_allows_ambiguous_retry(&Method::HEAD));
+        assert!(!method_allows_ambiguous_retry(&Method::POST));
+        assert!(!method_allows_ambiguous_retry(&Method::PUT));
+        assert!(!method_allows_ambiguous_retry(&Method::DELETE));
     }
 
     #[tokio::test]
@@ -5553,6 +5608,7 @@ mod tests {
         });
 
         let mut config = create_test_config();
+        config.version = "1.1".to_string();
         Arc::make_mut(&mut config.channels)[0].base_url = format!("http://{addr}/v1");
         config.global.timeouts.response_ms = 35;
         let (dir, database) = create_test_database();
@@ -5595,6 +5651,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_error_body_uses_chunk_inactivity_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|| async {
+                let slow_stream = futures::stream::unfold(0, |index| async move {
+                    if index >= 4 {
+                        None
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        Some((
+                            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x")),
+                            index + 1,
+                        ))
+                    }
+                });
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from_stream(slow_stream))
+                    .unwrap()
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut config = create_test_config();
+        config.version = "1.0".to_string();
+        config.global.timeouts.response_ms = 150;
+        Arc::make_mut(&mut config.channels)[0].base_url = format!("http://{addr}/v1");
+        let (_dir, state) = create_test_state(config);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .body(Body::from(r#"{"model":"gpt-4"}"#))
+            .unwrap();
+
+        let response = handle_openai(State(state), req).await;
+
+        handle.abort();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"xxxx");
+    }
+
+    #[tokio::test]
     async fn upstream_error_body_read_enforces_size_cap() {
         let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
         let stream =
@@ -5605,7 +5710,7 @@ mod tests {
             .unwrap();
         let response = reqwest::Response::from(response);
 
-        let err = read_upstream_error_body(response, Duration::ZERO)
+        let err = read_upstream_error_body(response, Duration::ZERO, true)
             .await
             .expect_err("an error body larger than the cap must be rejected");
         assert!(err.contains("exceeded"));

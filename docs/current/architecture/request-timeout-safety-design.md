@@ -20,8 +20,11 @@ the resulting body error into the existing protocol-specific `502` response.
 An Apex-owned `request_ms` deadline can expire after the upstream accepted the
 request. Because completion is then unknown, that timeout must return `504`
 immediately. It must not retry the same channel or enter a fallback channel.
-Existing retry behavior for reqwest transport errors and configured HTTP status
-codes is unchanged.
+For non-read methods, reqwest transport errors that occur after connection
+establishment are also treated as ambiguous and returned immediately. Clear
+connection-establishment failures may still retry because the upstream did not
+receive the request. Existing retry behavior for safe reads and configured HTTP
+status codes is unchanged.
 
 ### Do not replay state-changing requests after success headers
 
@@ -48,6 +51,7 @@ Configuration versions `1` and `1.0` retain the historical behavior where
 inactivity deadline rather than a total body deadline. The gateway logs a
 warning explaining how to opt in. Version `1.1` and later enforce `request_ms`,
 including channel overrides, and enforce the total non-SSE body deadline.
+This version split applies to both success and error response bodies.
 
 Configuration versions must contain one or more numeric dot-separated
 components. Invalid versions are rejected during configuration loading instead

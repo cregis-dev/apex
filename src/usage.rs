@@ -488,12 +488,7 @@ pub async fn wrap_response(
     client_info: crate::utils::ClientInfo,
     body_read_timeout: Option<Duration>,
 ) -> Response<Body> {
-    let is_sse = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.contains("text/event-stream"))
-        .unwrap_or(false);
+    let is_sse = crate::providers::is_sse_response(response.headers());
 
     let (parts, body) = response.into_parts();
 
@@ -827,7 +822,7 @@ mod tests {
         });
         let response = Response::builder()
             .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
+            .header("content-type", "Text/Event-Stream; Charset=UTF-8")
             .body(Body::from_stream(slow_stream))
             .unwrap();
 
