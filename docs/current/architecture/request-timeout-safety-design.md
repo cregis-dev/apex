@@ -23,11 +23,41 @@ immediately. It must not retry the same channel or enter a fallback channel.
 Existing retry behavior for reqwest transport errors and configured HTTP status
 codes is unchanged.
 
+### Do not replay non-idempotent requests after success headers
+
+Once the upstream has returned a successful response status, a later body read
+failure is no longer safe to replay for `POST` and other non-idempotent methods.
+Those requests return the protocol-specific body-read error immediately and do
+not retry the same channel or enter fallback. `GET` and `HEAD` requests retain
+the existing body-failure retry behavior because replaying them is safe.
+
+### Classify body deadlines from the actual response
+
+SSE responses continue to use `response_ms` as a per-chunk inactivity deadline.
+Non-SSE responses use it as a total body-read deadline even when the request
+contained `stream: true`, because an upstream may ignore the requested mode and
+return ordinary JSON. Gemini native `streamGenerateContent` without SSE remains
+the explicit exception: its chunked JSON response is a real stream and only the
+per-chunk inactivity deadline applies.
+
 ### Gate the new semantics by config version
 
 Configuration versions `1` and `1.0` retain the historical behavior where
-`request_ms` is not enforced. The gateway logs a warning explaining how to opt
-in. Version `1.1` and later enforce `request_ms`, including channel overrides.
+`request_ms` is not enforced and non-SSE `response_ms` remains a per-chunk
+inactivity deadline rather than a total body deadline. The gateway logs a
+warning explaining how to opt in. Version `1.1` and later enforce `request_ms`,
+including channel overrides, and enforce the total non-SSE body deadline.
+
+Configuration versions must contain one or more numeric dot-separated
+components. Invalid versions are rejected during configuration loading instead
+of silently disabling timeout protection.
+
+### Keep protocol and memory limits enforceable
+
+Gemini-native HTTP `504` errors use the Google canonical status
+`DEADLINE_EXCEEDED`. The SSE usage parser checks a line's size before copying or
+parsing it, so a newline-terminated oversized chunk cannot bypass the 1 MiB line
+limit.
 
 Newly generated and distributed configuration templates use version `1.1` and
 `request_ms: 300000`. Existing values are never rewritten heuristically because
@@ -40,7 +70,13 @@ explicit choice.
   buffer before the full body is accumulated.
 - A response-header timeout sends exactly one non-idempotent upstream request,
   does not call fallback, and returns `504`.
-- Version `1` and `1.0` disable the header deadline; version `1.1` enables global
-  and channel-level values, while zero still means disabled.
+- A successful non-idempotent request whose body later fails is not replayed;
+  idempotent `GET` and `HEAD` requests may still retry.
+- A non-SSE response remains subject to the total body deadline even if the
+  client requested streaming; Gemini chunked JSON streaming remains exempt.
+- Version `1` and `1.0` disable the header and total-body deadlines; version
+  `1.1` enables global and channel-level values, while zero still means disabled.
+- Invalid configuration versions fail loading, oversized SSE lines are dropped
+  before copying, and Gemini `504` responses report `DEADLINE_EXCEEDED`.
 - `apex init`, examples, installers, and timeout documentation agree on version
   `1.1` and the 300-second request-header timeout.
