@@ -16,6 +16,7 @@ async fn test_hot_reload_routing() {
             let mut buf = [0; 1024];
             let _ = socket.read(&mut buf).await;
             let _ = tx1.send(()).await;
+            tokio::time::sleep(Duration::from_millis(80)).await;
             let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
             let _ = socket.write_all(response.as_bytes()).await;
         }
@@ -27,6 +28,7 @@ async fn test_hot_reload_routing() {
             let mut buf = [0; 1024];
             let _ = socket.read(&mut buf).await;
             let _ = tx2.send(()).await;
+            tokio::time::sleep(Duration::from_millis(80)).await;
             let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
             let _ = socket.write_all(response.as_bytes()).await;
         }
@@ -42,7 +44,7 @@ async fn test_hot_reload_routing() {
         "global": {
             "listen": "127.0.0.1:9080",
             "auth": { "mode": "none", "keys": null },
-            "timeouts": { "connect_ms": 1000, "request_ms": 3000, "response_ms": 3000 },
+            "timeouts": { "connect_ms": 1000, "request_ms": 20, "response_ms": 3000 },
             "retries": { "max_attempts": 3, "backoff_ms": 100, "retry_on_status": [500, 502, 503, 504] }
         },
         "hot_reload": {
@@ -115,11 +117,11 @@ async fn test_hot_reload_routing() {
 
     // 5. Update config: add channel2 (9082) and route "gpt-new" to it
     let updated_config = r#"{
-        "version": "1",
+        "version": "1.1",
         "global": {
             "listen": "127.0.0.1:9080",
             "auth": { "mode": "none", "keys": null },
-            "timeouts": { "connect_ms": 1000, "request_ms": 3000, "response_ms": 3000 },
+            "timeouts": { "connect_ms": 1000, "request_ms": 20, "response_ms": 3000 },
             "retries": { "max_attempts": 3, "backoff_ms": 100, "retry_on_status": [500, 502, 503, 504] }
         },
         "hot_reload": {
@@ -186,7 +188,7 @@ async fn test_hot_reload_routing() {
         .await
         .unwrap();
 
-    assert!(resp.status().is_success());
+    assert_eq!(resp.status(), reqwest::StatusCode::GATEWAY_TIMEOUT);
     // Verify channel2 received request
     assert!(rx2.try_recv().is_ok());
     // Channel1 should not receive it - wait, try_recv consumes the item if present

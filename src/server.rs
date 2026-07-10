@@ -187,6 +187,7 @@ async fn watch_config(path: PathBuf, state: Arc<AppState>) -> notify::Result<()>
                     error!("Refusing to apply reloaded config: {}", e);
                     continue;
                 }
+                warn_if_legacy_request_timeout(&new_config);
                 // Update config
                 {
                     let mut config_guard = state.config.write().unwrap();
@@ -219,6 +220,7 @@ async fn watch_config(path: PathBuf, state: Arc<AppState>) -> notify::Result<()>
 }
 
 pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
+    warn_if_legacy_request_timeout(&config);
     let mut builder = reqwest::Client::builder();
     if config.global.timeouts.connect_ms > 0 {
         builder = builder.connect_timeout(Duration::from_millis(config.global.timeouts.connect_ms));
@@ -259,6 +261,16 @@ pub fn build_state(config: Config) -> Result<Arc<AppState>, anyhow::Error> {
         database,
         web_dir,
     }))
+}
+
+fn warn_if_legacy_request_timeout(config: &Config) {
+    if !crate::config::request_timeout_is_enabled(&config.version) {
+        tracing::warn!(
+            config_version = %config.version,
+            configured_request_ms = config.global.timeouts.request_ms,
+            "request_ms is disabled for legacy config versions; review the timeout and set version to 1.1 to enable the response-header deadline"
+        );
+    }
 }
 
 pub fn build_app(state: Arc<AppState>) -> Router {
@@ -3233,7 +3245,9 @@ fn protocol_error_response(route: RouteKind, status: StatusCode, message: &str) 
             StatusCode::FORBIDDEN => "PERMISSION_DENIED",
             StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
             StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
-            StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
+            StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT => "UNAVAILABLE",
             _ => "INVALID_ARGUMENT",
         };
         gemini_native_error_response(status, message, gemini_status)
@@ -3296,6 +3310,10 @@ impl std::error::Error for UpstreamRequestError {
 }
 
 impl UpstreamRequestError {
+    fn is_header_timeout(&self) -> bool {
+        matches!(self, Self::Timeout(_))
+    }
+
     fn is_timeout(&self) -> bool {
         match self {
             Self::Reqwest(error) => error.is_timeout(),
@@ -3476,8 +3494,18 @@ fn response_timeout_for(global: &Timeouts, channel: &Channel) -> Duration {
     Duration::from_millis(channel.timeouts.as_ref().unwrap_or(global).response_ms)
 }
 
-fn request_timeout_for(global: &Timeouts, channel: &Channel) -> Duration {
-    Duration::from_millis(channel.timeouts.as_ref().unwrap_or(global).request_ms)
+fn request_timeout_for(config: &Config, channel: &Channel) -> Duration {
+    if !crate::config::request_timeout_is_enabled(&config.version) {
+        return Duration::ZERO;
+    }
+
+    Duration::from_millis(
+        channel
+            .timeouts
+            .as_ref()
+            .unwrap_or(&config.global.timeouts)
+            .request_ms,
+    )
 }
 
 async fn execute_upstream_request(
@@ -4008,7 +4036,7 @@ async fn process_request(
             let request_timeout = if is_gemini_native_upload {
                 Duration::ZERO
             } else {
-                request_timeout_for(&config.global.timeouts, channel)
+                request_timeout_for(&config, channel)
             };
             let resp_result =
                 execute_upstream_request(&state.client, req_built, request_timeout).await;
@@ -4247,6 +4275,35 @@ async fn process_request(
                     state
                         .access_audit
                         .audit(&channel.provider_type, route, false);
+                    if e.is_header_timeout() {
+                        let elapsed = start.elapsed().as_millis() as f64;
+                        state
+                            .metrics
+                            .error_total
+                            .with_label_values(&[route_label, &router_name])
+                            .inc();
+                        state.database.log_error(route_label, &router_name);
+                        state.usage_logger.log_failure(
+                            request_id.as_deref(),
+                            &team_id,
+                            &router_name,
+                            matched_rule.as_deref(),
+                            &channel.name,
+                            model_name_str,
+                            Some(elapsed),
+                            fallback_triggered,
+                            StatusCode::GATEWAY_TIMEOUT.as_u16() as i64,
+                            &error_chain,
+                            None,
+                            None,
+                            &client_info,
+                        );
+                        return protocol_error_response(
+                            route,
+                            StatusCode::GATEWAY_TIMEOUT,
+                            &error_chain,
+                        );
+                    }
                     if attempt + 1 < max_attempts {
                         tracing::warn!(
                             "Retry Triggered: attempt {}/{} due to error",
@@ -4494,12 +4551,17 @@ async fn process_gemini_native_direct_pass(
     let request_timeout = if is_gemini_native_upload_path(&path) {
         Duration::ZERO
     } else {
-        request_timeout_for(&config.global.timeouts, channel)
+        request_timeout_for(&config, channel)
     };
     let resp = match execute_upstream_request(&state.client, req_built, request_timeout).await {
         Ok(resp) => resp,
         Err(err) => {
             let message = format_error_chain(&err);
+            let status = if err.is_header_timeout() {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
             state.usage_logger.log_failure(
                 request_id.as_deref(),
                 &team_id,
@@ -4509,13 +4571,13 @@ async fn process_gemini_native_direct_pass(
                 &routing_model,
                 None,
                 false,
-                StatusCode::BAD_GATEWAY.as_u16() as i64,
+                status.as_u16() as i64,
                 &message,
                 None,
                 None,
                 &client_info,
             );
-            return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
+            return protocol_error_response(route, status, &message);
         }
     };
 
@@ -4608,7 +4670,10 @@ mod tests {
     use super::*;
     use crate::config::{Channel, Global, ProviderType, Retries, Timeouts};
     use crate::providers::{AccessAudit, RateLimiter, RouteKind};
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tempfile::{TempDir, tempdir};
 
     struct MockAccessAudit {
@@ -4748,6 +4813,254 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn response_header_timeout_does_not_retry_or_fallback_after_post_is_sent() {
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let primary_counter = primary_calls.clone();
+        let primary_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let primary_addr = primary_listener.local_addr().unwrap();
+        let primary_app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move || {
+                let primary_counter = primary_counter.clone();
+                async move {
+                    primary_counter.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    axum::Json(serde_json::json!({
+                        "id": "primary-response",
+                        "choices": []
+                    }))
+                }
+            }),
+        );
+        let primary_handle = tokio::spawn(async move {
+            axum::serve(primary_listener, primary_app).await.unwrap();
+        });
+
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let fallback_counter = fallback_calls.clone();
+        let fallback_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fallback_addr = fallback_listener.local_addr().unwrap();
+        let fallback_app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move || {
+                let fallback_counter = fallback_counter.clone();
+                async move {
+                    fallback_counter.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(serde_json::json!({
+                        "id": "fallback-response",
+                        "choices": []
+                    }))
+                }
+            }),
+        );
+        let fallback_handle = tokio::spawn(async move {
+            axum::serve(fallback_listener, fallback_app).await.unwrap();
+        });
+
+        let mut config = create_test_config();
+        config.version = "1.1".to_string();
+        config.global.timeouts.request_ms = 20;
+        config.global.retries.max_attempts = 3;
+        config.global.retries.backoff_ms = 1;
+        config.channels = Arc::new(vec![
+            Channel {
+                name: "primary-channel".to_string(),
+                provider_type: ProviderType::Openai,
+                base_url: format!("http://{primary_addr}"),
+                api_key: "sk-primary".to_string(),
+                anthropic_base_url: None,
+                headers: None,
+                model_map: None,
+                timeouts: None,
+            },
+            Channel {
+                name: "fallback-channel".to_string(),
+                provider_type: ProviderType::Openai,
+                base_url: format!("http://{fallback_addr}"),
+                api_key: "sk-fallback".to_string(),
+                anthropic_base_url: None,
+                headers: None,
+                model_map: None,
+                timeouts: None,
+            },
+        ]);
+        config.routers = Arc::new(vec![crate::config::Router {
+            name: "test-router".to_string(),
+            rules: vec![crate::config::RouterRule {
+                match_spec: crate::config::MatchSpec {
+                    models: vec!["*".to_string()],
+                },
+                channels: vec![crate::config::TargetChannel {
+                    name: "primary-channel".to_string(),
+                    weight: 1,
+                }],
+                strategy: "priority".to_string(),
+            }],
+            channels: vec![],
+            strategy: "priority".to_string(),
+            metadata: None,
+            fallback_channels: vec!["fallback-channel".to_string()],
+        }]);
+
+        let (_dir, database) = create_test_database();
+        let state = Arc::new(AppState {
+            config: Arc::new(RwLock::new(config)),
+            metrics: Arc::new(MetricsState::new().unwrap()),
+            providers: Arc::new(ProviderRegistry::new()),
+            access_audit: Arc::new(MockAccessAudit {
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            rate_limiter: Arc::new(MockRateLimiter { allow: true }),
+            team_rate_limiter: Arc::new(TeamRateLimiter::new()),
+            selector: Arc::new(RouterSelector::new()),
+            gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
+            client: reqwest::Client::new(),
+            usage_logger: Arc::new(UsageLogger::new(database.clone())),
+            database,
+            web_dir: "target/web".to_string(),
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .body(Body::from(r#"{"model":"gpt-test","messages":[]}"#))
+            .unwrap();
+
+        let response = handle_openai(State(state), request).await;
+        let observed = (
+            response.status(),
+            primary_calls.load(Ordering::SeqCst),
+            fallback_calls.load(Ordering::SeqCst),
+        );
+
+        primary_handle.abort();
+        fallback_handle.abort();
+        assert_eq!(observed, (StatusCode::GATEWAY_TIMEOUT, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn legacy_config_version_disables_response_header_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/slow",
+            axum::routing::get(|| async {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                "late"
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut config = create_test_config();
+        config.version = "1.0".to_string();
+        config.global.timeouts.request_ms = 10;
+        let channel = &config.channels[0];
+        let timeout = request_timeout_for(&config, channel);
+
+        let client = reqwest::Client::new();
+        let request = client.get(format!("http://{addr}/slow")).build().unwrap();
+        let response = execute_upstream_request(&client, request, timeout)
+            .await
+            .expect("legacy config must preserve the pre-1.1 unlimited behavior");
+
+        handle.abort();
+        assert_eq!(timeout, Duration::ZERO);
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn gemini_direct_pass_uses_versioned_response_header_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/v1beta/interactions",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                axum::Json(serde_json::json!({"name": "interactions/test"}))
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut config = create_test_config();
+        config.version = "1.0".to_string();
+        config.global.timeouts.request_ms = 20;
+        config.channels = Arc::new(vec![Channel {
+            name: "gemini-channel".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: format!("http://{addr}"),
+            api_key: "gemini-key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        }]);
+        config.routers = Arc::new(vec![crate::config::Router {
+            name: "gemini-router".to_string(),
+            rules: vec![crate::config::RouterRule {
+                match_spec: crate::config::MatchSpec {
+                    models: vec!["gemini-native".to_string()],
+                },
+                channels: vec![crate::config::TargetChannel {
+                    name: "gemini-channel".to_string(),
+                    weight: 1,
+                }],
+                strategy: "priority".to_string(),
+            }],
+            channels: vec![],
+            strategy: "priority".to_string(),
+            metadata: None,
+            fallback_channels: vec![],
+        }]);
+
+        let (_dir, database) = create_test_database();
+        let state = Arc::new(AppState {
+            config: Arc::new(RwLock::new(config)),
+            metrics: Arc::new(MetricsState::new().unwrap()),
+            providers: Arc::new(ProviderRegistry::new()),
+            access_audit: Arc::new(MockAccessAudit {
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            rate_limiter: Arc::new(MockRateLimiter { allow: true }),
+            team_rate_limiter: Arc::new(TeamRateLimiter::new()),
+            selector: Arc::new(RouterSelector::new()),
+            gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
+            client: reqwest::Client::new(),
+            usage_logger: Arc::new(UsageLogger::new(database.clone())),
+            database,
+            web_dir: "target/web".to_string(),
+        });
+
+        let legacy_request = Request::builder()
+            .method("POST")
+            .uri("/gemini/v1beta/interactions")
+            .body(Body::from(r#"{"agent":"deep-research"}"#))
+            .unwrap();
+        let legacy_response = process_gemini_native_direct_pass(
+            state.clone(),
+            legacy_request,
+            "gemini-native".to_string(),
+        )
+        .await;
+        assert_eq!(legacy_response.status(), StatusCode::OK);
+
+        state.config.write().unwrap().version = "1.1".to_string();
+        let current_request = Request::builder()
+            .method("POST")
+            .uri("/gemini/v1beta/interactions")
+            .body(Body::from(r#"{"agent":"deep-research"}"#))
+            .unwrap();
+        let current_response =
+            process_gemini_native_direct_pass(state, current_request, "gemini-native".to_string())
+                .await;
+
+        handle.abort();
+        assert_eq!(current_response.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[tokio::test]
     async fn upstream_request_timeout_zero_disables_bound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -4833,9 +5146,12 @@ mod tests {
             model_map: None,
             timeouts: None,
         };
+        let mut config = create_test_config();
+        config.version = "1.1".to_string();
+        config.global.timeouts = global.clone();
 
         assert_eq!(
-            request_timeout_for(&global, &channel),
+            request_timeout_for(&config, &channel),
             Duration::from_millis(10_000)
         );
         assert_eq!(
@@ -4849,13 +5165,16 @@ mod tests {
             response_ms: 222,
         });
         assert_eq!(
-            request_timeout_for(&global, &channel),
+            request_timeout_for(&config, &channel),
             Duration::from_millis(111)
         );
         assert_eq!(
             response_timeout_for(&global, &channel),
             Duration::from_millis(222)
         );
+
+        config.version = "1.0".to_string();
+        assert_eq!(request_timeout_for(&config, &channel), Duration::ZERO);
     }
 
     #[test]

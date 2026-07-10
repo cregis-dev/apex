@@ -5,6 +5,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+pub const CURRENT_CONFIG_VERSION: &str = "1.1";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub version: String,
@@ -205,6 +207,24 @@ pub struct Timeouts {
     pub connect_ms: u64,
     pub request_ms: u64,
     pub response_ms: u64,
+}
+
+/// `request_ms` was present but unenforced in config schema 1.0 and earlier.
+/// Version 1.1 is the explicit opt-in boundary for the response-header deadline.
+pub fn request_timeout_is_enabled(version: &str) -> bool {
+    let mut parts = version.trim().split('.');
+    let Some(major) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
+        return false;
+    };
+    let minor = match parts.next() {
+        Some(value) => match value.parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => return false,
+        },
+        None => 0,
+    };
+
+    major > 1 || (major == 1 && minor >= 1)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -496,7 +516,7 @@ pub fn save_config(path: &Path, config: &Config) -> anyhow::Result<()> {
 mod tests {
     use super::{
         Config, PLACEHOLDER_AUTH_KEYS, PLACEHOLDER_TEAM_KEYS, ProviderType,
-        check_no_placeholder_credentials,
+        check_no_placeholder_credentials, request_timeout_is_enabled,
     };
 
     fn parse_config(json: &str) -> Config {
@@ -645,6 +665,17 @@ mod tests {
 
         let parsed: ProviderType = serde_json::from_str("\"zai\"").unwrap();
         assert_eq!(parsed, ProviderType::Zai);
+    }
+
+    #[test]
+    fn request_timeout_semantics_start_at_config_version_1_1() {
+        assert!(!request_timeout_is_enabled("1"));
+        assert!(!request_timeout_is_enabled("1.0"));
+        assert!(!request_timeout_is_enabled("1.0.9"));
+        assert!(request_timeout_is_enabled("1.1"));
+        assert!(request_timeout_is_enabled("1.1.0"));
+        assert!(request_timeout_is_enabled("2.0"));
+        assert!(!request_timeout_is_enabled("invalid"));
     }
 
     #[test]

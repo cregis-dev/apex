@@ -132,7 +132,7 @@ else
     echo "生成示例配置文件：$TARGET_DIR/config.json"
     cat > "$TARGET_DIR/config.json" << EOF
 {
-  "version": "1.0",
+  "version": "1.1",
   "logging": {
     "level": "info",
     "dir": "$TARGET_DIR/logs"
@@ -143,7 +143,7 @@ else
     "auth_keys": ["replace-with-dashboard-admin-key"],
     "timeouts": {
       "connect_ms": 10000,
-      "request_ms": 120000,
+      "request_ms": 300000,
       "response_ms": 300000
     },
     "retries": {

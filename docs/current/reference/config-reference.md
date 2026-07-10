@@ -19,7 +19,7 @@
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.1",
   "global": { ... },
   "logging": { ... },
   "data_dir": "...",
@@ -34,7 +34,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `version` | string | 是 | 配置文件版本，当前为 "1.0" |
+| `version` | string | 是 | 配置文件版本，当前为 "1.1" |
 | `global` | object | 是 | 全局服务器设置 |
 | `logging` | object | 否 | 日志配置，默认为 info 级别 |
 | `data_dir` | string | 否 | 运行数据目录，默认 `~/.apex/data` |
@@ -112,6 +112,8 @@
 | `keys` | array | API Key 列表，客户端通过 `X-API-Key` header 传递 |
 
 ### timeouts
+
+`request_ms` 从配置版本 `1.1` 开始执行。版本 `1` 和 `1.0` 保持升级前的兼容行为，即不限制等待上游响应头的时间；确认超时值合适后，将 `version` 更新为 `1.1` 即可显式启用。
 
 ```json
 "timeouts": {

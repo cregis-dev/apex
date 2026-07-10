@@ -118,13 +118,13 @@ pub fn build_config(env: &E2eEnv, config_path: &Path) -> Config {
         .collect::<Vec<_>>();
 
     Config {
-        version: "1.0".to_string(),
+        version: crate::config::CURRENT_CONFIG_VERSION.to_string(),
         global: Global {
             listen: env.listen.clone(),
             auth_keys: env.admin_key.clone().into_iter().collect(),
             timeouts: Timeouts {
                 connect_ms: 1_000,
-                request_ms: 30_000,
+                request_ms: 300_000,
                 response_ms: 30_000,
             },
             retries: Retries {
@@ -290,7 +290,7 @@ fn parse_timeouts(
 
     Ok(Some(Timeouts {
         connect_ms: connect_ms.unwrap_or(1_000),
-        request_ms: request_ms.unwrap_or(30_000),
+        request_ms: request_ms.unwrap_or(300_000),
         response_ms: response_ms.unwrap_or(30_000),
     }))
 }

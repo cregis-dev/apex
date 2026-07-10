@@ -1150,7 +1150,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
         anyhow::bail!("config already exists: {}", path.display());
     }
     let config = Config {
-        version: "1".to_string(),
+        version: crate::config::CURRENT_CONFIG_VERSION.to_string(),
         global: Global {
             listen: "0.0.0.0:12356".to_string(),
             auth_keys: vec![],

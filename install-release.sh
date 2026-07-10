@@ -412,7 +412,7 @@ else
     mkdir -p "$TARGET_DIR/data" "$TARGET_DIR/logs"
     cat > "$CONFIG_PATH" <<EOF
 {
-  "version": "1.0",
+  "version": "1.1",
   "logging": {
     "level": "info",
     "dir": "$TARGET_DIR/logs"
@@ -423,7 +423,7 @@ else
     "auth_keys": ["replace-with-admin-key"],
     "timeouts": {
       "connect_ms": 10000,
-      "request_ms": 120000,
+      "request_ms": 300000,
       "response_ms": 300000
     },
     "retries": {

@@ -73,7 +73,7 @@ cd tests/e2e && python run_e2e.py
 配置文件为 JSON 格式，主要结构:
 ```json
 {
-  "version": "1.0",
+  "version": "1.1",
   "global": { "listen": "0.0.0.0:12356", "auth": {...} },
   "channels": [...],
   "routers": [...],

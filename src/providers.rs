@@ -496,6 +496,12 @@ fn handle_openai_compatible_response(
 
         let future = stream
             .try_fold(Vec::new(), |mut acc, bytes| async move {
+                if acc.len().saturating_add(bytes.len()) > crate::usage::MAX_UPSTREAM_BODY_BYTES {
+                    return Err(io::Error::other(format!(
+                        "upstream response body exceeded {} bytes",
+                        crate::usage::MAX_UPSTREAM_BODY_BYTES
+                    )));
+                }
                 acc.extend_from_slice(&bytes);
                 Ok(acc)
             })
@@ -1058,6 +1064,36 @@ mod tests {
 
         handle.abort();
         assert!(item.is_err());
+    }
+
+    #[tokio::test]
+    async fn anthropic_non_sse_bridge_rejects_oversized_body_before_emitting_data() {
+        let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+        let chunk_count = crate::usage::MAX_UPSTREAM_BODY_BYTES / chunk.len() + 1;
+        let stream = futures::stream::iter(
+            (0..chunk_count).map(move |_| Ok::<_, std::io::Error>(chunk.clone())),
+        );
+        let response = axum::http::Response::builder()
+            .status(StatusCode::OK)
+            .body(reqwest::Body::wrap_stream(stream))
+            .unwrap();
+        let response = reqwest::Response::from(response);
+
+        let converted =
+            handle_openai_compatible_response(RouteKind::Anthropic, response, Duration::ZERO);
+        let mut body = converted.into_body().into_data_stream();
+        let first = body
+            .next()
+            .await
+            .expect("oversized body should yield an error item");
+
+        match first {
+            Err(_) => {}
+            Ok(bytes) => panic!(
+                "oversized body emitted an Ok chunk containing {} bytes",
+                bytes.len()
+            ),
+        }
     }
 
     #[test]
