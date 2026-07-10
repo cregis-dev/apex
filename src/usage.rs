@@ -129,6 +129,7 @@ struct UsageTrackerState {
     fallback_triggered: bool,
     client_info: crate::utils::ClientInfo,
     accumulated_data: String,
+    discarding_oversized_sse_line: bool,
 }
 
 impl UsageTrackerState {
@@ -160,25 +161,14 @@ impl UsageTrackerState {
             fallback_triggered,
             client_info: crate::utils::ClientInfo::default(),
             accumulated_data: String::new(),
+            discarding_oversized_sse_line: false,
         }
     }
 
     fn process_chunk(&mut self, chunk: &[u8], is_sse: bool) {
         if let Ok(s) = std::str::from_utf8(chunk) {
             if is_sse {
-                self.accumulated_data.push_str(s);
-                let mut start = 0;
-                while let Some(end) = self.accumulated_data[start..].find('\n') {
-                    let line = self.accumulated_data[start..start + end].to_string();
-                    self.process_sse_line(&line);
-                    start += end + 1;
-                }
-                if start > 0 {
-                    self.accumulated_data.drain(0..start);
-                }
-                if self.accumulated_data.len() > MAX_SSE_LINE_BYTES {
-                    self.accumulated_data = String::new();
-                }
+                self.process_sse_text(s);
             } else {
                 // For non-SSE, we expect the whole body or chunks of JSON.
                 // We'll accumulate everything and parse at the end,
@@ -187,6 +177,39 @@ impl UsageTrackerState {
                 // So this method might only be called for SSE or if we implemented a buffering stream for non-SSE.
                 // For simplicity, `wrap_response` handles non-SSE separately.
             }
+        }
+    }
+
+    fn process_sse_text(&mut self, mut input: &str) {
+        while !input.is_empty() {
+            if self.discarding_oversized_sse_line {
+                let Some(end) = input.find('\n') else {
+                    return;
+                };
+                self.discarding_oversized_sse_line = false;
+                input = &input[end + 1..];
+                continue;
+            }
+
+            let Some(end) = input.find('\n') else {
+                if self.accumulated_data.len().saturating_add(input.len()) <= MAX_SSE_LINE_BYTES {
+                    self.accumulated_data.push_str(input);
+                } else {
+                    self.accumulated_data = String::new();
+                    self.discarding_oversized_sse_line = true;
+                }
+                return;
+            };
+
+            let segment = &input[..end];
+            if self.accumulated_data.len().saturating_add(segment.len()) <= MAX_SSE_LINE_BYTES {
+                self.accumulated_data.push_str(segment);
+                let line = std::mem::take(&mut self.accumulated_data);
+                self.process_sse_line(&line);
+            } else {
+                self.accumulated_data = String::new();
+            }
+            input = &input[end + 1..];
         }
     }
 
@@ -787,6 +810,51 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn wrap_response_sse_ignores_total_deadline_while_chunks_keep_arriving() {
+        let (_dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let slow_stream = futures::stream::unfold(0, |index| async move {
+            if index >= 10 {
+                None
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Some((
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: {}\n\n")),
+                    index + 1,
+                ))
+            }
+        });
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(Body::from_stream(slow_stream))
+            .unwrap();
+
+        let wrapped = wrap_response(
+            response,
+            crate::providers::RouteKind::Openai,
+            Some("req-1".to_string()),
+            "team1".to_string(),
+            "r1".to_string(),
+            Some("m1-*".to_string()),
+            "openai".to_string(),
+            "gpt-test".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+            crate::utils::ClientInfo::default(),
+            Some(Duration::from_millis(35)),
+        )
+        .await;
+
+        let body = axum::body::to_bytes(wrapped.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.len(), 10 * b"data: {}\n\n".len());
+    }
+
     #[test]
     fn sse_buffer_is_bounded_for_newline_free_streams() {
         let (_dir, logger) = create_test_logger();
@@ -814,6 +882,42 @@ mod tests {
         // Later well-formed usage events still parse after the drop.
         state.process_chunk(
             b"\ndata: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n",
+            true,
+        );
+        assert_eq!(state.input_tokens, 3);
+        assert_eq!(state.output_tokens, 5);
+    }
+
+    #[test]
+    fn oversized_sse_line_is_dropped_before_usage_parsing() {
+        let (_dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let mut state = UsageTrackerState::new(
+            "team1".to_string(),
+            None,
+            "r1".to_string(),
+            None,
+            "ch".to_string(),
+            "m".to_string(),
+            logger,
+            metrics,
+            None,
+            false,
+        );
+
+        let padding = "a".repeat(MAX_SSE_LINE_BYTES);
+        let oversized_line = format!(
+            "data: {{\"usage\":{{\"prompt_tokens\":11,\"completion_tokens\":13}},\"padding\":\"{padding}\"}}\n"
+        );
+        state.process_chunk(oversized_line.as_bytes(), true);
+
+        assert_eq!(state.input_tokens, 0);
+        assert_eq!(state.output_tokens, 0);
+        assert!(state.accumulated_data.is_empty());
+        assert!(state.accumulated_data.capacity() <= MAX_SSE_LINE_BYTES);
+
+        state.process_chunk(
+            b"data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n",
             true,
         );
         assert_eq!(state.input_tokens, 3);

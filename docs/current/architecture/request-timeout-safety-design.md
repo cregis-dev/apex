@@ -23,13 +23,14 @@ immediately. It must not retry the same channel or enter a fallback channel.
 Existing retry behavior for reqwest transport errors and configured HTTP status
 codes is unchanged.
 
-### Do not replay non-idempotent requests after success headers
+### Do not replay state-changing requests after success headers
 
 Once the upstream has returned a successful response status, a later body read
-failure is no longer safe to replay for `POST` and other non-idempotent methods.
-Those requests return the protocol-specific body-read error immediately and do
-not retry the same channel or enter fallback. `GET` and `HEAD` requests retain
-the existing body-failure retry behavior because replaying them is safe.
+failure is no longer safe to replay for `POST`, `PUT`, `DELETE`, and other
+non-read methods. Those requests return the protocol-specific body-read error
+immediately and do not retry the same channel or enter fallback. `GET` and
+`HEAD` requests retain the existing body-failure retry behavior because
+replaying them is safe.
 
 ### Classify body deadlines from the actual response
 

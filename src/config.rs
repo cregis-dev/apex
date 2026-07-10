@@ -212,19 +212,30 @@ pub struct Timeouts {
 /// `request_ms` was present but unenforced in config schema 1.0 and earlier.
 /// Version 1.1 is the explicit opt-in boundary for the response-header deadline.
 pub fn request_timeout_is_enabled(version: &str) -> bool {
-    let mut parts = version.trim().split('.');
-    let Some(major) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
+    let Some((major, minor)) = parse_config_version(version) else {
         return false;
-    };
-    let minor = match parts.next() {
-        Some(value) => match value.parse::<u64>() {
-            Ok(value) => value,
-            Err(_) => return false,
-        },
-        None => 0,
     };
 
     major > 1 || (major == 1 && minor >= 1)
+}
+
+fn parse_config_version(version: &str) -> Option<(u64, u64)> {
+    let mut parts = version.split('.');
+    let parse_component = |component: &str| {
+        if component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        component.parse::<u64>().ok()
+    };
+    let major = parse_component(parts.next()?)?;
+    let minor = match parts.next() {
+        Some(component) => parse_component(component)?,
+        None => 0,
+    };
+    for component in parts {
+        parse_component(component)?;
+    }
+    Some((major, minor))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,6 +427,13 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
     let content = fs::read_to_string(path)?;
     let mut config = serde_json::from_str::<Config>(&content)?;
 
+    if parse_config_version(&config.version).is_none() {
+        return Err(anyhow::anyhow!(
+            "Invalid config version {:?}: expected numeric dot-separated components",
+            config.version
+        ));
+    }
+
     // Validate compliance configuration if present
     if let Some(ref compliance) = config.compliance {
         compliance
@@ -516,8 +534,17 @@ pub fn save_config(path: &Path, config: &Config) -> anyhow::Result<()> {
 mod tests {
     use super::{
         Config, PLACEHOLDER_AUTH_KEYS, PLACEHOLDER_TEAM_KEYS, ProviderType,
-        check_no_placeholder_credentials, request_timeout_is_enabled,
+        check_no_placeholder_credentials, load_config, request_timeout_is_enabled, save_config,
     };
+
+    fn load_config_with_version(version: &str) -> anyhow::Result<Config> {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let mut config = config_with(&[], &[]);
+        config.version = version.to_string();
+        save_config(&path, &config).unwrap();
+        load_config(&path)
+    }
 
     fn parse_config(json: &str) -> Config {
         serde_json::from_str(json).unwrap()
@@ -676,6 +703,23 @@ mod tests {
         assert!(request_timeout_is_enabled("1.1.0"));
         assert!(request_timeout_is_enabled("2.0"));
         assert!(!request_timeout_is_enabled("invalid"));
+    }
+
+    #[test]
+    fn load_config_rejects_non_numeric_versions() {
+        for version in ["v1.1", "1.x", "", "+1.1", "1.+1", "18446744073709551616.1"] {
+            let error = load_config_with_version(version).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains("version"), "{version:?}: {message}");
+        }
+    }
+
+    #[test]
+    fn load_config_accepts_numeric_dot_separated_versions() {
+        for version in ["1", "1.0", "1.1", "1.1.0", "2.0"] {
+            let config = load_config_with_version(version).unwrap();
+            assert_eq!(config.version, version);
+        }
     }
 
     #[test]

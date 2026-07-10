@@ -3245,9 +3245,8 @@ fn protocol_error_response(route: RouteKind, status: StatusCode, message: &str) 
             StatusCode::FORBIDDEN => "PERMISSION_DENIED",
             StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
             StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
-            StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT => "UNAVAILABLE",
+            StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
+            StatusCode::GATEWAY_TIMEOUT => "DEADLINE_EXCEEDED",
             _ => "INVALID_ARGUMENT",
         };
         gemini_native_error_response(status, message, gemini_status)
@@ -3508,6 +3507,27 @@ fn request_timeout_for(config: &Config, channel: &Channel) -> Duration {
     )
 }
 
+fn response_body_total_timeout_for(
+    config: &Config,
+    channel: &Channel,
+    route: RouteKind,
+    path: &str,
+) -> Option<Duration> {
+    if !crate::config::request_timeout_is_enabled(&config.version) {
+        return None;
+    }
+
+    if matches!(route, RouteKind::GeminiNative) && path.contains(":streamGenerateContent") {
+        return None;
+    }
+
+    Some(response_timeout_for(&config.global.timeouts, channel))
+}
+
+fn method_allows_body_failure_retry(method: &Method) -> bool {
+    matches!(*method, Method::GET | Method::HEAD)
+}
+
 async fn execute_upstream_request(
     client: &reqwest::Client,
     request: reqwest::Request,
@@ -3528,22 +3548,6 @@ async fn execute_upstream_request(
 
 fn is_gemini_native_upload_path(path: &str) -> bool {
     path.contains(":uploadToFileSearchStore") || path.starts_with("/gemini/upload/")
-}
-
-/// Whether the client asked for a streamed answer. Streaming responses are not
-/// always SSE (Gemini `streamGenerateContent` without `alt=sse` streams a
-/// chunked JSON array), so they must not be buffered under a total deadline;
-/// stalls are still bounded by the per-chunk timeout in `handle_response`.
-fn request_wants_stream(route: RouteKind, path: &str, body: &Bytes) -> bool {
-    match route {
-        RouteKind::GeminiNative => path.contains(":streamGenerateContent"),
-        RouteKind::Openai | RouteKind::Anthropic => {
-            serde_json::from_slice::<serde_json::Value>(body)
-                .ok()
-                .and_then(|value| value.get("stream").and_then(serde_json::Value::as_bool))
-                .unwrap_or(false)
-        }
-    }
 }
 
 async fn process_request(
@@ -3845,7 +3849,6 @@ async fn process_request(
     let query = parts.uri.query().map(|s| s.to_string());
     let is_gemini_native_upload =
         matches!(route, RouteKind::GeminiNative) && is_gemini_native_upload_path(&path);
-    let wants_stream = request_wants_stream(route, &path, &bytes);
     let max_attempts = if is_gemini_native_upload {
         1
     } else {
@@ -4059,11 +4062,8 @@ async fn process_request(
                     let status = resp.status();
                     if status.is_success() {
                         tracing::info!("Upstream Success: {} ({}ms)", status, elapsed);
-                        let body_read_timeout = if wants_stream {
-                            None
-                        } else {
-                            Some(response_timeout_for(&config.global.timeouts, channel))
-                        };
+                        let body_read_timeout =
+                            response_body_total_timeout_for(&config, channel, route, &path);
                         let mut response = adapter.handle_response(
                             route,
                             resp,
@@ -4110,6 +4110,9 @@ async fn process_request(
                             state
                                 .access_audit
                                 .audit(&channel.provider_type, route, false);
+                            if !method_allows_body_failure_retry(&parts.method) {
+                                return wrapped;
+                            }
                             if attempt + 1 < max_attempts {
                                 tokio::time::sleep(Duration::from_millis(
                                     config.global.retries.backoff_ms,
@@ -4654,7 +4657,7 @@ async fn process_gemini_native_direct_pass(
         Some(elapsed),
         false,
         client_info.clone(),
-        Some(response_timeout_for(&config.global.timeouts, channel)),
+        response_body_total_timeout_for(&config, channel, route, &path),
     )
     .await;
     state.access_audit.audit(
@@ -4781,6 +4784,27 @@ mod tests {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(Some(dir.path().to_string_lossy().to_string())).unwrap());
         (dir, db)
+    }
+
+    fn create_test_state(config: Config) -> (TempDir, Arc<AppState>) {
+        let (dir, database) = create_test_database();
+        let state = Arc::new(AppState {
+            config: Arc::new(RwLock::new(config)),
+            metrics: Arc::new(MetricsState::new().unwrap()),
+            providers: Arc::new(ProviderRegistry::new()),
+            access_audit: Arc::new(MockAccessAudit {
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            rate_limiter: Arc::new(MockRateLimiter { allow: true }),
+            team_rate_limiter: Arc::new(TeamRateLimiter::new()),
+            selector: Arc::new(RouterSelector::new()),
+            gemini_replay: Arc::new(GeminiAnthropicReplayCache::new()),
+            client: reqwest::Client::new(),
+            usage_logger: Arc::new(UsageLogger::new(database.clone())),
+            database,
+            web_dir: "target/web".to_string(),
+        });
+        (dir, state)
     }
 
     #[tokio::test]
@@ -4935,6 +4959,277 @@ mod tests {
         primary_handle.abort();
         fallback_handle.abort();
         assert_eq!(observed, (StatusCode::GATEWAY_TIMEOUT, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn successful_post_body_timeout_does_not_retry_or_fallback() {
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let primary_counter = primary_calls.clone();
+        let primary_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let primary_addr = primary_listener.local_addr().unwrap();
+        let primary_app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move || {
+                let primary_counter = primary_counter.clone();
+                async move {
+                    primary_counter.fetch_add(1, Ordering::SeqCst);
+                    let slow_stream = futures::stream::unfold(0, |index| async move {
+                        if index >= 20 {
+                            None
+                        } else {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            Some((
+                                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x")),
+                                index + 1,
+                            ))
+                        }
+                    });
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "application/json")
+                        .body(Body::from_stream(slow_stream))
+                        .unwrap()
+                }
+            }),
+        );
+        let primary_handle = tokio::spawn(async move {
+            axum::serve(primary_listener, primary_app).await.unwrap();
+        });
+
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let fallback_counter = fallback_calls.clone();
+        let fallback_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fallback_addr = fallback_listener.local_addr().unwrap();
+        let fallback_app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move || {
+                let fallback_counter = fallback_counter.clone();
+                async move {
+                    fallback_counter.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(serde_json::json!({"id": "fallback", "choices": []}))
+                }
+            }),
+        );
+        let fallback_handle = tokio::spawn(async move {
+            axum::serve(fallback_listener, fallback_app).await.unwrap();
+        });
+
+        let mut config = create_test_config();
+        config.version = "1.1".to_string();
+        config.global.timeouts.request_ms = 1_000;
+        config.global.timeouts.response_ms = 150;
+        config.global.retries.max_attempts = 3;
+        config.global.retries.backoff_ms = 1;
+        config.channels = Arc::new(vec![
+            Channel {
+                name: "primary-channel".to_string(),
+                provider_type: ProviderType::Openai,
+                base_url: format!("http://{primary_addr}"),
+                api_key: "sk-primary".to_string(),
+                anthropic_base_url: None,
+                headers: None,
+                model_map: None,
+                timeouts: None,
+            },
+            Channel {
+                name: "fallback-channel".to_string(),
+                provider_type: ProviderType::Openai,
+                base_url: format!("http://{fallback_addr}"),
+                api_key: "sk-fallback".to_string(),
+                anthropic_base_url: None,
+                headers: None,
+                model_map: None,
+                timeouts: None,
+            },
+        ]);
+        config.routers = Arc::new(vec![crate::config::Router {
+            name: "test-router".to_string(),
+            rules: vec![crate::config::RouterRule {
+                match_spec: crate::config::MatchSpec {
+                    models: vec!["*".to_string()],
+                },
+                channels: vec![crate::config::TargetChannel {
+                    name: "primary-channel".to_string(),
+                    weight: 1,
+                }],
+                strategy: "priority".to_string(),
+            }],
+            channels: vec![],
+            strategy: "priority".to_string(),
+            metadata: None,
+            fallback_channels: vec!["fallback-channel".to_string()],
+        }]);
+        let (_dir, state) = create_test_state(config);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"model":"gpt-test","messages":[],"stream":false}"#,
+            ))
+            .unwrap();
+
+        let response = handle_openai(State(state), request).await;
+        let observed = (
+            response.status(),
+            primary_calls.load(Ordering::SeqCst),
+            fallback_calls.load(Ordering::SeqCst),
+        );
+
+        primary_handle.abort();
+        fallback_handle.abort();
+        assert_eq!(observed, (StatusCode::BAD_GATEWAY, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn successful_get_body_timeout_retries_same_channel() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/v1beta/models",
+            axum::routing::get(move || {
+                let counter = counter.clone();
+                async move {
+                    if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                        let slow_stream = futures::stream::unfold(0, |index| async move {
+                            if index >= 20 {
+                                None
+                            } else {
+                                tokio::time::sleep(Duration::from_millis(20)).await;
+                                Some((
+                                    Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x")),
+                                    index + 1,
+                                ))
+                            }
+                        });
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/json")
+                            .body(Body::from_stream(slow_stream))
+                            .unwrap()
+                    } else {
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/json")
+                            .body(Body::from(r#"{"models":[]}"#))
+                            .unwrap()
+                    }
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut config = create_test_config();
+        config.version = "1.1".to_string();
+        config.global.timeouts.request_ms = 1_000;
+        config.global.timeouts.response_ms = 150;
+        config.global.retries.max_attempts = 2;
+        config.global.retries.backoff_ms = 1;
+        config.channels = Arc::new(vec![Channel {
+            name: "gemini-channel".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url: format!("http://{addr}"),
+            api_key: "gemini-key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        }]);
+        config.routers = Arc::new(vec![crate::config::Router {
+            name: "gemini-router".to_string(),
+            rules: vec![crate::config::RouterRule {
+                match_spec: crate::config::MatchSpec {
+                    models: vec!["gemini-native".to_string()],
+                },
+                channels: vec![crate::config::TargetChannel {
+                    name: "gemini-channel".to_string(),
+                    weight: 1,
+                }],
+                strategy: "priority".to_string(),
+            }],
+            channels: vec![],
+            strategy: "priority".to_string(),
+            metadata: None,
+            fallback_channels: vec![],
+        }]);
+        let (_dir, state) = create_test_state(config);
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri("/gemini/v1beta/models")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(OriginalModelName("gemini-native".to_string()));
+
+        let response = process_request(state, request, RouteKind::GeminiNative, None, None).await;
+
+        handle.abort();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn non_sse_total_body_deadline_uses_actual_response_and_config_version() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|| async {
+                let slow_stream = futures::stream::unfold(0, |index| async move {
+                    if index >= 20 {
+                        None
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        Some((
+                            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x")),
+                            index + 1,
+                        ))
+                    }
+                });
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(Body::from_stream(slow_stream))
+                    .unwrap()
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut config = create_test_config();
+        config.version = "1.1".to_string();
+        config.global.timeouts.request_ms = 1_000;
+        config.global.timeouts.response_ms = 150;
+        Arc::make_mut(&mut config.channels)[0].base_url = format!("http://{addr}/v1");
+        let (_dir, state) = create_test_state(config);
+
+        let current_request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"model":"gpt-test","messages":[],"stream":true}"#,
+            ))
+            .unwrap();
+        let current_response = handle_openai(State(state.clone()), current_request).await;
+        assert_eq!(current_response.status(), StatusCode::BAD_GATEWAY);
+
+        state.config.write().unwrap().version = "1.0".to_string();
+        let legacy_request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"model":"gpt-test","messages":[],"stream":false}"#,
+            ))
+            .unwrap();
+        let legacy_response = handle_openai(State(state), legacy_request).await;
+
+        handle.abort();
+        assert_eq!(legacy_response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -5175,44 +5470,58 @@ mod tests {
 
         config.version = "1.0".to_string();
         assert_eq!(request_timeout_for(&config, &channel), Duration::ZERO);
+        assert_eq!(
+            response_body_total_timeout_for(
+                &config,
+                &channel,
+                RouteKind::Openai,
+                "/v1/chat/completions"
+            ),
+            None
+        );
+
+        config.version = "1.1".to_string();
+        assert_eq!(
+            response_body_total_timeout_for(
+                &config,
+                &channel,
+                RouteKind::Openai,
+                "/v1/chat/completions"
+            ),
+            Some(Duration::from_millis(222))
+        );
+        assert_eq!(
+            response_body_total_timeout_for(
+                &config,
+                &channel,
+                RouteKind::GeminiNative,
+                "/v1beta/models/gemini-2.5-pro:streamGenerateContent"
+            ),
+            None
+        );
     }
 
     #[test]
-    fn request_wants_stream_detects_streaming_requests() {
-        let stream_true = Bytes::from(r#"{"model":"gpt-4","stream":true}"#);
-        let stream_false = Bytes::from(r#"{"model":"gpt-4","stream":false}"#);
-        let no_stream = Bytes::from(r#"{"model":"gpt-4"}"#);
+    fn body_failure_retries_only_safe_read_methods() {
+        assert!(method_allows_body_failure_retry(&Method::GET));
+        assert!(method_allows_body_failure_retry(&Method::HEAD));
+        assert!(!method_allows_body_failure_retry(&Method::POST));
+        assert!(!method_allows_body_failure_retry(&Method::PUT));
+        assert!(!method_allows_body_failure_retry(&Method::DELETE));
+    }
 
-        assert!(request_wants_stream(
-            RouteKind::Openai,
-            "/v1/chat/completions",
-            &stream_true
-        ));
-        assert!(request_wants_stream(
-            RouteKind::Anthropic,
-            "/v1/messages",
-            &stream_true
-        ));
-        assert!(!request_wants_stream(
-            RouteKind::Openai,
-            "/v1/chat/completions",
-            &stream_false
-        ));
-        assert!(!request_wants_stream(
-            RouteKind::Openai,
-            "/v1/chat/completions",
-            &no_stream
-        ));
-        assert!(request_wants_stream(
+    #[tokio::test]
+    async fn gemini_gateway_timeout_uses_deadline_exceeded_status() {
+        let response = protocol_error_response(
             RouteKind::GeminiNative,
-            "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
-            &Bytes::new()
-        ));
-        assert!(!request_wants_stream(
-            RouteKind::GeminiNative,
-            "/v1beta/models/gemini-2.5-pro:generateContent",
-            &Bytes::new()
-        ));
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream timed out",
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["status"], "DEADLINE_EXCEEDED");
     }
 
     #[tokio::test]

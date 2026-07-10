@@ -34,7 +34,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `version` | string | 是 | 配置文件版本，当前为 "1.1" |
+| `version` | string | 是 | 配置文件版本，当前为 "1.1"；必须由一个或多个以 `.` 分隔的纯数字段组成，例如 `1`、`1.1`、`1.1.0` |
 | `global` | object | 是 | 全局服务器设置 |
 | `logging` | object | 否 | 日志配置，默认为 info 级别 |
 | `data_dir` | string | 否 | 运行数据目录，默认 `~/.apex/data` |
@@ -113,7 +113,7 @@
 
 ### timeouts
 
-`request_ms` 从配置版本 `1.1` 开始执行。版本 `1` 和 `1.0` 保持升级前的兼容行为，即不限制等待上游响应头的时间；确认超时值合适后，将 `version` 更新为 `1.1` 即可显式启用。
+新的超时语义从配置版本 `1.1` 开始执行。版本 `1` 和 `1.0` 保持升级前的兼容行为：不限制等待上游响应头，非 SSE body 也只检查相邻 chunk 的等待时间；确认超时值合适后，将 `version` 更新为 `1.1`，即可启用响应头时限和非 SSE body 的总读取时限。
 
 ```json
 "timeouts": {
@@ -127,7 +127,7 @@
 |------|------|------|
 | `connect_ms` | number | 建立上游 TCP 连接的超时（毫秒）；`0` 表示不限制 |
 | `request_ms` | number | 从发出上游请求到收到**响应头**的超时（毫秒）；`0` 表示不限制。注意：非流式（`stream:false`）请求的响应头要等上游生成完整个回答后才返回，所以这个值实际约束的是整个生成时间，请配置得远大于最长预期生成时长。流式响应在响应头到达后不受此限制。Gemini 原生文件上传路由（`:uploadToFileSearchStore`）不受此限制（上传时长由客户端网速决定） |
-| `response_ms` | number | 响应 body 超时（毫秒）；`0` 表示不限制。流式响应（含 SSE 与 Gemini `streamGenerateContent` 的分块 JSON）用于相邻 chunk 间隔时限；非流式响应用于完整 body 读取总时限；上游错误响应的 body 读取也受此时限约束（超时后按空 body 转发真实状态码） |
+| `response_ms` | number | 响应 body 超时（毫秒）；`0` 表示不限制。流式响应（含 SSE 与 Gemini `streamGenerateContent` 的分块 JSON）用于相邻 chunk 间隔时限；配置版本 `1.1` 起，非流式响应用于完整 body 读取总时限；版本 `1`/`1.0` 仍只检查相邻 chunk。上游错误响应的 body 读取也受此时限约束（超时后按空 body 转发真实状态码） |
 
 ### retries
 
@@ -144,6 +144,8 @@
 | `max_attempts` | number | 最大重试次数 |
 | `backoff_ms` | number | 重试间隔（毫秒） |
 | `retry_on_status` | array | 需要重试的 HTTP 状态码 |
+
+上游已经返回成功响应头后，如果后续 body 读取失败，`POST`、`PUT`、`DELETE` 等非安全读取方法不会重试或切换 fallback，避免重复执行和重复计费；`GET` 与 `HEAD` 保留 body 失败后的重试能力。
 
 ### gemini_replay
 
