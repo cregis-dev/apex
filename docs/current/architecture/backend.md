@@ -365,7 +365,7 @@ pub struct UsageRecord {
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.1",
   "global": {
     "listen": "0.0.0.0:12356",
     "auth": {
@@ -374,7 +374,7 @@ pub struct UsageRecord {
     },
     "timeouts": {
       "connect_ms": 2000,
-      "request_ms": 30000,
+      "request_ms": 300000,
       "response_ms": 30000
     },
     "retries": {

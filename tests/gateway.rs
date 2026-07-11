@@ -210,7 +210,11 @@ async fn e2e_global_auth_required() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_fallback_on_failure() {
-    let upstream_bad = spawn_upstream_status(StatusCode::INTERNAL_SERVER_ERROR, "error").await;
+    let upstream_bad = spawn_upstream_status(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        r#"{"error":{"message":"forced failure"}}"#,
+    )
+    .await;
     let upstream_good = spawn_upstream_ok().await;
 
     let mut config = base_config();

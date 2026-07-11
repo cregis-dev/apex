@@ -178,7 +178,7 @@ sudo /opt/apex/apex upgrade --restart --install-dir /opt/apex
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.1",
   "global": {
     "listen": "0.0.0.0:12356",
     "auth": {
@@ -187,7 +187,7 @@ sudo /opt/apex/apex upgrade --restart --install-dir /opt/apex
     },
     "timeouts": {
       "connect_ms": 2000,
-      "request_ms": 30000,
+      "request_ms": 300000,
       "response_ms": 60000
     },
     "retries": {

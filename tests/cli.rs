@@ -196,7 +196,8 @@ fn test_init_creates_config() {
     // Verify content is valid JSON
     let content = fs::read_to_string(&config_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-    assert_eq!(json["version"], "1");
+    assert_eq!(json["version"], "1.1");
+    assert_eq!(json["global"]["timeouts"]["request_ms"], 300_000);
     assert_eq!(json["logging"]["level"], "info");
 }
 

@@ -19,7 +19,7 @@
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.1",
   "global": { ... },
   "logging": { ... },
   "data_dir": "...",
@@ -34,7 +34,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `version` | string | 是 | 配置文件版本，当前为 "1.0" |
+| `version` | string | 是 | 配置文件版本，当前为 "1.1"；必须由一个或多个以 `.` 分隔的纯数字段组成，例如 `1`、`1.1`、`1.1.0` |
 | `global` | object | 是 | 全局服务器设置 |
 | `logging` | object | 否 | 日志配置，默认为 info 级别 |
 | `data_dir` | string | 否 | 运行数据目录，默认 `~/.apex/data` |
@@ -113,19 +113,21 @@
 
 ### timeouts
 
+新的超时语义从配置版本 `1.1` 开始执行。版本 `1` 和 `1.0` 保持升级前的兼容行为：不限制等待上游响应头，非 SSE body 也只检查相邻 chunk 的等待时间；确认超时值合适后，将 `version` 更新为 `1.1`，即可启用响应头时限和非 SSE body 的总读取时限。
+
 ```json
 "timeouts": {
   "connect_ms": 1000,
-  "request_ms": 10000,
+  "request_ms": 300000,
   "response_ms": 30000
 }
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `connect_ms` | number | 连接超时（毫秒） |
-| `request_ms` | number | 请求超时（毫秒） |
-| `response_ms` | number | 响应超时（毫秒） |
+| `connect_ms` | number | 建立上游 TCP 连接的超时（毫秒）；`0` 表示不限制 |
+| `request_ms` | number | 从发出上游请求到收到**响应头**的超时（毫秒）；`0` 表示不限制。注意：非流式（`stream:false`）请求的响应头要等上游生成完整个回答后才返回，所以这个值实际约束的是整个生成时间，请配置得远大于最长预期生成时长。流式响应在响应头到达后不受此限制。Gemini 原生文件上传路由（`:uploadToFileSearchStore`）在客户端请求体仍在上传时不消耗此时限；请求体上传完成后，`request_ms` 开始限制等待上游响应头的时间 |
+| `response_ms` | number | 响应 body 超时（毫秒）；`0` 表示不限制。流式响应（含 SSE 与 Gemini `streamGenerateContent` 的分块 JSON）用于相邻 chunk 间隔时限；配置版本 `1.1` 起，非流式响应用于完整 body 读取总时限；版本 `1`/`1.0` 仍只检查相邻 chunk。上游错误响应的 body 读取也受此时限约束（超时后按空 body 转发真实状态码） |
 
 ### retries
 
@@ -142,6 +144,8 @@
 | `max_attempts` | number | 最大重试次数 |
 | `backoff_ms` | number | 重试间隔（毫秒） |
 | `retry_on_status` | array | 需要重试的 HTTP 状态码 |
+
+上游已经返回成功响应头后，如果后续 body 读取失败，`POST`、`PUT`、`DELETE` 等非安全读取方法不会重试或切换 fallback，避免重复执行和重复计费；`GET` 与 `HEAD` 保留 body 失败后的重试能力。
 
 ### gemini_replay
 
@@ -186,7 +190,7 @@ Channels 定义上游 LLM 提供商的连接配置。
     "api_key": "${OPENAI_API_KEY}",
     "headers": { "X-Custom": "value" },
     "model_map": { "gpt-4": "gpt-4-turbo" },
-    "timeouts": { "connect_ms": 2000, "request_ms": 60000, "response_ms": 60000 }
+    "timeouts": { "connect_ms": 2000, "request_ms": 300000, "response_ms": 60000 }
   }
 ]
 ```
@@ -200,7 +204,7 @@ Channels 定义上游 LLM 提供商的连接配置。
 | `anthropic_base_url` | string | 否 | 该 provider 在 Anthropic 协议下使用的基础 URL。适用于原生同时支持 OpenAI / Anthropic 协议的 provider，如 `deepseek`, `moonshot`, `minimax`, `ollama`, `openrouter`, `zai`。`zai` 推荐使用 OpenAI URL `https://api.z.ai/api/coding/paas/v4` 和 Anthropic URL `https://api.z.ai/api/anthropic` |
 | `headers` | object | 否 | 自定义 HTTP 头 |
 | `model_map` | object | 否 | 模型映射：key = 请求模型名，value = 实际提供商模型 |
-| `timeouts` | object | 否 | 通道级别超时覆盖 |
+| `timeouts` | object | 否 | 通道级别的 `request_ms`/`response_ms` 覆盖；该对象仍需提供完整三个字段，但当前连接超时由共享 HTTP client 的全局 `connect_ms` 控制，channel `connect_ms` 不会覆盖全局值 |
 
 ### Gemini native pass-through
 

@@ -52,8 +52,10 @@ APEX_UPSTREAM_2_HEADERS_JSON={"anthropic-version":"2023-06-01"}
     let config_path = dir.path().join("generated.e2e.config.json");
     let config = build_config(&env, &config_path);
 
+    assert_eq!(config.version, apex::config::CURRENT_CONFIG_VERSION);
     assert_eq!(config.global.listen, "127.0.0.1:22345");
     assert_eq!(config.global.auth_keys, vec!["sk-apex-admin".to_string()]);
+    assert_eq!(config.global.timeouts.request_ms, 300_000);
     assert_eq!(config.channels.len(), 2);
     assert_eq!(config.routers.len(), 1);
     assert_eq!(config.routers[0].rules[0].strategy, "priority");
@@ -103,6 +105,8 @@ APEX_UPSTREAM_1_MODEL=qwen2.5:latest
     let content = std::fs::read_to_string(&config_path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&content).unwrap();
 
+    assert_eq!(value["version"], "1.1");
+    assert_eq!(value["global"]["timeouts"]["request_ms"], 300_000);
     assert_eq!(value["teams"][0]["api_key"], "sk-apex-e2e-team");
     assert_eq!(value["channels"][0]["provider_type"], "ollama");
     assert_eq!(

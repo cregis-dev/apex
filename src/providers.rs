@@ -228,12 +228,41 @@ pub fn should_forward_response_header(name: &HeaderName) -> bool {
     !matches!(lower.as_str(), "transfer-encoding" | "content-length")
 }
 
+pub fn is_sse_response(headers: &HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/event-stream"))
+}
+
 pub fn error_response(status: StatusCode, message: &str) -> Response<Body> {
     Response::builder()
         .status(status)
         .header("content-type", "text/plain")
         .body(Body::from(message.to_string()))
         .unwrap()
+}
+
+/// Streams an upstream body with a per-chunk inactivity deadline. A zero
+/// timeout disables the deadline, matching the `0 = disabled` convention of
+/// the connect/request/body-read timeouts.
+fn upstream_body_stream(
+    resp: reqwest::Response,
+    timeout: Duration,
+) -> futures::stream::BoxStream<'static, Result<Bytes, io::Error>> {
+    if timeout.is_zero() {
+        return Box::pin(
+            resp.bytes_stream()
+                .map(|item| item.map_err(io::Error::other)),
+        );
+    }
+
+    Box::pin(resp.bytes_stream().timeout(timeout).map(|item| match item {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(err)) => Err(io::Error::other(err)),
+        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
+    }))
 }
 
 pub fn convert_response(resp: reqwest::Response, timeout: Duration) -> Response<Body> {
@@ -244,12 +273,7 @@ pub fn convert_response(resp: reqwest::Response, timeout: Duration) -> Response<
             builder = builder.header(name, value);
         }
     }
-    let stream = resp.bytes_stream().timeout(timeout);
-    let stream = stream.map(|item| match item {
-        Ok(Ok(bytes)) => Ok(bytes),
-        Ok(Err(err)) => Err(io::Error::other(err)),
-        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
-    });
+    let stream = upstream_body_stream(resp, timeout);
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "invalid response"))
@@ -448,20 +472,10 @@ fn handle_openai_compatible_response(
     timeout: Duration,
 ) -> Response<Body> {
     if matches!(route, RouteKind::Anthropic) {
-        let is_stream = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.contains("text/event-stream"))
-            .unwrap_or(false);
+        let is_stream = is_sse_response(resp.headers());
 
         if is_stream {
-            let stream = resp.bytes_stream().timeout(timeout);
-            let stream = stream.map(|item| match item {
-                Ok(Ok(bytes)) => Ok(bytes),
-                Ok(Err(err)) => Err(io::Error::other(err)),
-                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
-            });
+            let stream = upstream_body_stream(resp, timeout);
             let converted_stream = convert_openai_stream_to_anthropic(stream);
 
             return Response::builder()
@@ -481,15 +495,16 @@ fn handle_openai_compatible_response(
             }
         }
 
-        let stream = resp.bytes_stream().timeout(timeout);
-        let stream = stream.map(|item| match item {
-            Ok(Ok(bytes)) => Ok(bytes),
-            Ok(Err(err)) => Err(io::Error::other(err)),
-            Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
-        });
+        let stream = upstream_body_stream(resp, timeout);
 
         let future = stream
             .try_fold(Vec::new(), |mut acc, bytes| async move {
+                if acc.len().saturating_add(bytes.len()) > crate::usage::MAX_UPSTREAM_BODY_BYTES {
+                    return Err(io::Error::other(format!(
+                        "upstream response body exceeded {} bytes",
+                        crate::usage::MAX_UPSTREAM_BODY_BYTES
+                    )));
+                }
                 acc.extend_from_slice(&bytes);
                 Ok(acc)
             })
@@ -972,6 +987,58 @@ impl ProviderAdapter for DualProtocolAdapter {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sse_content_type_match_is_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("Text/Event-Stream; Charset=UTF-8"),
+        );
+
+        assert!(is_sse_response(&headers));
+    }
+
+    #[tokio::test]
+    async fn convert_response_zero_timeout_disables_chunk_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/slow",
+            axum::routing::get(|| async {
+                let stream = futures::stream::unfold(0, |index| async move {
+                    if index >= 3 {
+                        None
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        Some((
+                            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x")),
+                            index + 1,
+                        ))
+                    }
+                });
+                Response::new(Body::from_stream(stream))
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/slow"))
+            .send()
+            .await
+            .unwrap();
+        // response_ms = 0 must disable the per-chunk deadline instead of
+        // failing on the first pending poll.
+        let converted = convert_response(resp, Duration::ZERO);
+        let bytes = axum::body::to_bytes(converted.into_body(), 1024)
+            .await
+            .expect("zero timeout must let a slow-but-progressing body finish");
+
+        handle.abort();
+        assert_eq!(&bytes[..], b"xxx");
+    }
+
     #[tokio::test]
     async fn anthropic_stream_bridge_applies_response_timeout() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1011,6 +1078,36 @@ mod tests {
 
         handle.abort();
         assert!(item.is_err());
+    }
+
+    #[tokio::test]
+    async fn anthropic_non_sse_bridge_rejects_oversized_body_before_emitting_data() {
+        let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+        let chunk_count = crate::usage::MAX_UPSTREAM_BODY_BYTES / chunk.len() + 1;
+        let stream = futures::stream::iter(
+            (0..chunk_count).map(move |_| Ok::<_, std::io::Error>(chunk.clone())),
+        );
+        let response = axum::http::Response::builder()
+            .status(StatusCode::OK)
+            .body(reqwest::Body::wrap_stream(stream))
+            .unwrap();
+        let response = reqwest::Response::from(response);
+
+        let converted =
+            handle_openai_compatible_response(RouteKind::Anthropic, response, Duration::ZERO);
+        let mut body = converted.into_body().into_data_stream();
+        let first = body
+            .next()
+            .await
+            .expect("oversized body should yield an error item");
+
+        match first {
+            Err(_) => {}
+            Ok(bytes) => panic!(
+                "oversized body emitted an Ok chunk containing {} bytes",
+                bytes.len()
+            ),
+        }
     }
 
     #[test]

@@ -1150,13 +1150,16 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
         anyhow::bail!("config already exists: {}", path.display());
     }
     let config = Config {
-        version: "1".to_string(),
+        version: crate::config::CURRENT_CONFIG_VERSION.to_string(),
         global: Global {
             listen: "0.0.0.0:12356".to_string(),
             auth_keys: vec![],
             timeouts: Timeouts {
                 connect_ms: 2000,
-                request_ms: 30000,
+                // request_ms bounds time-to-response-headers; non-streaming
+                // completions only send headers after full generation, so this
+                // must stay well above realistic generation times (0 disables).
+                request_ms: 300000,
                 response_ms: 30000,
             },
             retries: Retries {

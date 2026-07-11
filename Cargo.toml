@@ -48,4 +48,5 @@ daemonize = "0.5.0"
 assert_cmd = "2.1.2"
 predicates = "3.1.4"
 tempfile = "3.25.0"
+tokio = { version = "1.43.0", features = ["test-util"] }
 tower = "0.5.2"

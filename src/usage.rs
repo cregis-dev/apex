@@ -11,6 +11,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 pub struct UsageLogger {
     db: Arc<Database>,
@@ -108,6 +109,11 @@ impl UsageLogger {
     }
 }
 
+/// A single SSE line larger than this cannot be a usage event; drop it
+/// instead of letting a newline-free stream grow the reassembly buffer
+/// without bound.
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+
 struct UsageTrackerState {
     request_id: Option<String>,
     team_id: String,
@@ -123,6 +129,7 @@ struct UsageTrackerState {
     fallback_triggered: bool,
     client_info: crate::utils::ClientInfo,
     accumulated_data: String,
+    discarding_oversized_sse_line: bool,
 }
 
 impl UsageTrackerState {
@@ -154,30 +161,46 @@ impl UsageTrackerState {
             fallback_triggered,
             client_info: crate::utils::ClientInfo::default(),
             accumulated_data: String::new(),
+            discarding_oversized_sse_line: false,
         }
     }
 
-    fn process_chunk(&mut self, chunk: &[u8], is_sse: bool) {
-        if let Ok(s) = std::str::from_utf8(chunk) {
-            if is_sse {
-                self.accumulated_data.push_str(s);
-                let mut start = 0;
-                while let Some(end) = self.accumulated_data[start..].find('\n') {
-                    let line = self.accumulated_data[start..start + end].to_string();
-                    self.process_sse_line(&line);
-                    start += end + 1;
-                }
-                if start > 0 {
-                    self.accumulated_data.drain(0..start);
-                }
-            } else {
-                // For non-SSE, we expect the whole body or chunks of JSON.
-                // We'll accumulate everything and parse at the end,
-                // but since we are in a stream wrapper, we can't easily know the end without state.
-                // However, `wrap_response` handles non-SSE by reading the full body first.
-                // So this method might only be called for SSE or if we implemented a buffering stream for non-SSE.
-                // For simplicity, `wrap_response` handles non-SSE separately.
+    fn process_chunk(&mut self, chunk: &[u8]) {
+        if let Ok(text) = std::str::from_utf8(chunk) {
+            self.process_sse_text(text);
+        }
+    }
+
+    fn process_sse_text(&mut self, mut input: &str) {
+        while !input.is_empty() {
+            if self.discarding_oversized_sse_line {
+                let Some(end) = input.find('\n') else {
+                    return;
+                };
+                self.discarding_oversized_sse_line = false;
+                input = &input[end + 1..];
+                continue;
             }
+
+            let Some(end) = input.find('\n') else {
+                if self.accumulated_data.len().saturating_add(input.len()) <= MAX_SSE_LINE_BYTES {
+                    self.accumulated_data.push_str(input);
+                } else {
+                    self.accumulated_data = String::new();
+                    self.discarding_oversized_sse_line = true;
+                }
+                return;
+            };
+
+            let segment = &input[..end];
+            if self.accumulated_data.len().saturating_add(segment.len()) <= MAX_SSE_LINE_BYTES {
+                self.accumulated_data.push_str(segment);
+                let line = std::mem::take(&mut self.accumulated_data);
+                self.process_sse_line(&line);
+            } else {
+                self.accumulated_data = String::new();
+            }
+            input = &input[end + 1..];
         }
     }
 
@@ -317,7 +340,7 @@ where
         match poll {
             Poll::Ready(Some(Ok(bytes))) => {
                 if let Ok(mut state) = self.state.lock() {
-                    state.process_chunk(&bytes, true);
+                    state.process_chunk(&bytes);
                 }
                 Poll::Ready(Some(Ok(bytes)))
             }
@@ -342,6 +365,9 @@ where
 
 pub const UPSTREAM_BODY_ERROR_MESSAGE: &str = "failed to read upstream response body";
 const UPSTREAM_BODY_ERROR_HEADER: &str = "x-apex-upstream-body-error";
+/// Cap for upstream bodies buffered in gateway memory (success reads, error
+/// reads, and SSE replay recording all share it).
+pub const MAX_UPSTREAM_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 pub fn is_upstream_body_error_response(response: &Response<Body>) -> bool {
     response.headers().contains_key(UPSTREAM_BODY_ERROR_HEADER)
@@ -416,6 +442,26 @@ fn upstream_body_error_response(route: RouteKind) -> Response<Body> {
         .unwrap()
 }
 
+pub(crate) async fn read_non_sse_body(
+    body: Body,
+    limit: usize,
+    timeout: Option<Duration>,
+) -> Result<Bytes, String> {
+    let read = axum::body::to_bytes(body, limit);
+    let Some(timeout) = timeout.filter(|timeout| !timeout.is_zero()) else {
+        return read.await.map_err(|err| err.to_string());
+    };
+
+    match tokio::time::timeout(timeout, read).await {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => Err(format!(
+            "response body timeout after {}ms",
+            timeout.as_millis()
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn wrap_response(
     response: Response<Body>,
@@ -431,13 +477,9 @@ pub async fn wrap_response(
     latency_ms: Option<f64>,
     fallback_triggered: bool,
     client_info: crate::utils::ClientInfo,
+    body_read_timeout: Option<Duration>,
 ) -> Response<Body> {
-    let is_sse = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.contains("text/event-stream"))
-        .unwrap_or(false);
+    let is_sse = crate::providers::is_sse_response(response.headers());
 
     let (parts, body) = response.into_parts();
 
@@ -466,7 +508,8 @@ pub async fn wrap_response(
         Response::from_parts(parts, Body::from_stream(usage_stream))
     } else {
         // Non-SSE: read full body
-        let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
+        let bytes = match read_non_sse_body(body, MAX_UPSTREAM_BODY_BYTES, body_read_timeout).await
+        {
             Ok(b) => b,
             Err(err) => {
                 tracing::warn!("Failed to read upstream response body: {}", err);
@@ -487,7 +530,7 @@ pub async fn wrap_response(
                     StatusCode::BAD_GATEWAY.as_u16() as i64,
                     UPSTREAM_BODY_ERROR_MESSAGE,
                     None,
-                    Some(&err.to_string()),
+                    Some(&err),
                     &client_info,
                 );
                 return upstream_body_error_response(route);
@@ -661,6 +704,7 @@ mod tests {
             Some(42.0),
             false,
             crate::utils::ClientInfo::default(),
+            None,
         )
         .await;
 
@@ -680,6 +724,184 @@ mod tests {
         assert_eq!(records[0].status, "error");
         assert_eq!(records[0].status_code, Some(502));
         assert_eq!(db.get_metrics_summary().unwrap().total_errors, 1);
+    }
+
+    // start_paused: timers auto-advance in virtual time, so the test is
+    // deterministic on loaded CI. The load-bearing assertion is the status —
+    // if the deadline were per-chunk instead of total, the stream would
+    // complete and return 200.
+    #[tokio::test(start_paused = true)]
+    async fn wrap_response_non_sse_body_timeout_is_total_duration() {
+        let (dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let slow_stream = futures::stream::unfold(0, |index| async move {
+            if index >= 10 {
+                None
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Some((
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x")),
+                    index + 1,
+                ))
+            }
+        });
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from_stream(slow_stream))
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let wrapped = wrap_response(
+            response,
+            crate::providers::RouteKind::Anthropic,
+            Some("req-1".to_string()),
+            "team1".to_string(),
+            "r1".to_string(),
+            Some("m1-*".to_string()),
+            "deepseek".to_string(),
+            "deepseek-v4-flash".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+            crate::utils::ClientInfo::default(),
+            Some(Duration::from_millis(35)),
+        )
+        .await;
+
+        assert_eq!(wrapped.status(), StatusCode::BAD_GATEWAY);
+        // Under the paused clock no real sleeping may happen at all.
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let body = axum::body::to_bytes(wrapped.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body_json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["type"], "error");
+        assert_eq!(body_json["error"]["type"], "upstream_body_error");
+
+        let db = Database::new(Some(dir.path().to_string_lossy().to_string())).unwrap();
+        let (records, total) = db
+            .get_usage_records(None, None, None, None, None, None, None, 10, 0)
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(records[0].status, "error");
+        assert_eq!(records[0].status_code, Some(502));
+        assert!(
+            records[0]
+                .provider_error_body
+                .as_deref()
+                .unwrap_or_default()
+                .contains("response body timeout after 35ms")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wrap_response_sse_ignores_total_deadline_while_chunks_keep_arriving() {
+        let (_dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let slow_stream = futures::stream::unfold(0, |index| async move {
+            if index >= 10 {
+                None
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Some((
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: {}\n\n")),
+                    index + 1,
+                ))
+            }
+        });
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "Text/Event-Stream; Charset=UTF-8")
+            .body(Body::from_stream(slow_stream))
+            .unwrap();
+
+        let wrapped = wrap_response(
+            response,
+            crate::providers::RouteKind::Openai,
+            Some("req-1".to_string()),
+            "team1".to_string(),
+            "r1".to_string(),
+            Some("m1-*".to_string()),
+            "openai".to_string(),
+            "gpt-test".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+            crate::utils::ClientInfo::default(),
+            Some(Duration::from_millis(35)),
+        )
+        .await;
+
+        let body = axum::body::to_bytes(wrapped.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.len(), 10 * b"data: {}\n\n".len());
+    }
+
+    #[test]
+    fn sse_buffer_is_bounded_for_newline_free_streams() {
+        let (_dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let mut state = UsageTrackerState::new(
+            "team1".to_string(),
+            None,
+            "r1".to_string(),
+            None,
+            "ch".to_string(),
+            "m".to_string(),
+            logger,
+            metrics,
+            None,
+            false,
+        );
+
+        let chunk = vec![b'a'; 512 * 1024];
+        for _ in 0..8 {
+            state.process_chunk(&chunk);
+        }
+        // 4MB of newline-free input must not pile up in the line buffer.
+        assert!(state.accumulated_data.len() <= MAX_SSE_LINE_BYTES);
+
+        // Later well-formed usage events still parse after the drop.
+        state.process_chunk(b"\ndata: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n");
+        assert_eq!(state.input_tokens, 3);
+        assert_eq!(state.output_tokens, 5);
+    }
+
+    #[test]
+    fn oversized_sse_line_is_dropped_before_usage_parsing() {
+        let (_dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+        let mut state = UsageTrackerState::new(
+            "team1".to_string(),
+            None,
+            "r1".to_string(),
+            None,
+            "ch".to_string(),
+            "m".to_string(),
+            logger,
+            metrics,
+            None,
+            false,
+        );
+
+        let padding = "a".repeat(MAX_SSE_LINE_BYTES);
+        let oversized_line = format!(
+            "data: {{\"usage\":{{\"prompt_tokens\":11,\"completion_tokens\":13}},\"padding\":\"{padding}\"}}\n"
+        );
+        state.process_chunk(oversized_line.as_bytes());
+
+        assert_eq!(state.input_tokens, 0);
+        assert_eq!(state.output_tokens, 0);
+        assert!(state.accumulated_data.is_empty());
+        assert!(state.accumulated_data.capacity() <= MAX_SSE_LINE_BYTES);
+
+        state.process_chunk(b"data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n");
+        assert_eq!(state.input_tokens, 3);
+        assert_eq!(state.output_tokens, 5);
     }
 
     #[tokio::test]
@@ -712,6 +934,7 @@ mod tests {
             Some(42.0),
             false,
             crate::utils::ClientInfo::default(),
+            None,
         )
         .await;
 
@@ -758,6 +981,7 @@ mod tests {
             Some(42.0),
             false,
             crate::utils::ClientInfo::default(),
+            Some(Duration::from_millis(1)),
         )
         .await;
 
@@ -914,8 +1138,8 @@ mod tests {
             false,
         );
 
-        tracker.process_chunk(b"data: {\"usage\": {\"pro", true);
-        tracker.process_chunk(b"mpt_tokens\": 2}}\n\n", true);
+        tracker.process_chunk(b"data: {\"usage\": {\"pro");
+        tracker.process_chunk(b"mpt_tokens\": 2}}\n\n");
 
         assert_eq!(tracker.input_tokens, 2);
     }

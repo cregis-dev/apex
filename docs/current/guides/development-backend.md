@@ -310,7 +310,7 @@ curl http://localhost:12356/api/metrics
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.1",
   "global": {
     "listen": "0.0.0.0:12356",
     "auth": {
@@ -319,7 +319,7 @@ curl http://localhost:12356/api/metrics
     },
     "timeouts": {
       "connect_ms": 2000,
-      "request_ms": 30000,
+      "request_ms": 300000,
       "response_ms": 30000
     },
     "retries": {

@@ -593,7 +593,7 @@ APEX_UPSTREAM_2_MODEL=good-model
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_blackbox_body_read_error_falls_back_to_secondary_channel() {
+async fn local_blackbox_post_transport_error_does_not_retry_or_fallback() {
     let bad_upstream = MockProvider::spawn_body_error_chat().await.unwrap();
     let good_upstream = MockProvider::spawn("mock-good-body-fallback")
         .await
@@ -648,12 +648,9 @@ APEX_UPSTREAM_2_MODEL=good-model
         .await
         .unwrap();
 
-    assert_eq!(chat.status(), 200, "gateway logs:\n{}", gateway.read_logs());
-    let chat_body: serde_json::Value = chat.json().await.unwrap();
-    assert_eq!(
-        chat_body["choices"][0]["message"]["content"],
-        "response from mock-good-body-fallback"
-    );
+    assert_eq!(chat.status(), 502, "gateway logs:\n{}", gateway.read_logs());
+    assert_eq!(bad_upstream.chat_request_count(), 1);
+    assert_eq!(good_upstream.chat_request_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
