@@ -165,18 +165,9 @@ impl UsageTrackerState {
         }
     }
 
-    fn process_chunk(&mut self, chunk: &[u8], is_sse: bool) {
-        if let Ok(s) = std::str::from_utf8(chunk) {
-            if is_sse {
-                self.process_sse_text(s);
-            } else {
-                // For non-SSE, we expect the whole body or chunks of JSON.
-                // We'll accumulate everything and parse at the end,
-                // but since we are in a stream wrapper, we can't easily know the end without state.
-                // However, `wrap_response` handles non-SSE by reading the full body first.
-                // So this method might only be called for SSE or if we implemented a buffering stream for non-SSE.
-                // For simplicity, `wrap_response` handles non-SSE separately.
-            }
+    fn process_chunk(&mut self, chunk: &[u8]) {
+        if let Ok(text) = std::str::from_utf8(chunk) {
+            self.process_sse_text(text);
         }
     }
 
@@ -349,7 +340,7 @@ where
         match poll {
             Poll::Ready(Some(Ok(bytes))) => {
                 if let Ok(mut state) = self.state.lock() {
-                    state.process_chunk(&bytes, true);
+                    state.process_chunk(&bytes);
                 }
                 Poll::Ready(Some(Ok(bytes)))
             }
@@ -451,7 +442,7 @@ fn upstream_body_error_response(route: RouteKind) -> Response<Body> {
         .unwrap()
 }
 
-async fn read_non_sse_body(
+pub(crate) async fn read_non_sse_body(
     body: Body,
     limit: usize,
     timeout: Option<Duration>,
@@ -869,16 +860,13 @@ mod tests {
 
         let chunk = vec![b'a'; 512 * 1024];
         for _ in 0..8 {
-            state.process_chunk(&chunk, true);
+            state.process_chunk(&chunk);
         }
         // 4MB of newline-free input must not pile up in the line buffer.
         assert!(state.accumulated_data.len() <= MAX_SSE_LINE_BYTES);
 
         // Later well-formed usage events still parse after the drop.
-        state.process_chunk(
-            b"\ndata: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n",
-            true,
-        );
+        state.process_chunk(b"\ndata: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n");
         assert_eq!(state.input_tokens, 3);
         assert_eq!(state.output_tokens, 5);
     }
@@ -904,17 +892,14 @@ mod tests {
         let oversized_line = format!(
             "data: {{\"usage\":{{\"prompt_tokens\":11,\"completion_tokens\":13}},\"padding\":\"{padding}\"}}\n"
         );
-        state.process_chunk(oversized_line.as_bytes(), true);
+        state.process_chunk(oversized_line.as_bytes());
 
         assert_eq!(state.input_tokens, 0);
         assert_eq!(state.output_tokens, 0);
         assert!(state.accumulated_data.is_empty());
         assert!(state.accumulated_data.capacity() <= MAX_SSE_LINE_BYTES);
 
-        state.process_chunk(
-            b"data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n",
-            true,
-        );
+        state.process_chunk(b"data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n");
         assert_eq!(state.input_tokens, 3);
         assert_eq!(state.output_tokens, 5);
     }
@@ -1153,8 +1138,8 @@ mod tests {
             false,
         );
 
-        tracker.process_chunk(b"data: {\"usage\": {\"pro", true);
-        tracker.process_chunk(b"mpt_tokens\": 2}}\n\n", true);
+        tracker.process_chunk(b"data: {\"usage\": {\"pro");
+        tracker.process_chunk(b"mpt_tokens\": 2}}\n\n");
 
         assert_eq!(tracker.input_tokens, 2);
     }

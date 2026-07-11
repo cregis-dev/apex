@@ -37,7 +37,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tower_http::cors::CorsLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::{self, TraceLayer};
@@ -62,8 +62,7 @@ pub struct AppState {
 pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 pub async fn run_server(path: PathBuf) -> anyhow::Result<()> {
-    let content = std::fs::read_to_string(&path)?;
-    let mut config: Config = serde_json::from_str(&content)?;
+    let mut config = crate::config::load_config(&path)?;
 
     // Store config path for potential hot reload
     config.hot_reload.config_path = path.to_string_lossy().to_string();
@@ -3278,6 +3277,15 @@ fn format_error_chain(error: &dyn std::error::Error) -> String {
     parts.join(" | caused by: ")
 }
 
+fn client_safe_upstream_error_message(error: &UpstreamRequestError) -> String {
+    match error {
+        UpstreamRequestError::Timeout(timeout) => {
+            format!("upstream request timeout after {}ms", timeout.as_millis())
+        }
+        UpstreamRequestError::Reqwest(_) => "upstream request failed".to_string(),
+    }
+}
+
 #[derive(Debug)]
 enum UpstreamRequestError {
     Reqwest(reqwest::Error),
@@ -3451,6 +3459,9 @@ async fn read_upstream_error_body(
     timeout: Duration,
     use_total_deadline: bool,
 ) -> Result<Bytes, String> {
+    let use_total_deadline =
+        use_total_deadline && !crate::providers::is_sse_response(response.headers());
+
     if timeout.is_zero() {
         return read_capped_error_body(response, None).await;
     }
@@ -3505,6 +3516,35 @@ async fn read_capped_error_body(
         buffer.extend_from_slice(&chunk);
     }
     Ok(Bytes::from(buffer))
+}
+
+async fn read_upstream_error_body_for(
+    config: &Config,
+    channel: &Channel,
+    route: RouteKind,
+    path: &str,
+    response: reqwest::Response,
+) -> (Bytes, Option<String>) {
+    match read_upstream_error_body(
+        response,
+        response_timeout_for(&config.global.timeouts, channel),
+        response_body_total_timeout_for(config, channel, route, path).is_some(),
+    )
+    .await
+    {
+        Ok(bytes) => (bytes, None),
+        Err(error) => (Bytes::new(), Some(error)),
+    }
+}
+
+fn stored_upstream_error_body(bytes: &Bytes, read_error: Option<&str>) -> String {
+    match read_error {
+        Some(error) => truncate_for_storage(
+            &format!("{}: {error}", crate::usage::UPSTREAM_BODY_ERROR_MESSAGE),
+            4000,
+        ),
+        None => truncate_for_storage(&String::from_utf8_lossy(bytes), 4000),
+    }
 }
 
 fn truncate_for_storage(input: &str, limit: usize) -> String {
@@ -3565,6 +3605,54 @@ async fn execute_upstream_request(
     match tokio::time::timeout(timeout, client.execute(request)).await {
         Ok(result) => result.map_err(UpstreamRequestError::Reqwest),
         Err(_) => Err(UpstreamRequestError::Timeout(timeout)),
+    }
+}
+
+fn streaming_upload_body(body: Body) -> (reqwest::Body, oneshot::Receiver<()>) {
+    let (upload_complete_tx, upload_complete_rx) = oneshot::channel();
+    let mut upload_complete_tx = Some(upload_complete_tx);
+    let mut stream = Box::pin(body.into_data_stream());
+    let stream = futures::stream::poll_fn(move |context| {
+        use futures::Stream as _;
+
+        match stream.as_mut().poll_next(context) {
+            std::task::Poll::Ready(None) => {
+                if let Some(upload_complete_tx) = upload_complete_tx.take() {
+                    let _ = upload_complete_tx.send(());
+                }
+                std::task::Poll::Ready(None)
+            }
+            other => other,
+        }
+    });
+
+    (reqwest::Body::wrap_stream(stream), upload_complete_rx)
+}
+
+async fn execute_streaming_upload_request(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+    mut upload_complete: oneshot::Receiver<()>,
+    timeout: Duration,
+) -> Result<reqwest::Response, UpstreamRequestError> {
+    if timeout.is_zero() {
+        return client
+            .execute(request)
+            .await
+            .map_err(UpstreamRequestError::Reqwest);
+    }
+
+    let execute = client.execute(request);
+    tokio::pin!(execute);
+
+    tokio::select! {
+        result = &mut execute => result.map_err(UpstreamRequestError::Reqwest),
+        _ = &mut upload_complete => {
+            match tokio::time::timeout(timeout, &mut execute).await {
+                Ok(result) => result.map_err(UpstreamRequestError::Reqwest),
+                Err(_) => Err(UpstreamRequestError::Timeout(timeout)),
+            }
+        }
     }
 }
 
@@ -4056,13 +4144,7 @@ async fn process_request(
                 max_attempts
             );
 
-            // Uploads are paced by the client's own transfer speed, so
-            // request_ms (tuned for upstream responsiveness) must not bound them.
-            let request_timeout = if is_gemini_native_upload {
-                Duration::ZERO
-            } else {
-                request_timeout_for(&config, channel)
-            };
+            let request_timeout = request_timeout_for(&config, channel);
             let resp_result =
                 execute_upstream_request(&state.client, req_built, request_timeout).await;
 
@@ -4232,24 +4314,13 @@ async fn process_request(
                         // A failed error-body read must not mask the real
                         // upstream status: keep forwarding it (with an empty
                         // body) and record the read failure alongside it.
-                        let (error_body_bytes, body_read_error) = match read_upstream_error_body(
-                            resp,
-                            response_timeout_for(&config.global.timeouts, channel),
-                            crate::config::request_timeout_is_enabled(&config.version),
-                        )
-                        .await
-                        {
-                            Ok(bytes) => (bytes, None),
-                            Err(err) => (Bytes::new(), Some(err)),
-                        };
-                        let provider_error_body = String::from_utf8_lossy(&error_body_bytes);
-                        let stored_error_body = match &body_read_error {
-                            Some(err) => truncate_for_storage(
-                                &format!("{}: {err}", crate::usage::UPSTREAM_BODY_ERROR_MESSAGE),
-                                4000,
-                            ),
-                            None => truncate_for_storage(&provider_error_body, 4000),
-                        };
+                        let (error_body_bytes, body_read_error) =
+                            read_upstream_error_body_for(&config, channel, route, &path, resp)
+                                .await;
+                        let stored_error_body = stored_upstream_error_body(
+                            &error_body_bytes,
+                            body_read_error.as_deref(),
+                        );
                         if !stored_error_body.is_empty() {
                             tracing::warn!("Upstream Error Body: {}", stored_error_body);
                         }
@@ -4288,6 +4359,7 @@ async fn process_request(
                 }
                 Err(e) => {
                     let error_chain = format_error_chain(&e);
+                    let client_message = client_safe_upstream_error_message(&e);
                     tracing::error!(
                         is_connect = e.is_connect(),
                         is_timeout = e.is_timeout(),
@@ -4327,7 +4399,7 @@ async fn process_request(
                         return protocol_error_response(
                             route,
                             StatusCode::GATEWAY_TIMEOUT,
-                            &error_chain,
+                            &client_message,
                         );
                     }
                     if !method_allows_ambiguous_retry(&parts.method) && !e.is_connect() {
@@ -4356,7 +4428,7 @@ async fn process_request(
                         return protocol_error_response(
                             route,
                             StatusCode::BAD_GATEWAY,
-                            &error_chain,
+                            &client_message,
                         );
                     }
                     if attempt + 1 < max_attempts {
@@ -4583,7 +4655,13 @@ async fn process_gemini_native_direct_pass(
     };
 
     let start = std::time::Instant::now();
-    let reqwest_body = reqwest::Body::wrap_stream(body.into_data_stream());
+    let is_streaming_upload = is_gemini_native_upload_path(&path);
+    let (reqwest_body, upload_complete) = if is_streaming_upload {
+        let (body, upload_complete) = streaming_upload_body(body);
+        (body, Some(upload_complete))
+    } else {
+        (reqwest::Body::wrap_stream(body.into_data_stream()), None)
+    };
     let req_built = match state
         .client
         .request(parts.method.clone(), prepared.url)
@@ -4601,17 +4679,18 @@ async fn process_gemini_native_direct_pass(
         }
     };
 
-    // Uploads are paced by the client's own transfer speed, so request_ms
-    // (tuned for upstream responsiveness) must not bound them.
-    let request_timeout = if is_gemini_native_upload_path(&path) {
-        Duration::ZERO
+    let request_timeout = request_timeout_for(&config, channel);
+    let resp_result = if let Some(upload_complete) = upload_complete {
+        execute_streaming_upload_request(&state.client, req_built, upload_complete, request_timeout)
+            .await
     } else {
-        request_timeout_for(&config, channel)
+        execute_upstream_request(&state.client, req_built, request_timeout).await
     };
-    let resp = match execute_upstream_request(&state.client, req_built, request_timeout).await {
+    let resp = match resp_result {
         Ok(resp) => resp,
         Err(err) => {
             let message = format_error_chain(&err);
+            let client_message = client_safe_upstream_error_message(&err);
             let status = if err.is_header_timeout() {
                 StatusCode::GATEWAY_TIMEOUT
             } else {
@@ -4632,7 +4711,7 @@ async fn process_gemini_native_direct_pass(
                 None,
                 &client_info,
             );
-            return protocol_error_response(route, status, &message);
+            return protocol_error_response(route, status, &client_message);
         }
     };
 
@@ -4653,23 +4732,10 @@ async fn process_gemini_native_direct_pass(
         let response_headers = resp.headers().clone();
         // Same as process_request: a failed error-body read keeps the real
         // upstream status and records the read failure alongside it.
-        let (error_body_bytes, body_read_error) = match read_upstream_error_body(
-            resp,
-            response_timeout_for(&config.global.timeouts, channel),
-            crate::config::request_timeout_is_enabled(&config.version),
-        )
-        .await
-        {
-            Ok(bytes) => (bytes, None),
-            Err(err) => (Bytes::new(), Some(err)),
-        };
-        let stored_error_body = match &body_read_error {
-            Some(err) => truncate_for_storage(
-                &format!("{}: {err}", crate::usage::UPSTREAM_BODY_ERROR_MESSAGE),
-                4000,
-            ),
-            None => truncate_for_storage(&String::from_utf8_lossy(&error_body_bytes), 4000),
-        };
+        let (error_body_bytes, body_read_error) =
+            read_upstream_error_body_for(&config, channel, route, &path, resp).await;
+        let stored_error_body =
+            stored_upstream_error_body(&error_body_bytes, body_read_error.as_deref());
         state.usage_logger.log_failure(
             request_id.as_deref(),
             &team_id,
@@ -4858,6 +4924,61 @@ mod tests {
             web_dir: "target/web".to_string(),
         });
         (dir, state)
+    }
+
+    fn create_gemini_upload_test_state(
+        base_url: String,
+        request_ms: u64,
+    ) -> (TempDir, Arc<AppState>) {
+        let mut config = create_test_config();
+        config.version = "1.1".to_string();
+        config.global.timeouts.request_ms = request_ms;
+        config.global.retries.max_attempts = 3;
+        config.channels = Arc::new(vec![Channel {
+            name: "gemini-channel".to_string(),
+            provider_type: ProviderType::Gemini,
+            base_url,
+            api_key: "gemini-key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+        }]);
+        config.routers = Arc::new(vec![crate::config::Router {
+            name: "gemini-router".to_string(),
+            rules: vec![crate::config::RouterRule {
+                match_spec: crate::config::MatchSpec {
+                    models: vec!["gemini-native".to_string()],
+                },
+                channels: vec![crate::config::TargetChannel {
+                    name: "gemini-channel".to_string(),
+                    weight: 1,
+                }],
+                strategy: "priority".to_string(),
+            }],
+            channels: vec![],
+            strategy: "priority".to_string(),
+            metadata: None,
+            fallback_channels: vec![],
+        }]);
+        create_test_state(config)
+    }
+
+    fn delayed_upload_body(delay: Duration) -> Body {
+        let stream = futures::stream::unfold(0u8, move |state| async move {
+            match state {
+                0 => Some((
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(b"upload-")),
+                    1,
+                )),
+                1 => {
+                    tokio::time::sleep(delay).await;
+                    Some((Ok::<Bytes, std::io::Error>(Bytes::from_static(b"body")), 2))
+                }
+                _ => None,
+            }
+        });
+        Body::from_stream(stream)
     }
 
     #[tokio::test]
@@ -5409,6 +5530,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gemini_upload_starts_header_deadline_after_body_completion() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let upstream_calls = calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/upload/v1beta/fileSearchStores/*path",
+            axum::routing::post(move |body: Bytes| {
+                let upstream_calls = upstream_calls.clone();
+                async move {
+                    upstream_calls.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(body, Bytes::from_static(b"upload-body"));
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                    axum::Json(serde_json::json!({"fileSearchStore": "stores/test"}))
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (_dir, state) = create_gemini_upload_test_state(format!("http://{addr}"), 40);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(
+                "/gemini/upload/v1beta/fileSearchStores/store-1:uploadToFileSearchStore?uploadType=media",
+            )
+            .body(delayed_upload_body(Duration::from_millis(120)))
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let response =
+            process_gemini_native_direct_pass(state, request, "gemini-native".to_string()).await;
+        let elapsed = started.elapsed();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        handle.abort();
+        assert!(elapsed >= Duration::from_millis(100));
+        assert!(elapsed < Duration::from_millis(450));
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(body["error"]["status"], "DEADLINE_EXCEEDED");
+    }
+
+    #[tokio::test]
+    async fn gemini_upload_does_not_consume_timeout_while_body_is_streaming() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/upload/v1beta/fileSearchStores/*path",
+            axum::routing::post(|body: Bytes| async move {
+                assert_eq!(body, Bytes::from_static(b"upload-body"));
+                axum::Json(serde_json::json!({"fileSearchStore": "stores/test"}))
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (_dir, state) = create_gemini_upload_test_state(format!("http://{addr}"), 40);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(
+                "/gemini/upload/v1beta/fileSearchStores/store-1:uploadToFileSearchStore?uploadType=media",
+            )
+            .body(delayed_upload_body(Duration::from_millis(120)))
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let response =
+            process_gemini_native_direct_pass(state, request, "gemini-native".to_string()).await;
+
+        handle.abort();
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn gemini_upload_timeout_zero_disables_post_upload_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/upload/v1beta/fileSearchStores/*path",
+            axum::routing::post(|body: Bytes| async move {
+                assert_eq!(body, Bytes::from_static(b"upload-body"));
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                axum::Json(serde_json::json!({"fileSearchStore": "stores/test"}))
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (_dir, state) = create_gemini_upload_test_state(format!("http://{addr}"), 0);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(
+                "/gemini/upload/v1beta/fileSearchStores/store-1:uploadToFileSearchStore?uploadType=media",
+            )
+            .body(Body::from("upload-body"))
+            .unwrap();
+
+        let response =
+            process_gemini_native_direct_pass(state, request, "gemini-native".to_string()).await;
+
+        handle.abort();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn upstream_request_timeout_zero_disables_bound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -5566,6 +5801,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_safe_upstream_error_message_hides_reqwest_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            drop(socket);
+        });
+        let sensitive_url = format!("http://{addr}/private?api_key=secret");
+
+        let error = reqwest::Client::new()
+            .post(&sensitive_url)
+            .body("request")
+            .send()
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+
+        let message = client_safe_upstream_error_message(&UpstreamRequestError::Reqwest(error));
+
+        assert_eq!(message, "upstream request failed");
+        assert!(!message.contains(&sensitive_url));
+    }
+
+    #[test]
+    fn client_safe_upstream_error_message_keeps_owned_timeout_detail() {
+        let message = client_safe_upstream_error_message(&UpstreamRequestError::Timeout(
+            Duration::from_millis(35),
+        ));
+
+        assert_eq!(message, "upstream request timeout after 35ms");
+    }
+
+    #[tokio::test]
     async fn gemini_gateway_timeout_uses_deadline_exceeded_status() {
         let response = protocol_error_response(
             RouteKind::GeminiNative,
@@ -5650,6 +5918,36 @@ mod tests {
         assert!(body.is_empty());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn current_sse_error_body_uses_chunk_inactivity_timeout() {
+        let slow_stream = futures::stream::unfold(0, |index| async move {
+            if index >= 4 {
+                None
+            } else {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Some((
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: error\n\n")),
+                    index + 1,
+                ))
+            }
+        });
+        let response = HttpResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header("content-type", "text/event-stream")
+            .body(reqwest::Body::wrap_stream(slow_stream))
+            .unwrap();
+        let response = reqwest::Response::from(response);
+
+        let body = read_upstream_error_body(response, Duration::from_millis(35), true)
+            .await
+            .expect("SSE error bodies should use a per-chunk inactivity timeout");
+
+        assert_eq!(
+            &body[..],
+            b"data: error\n\ndata: error\n\ndata: error\n\ndata: error\n\n"
+        );
+    }
+
     #[tokio::test]
     async fn legacy_error_body_uses_chunk_inactivity_timeout() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5714,6 +6012,22 @@ mod tests {
             .await
             .expect_err("an error body larger than the cap must be rejected");
         assert!(err.contains("exceeded"));
+    }
+
+    #[tokio::test]
+    async fn run_server_rejects_invalid_config_version_before_startup() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let mut config = create_test_config();
+        config.version = "invalid".to_string();
+        config.global.listen = "not-a-socket-address".to_string();
+        config.hot_reload.watch = false;
+        crate::config::save_config(&path, &config).unwrap();
+
+        let error = run_server(path).await.unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("Invalid config version"), "{message}");
     }
 
     #[test]

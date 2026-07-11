@@ -253,20 +253,13 @@ impl GeminiAnthropicReplayCache {
             };
             Response::from_parts(parts, Body::from_stream(wrapped))
         } else {
-            let read = axum::body::to_bytes(body, crate::usage::MAX_UPSTREAM_BODY_BYTES);
-            let bytes_result =
-                if let Some(timeout) = body_read_timeout.filter(|timeout| !timeout.is_zero()) {
-                    match tokio::time::timeout(timeout, read).await {
-                        Ok(result) => result.map_err(|err| err.to_string()),
-                        Err(_) => Err(format!(
-                            "response body timeout after {}ms",
-                            timeout.as_millis()
-                        )),
-                    }
-                } else {
-                    read.await.map_err(|err| err.to_string())
-                };
-            let bytes = match bytes_result {
+            let bytes = match crate::usage::read_non_sse_body(
+                body,
+                crate::usage::MAX_UPSTREAM_BODY_BYTES,
+                body_read_timeout,
+            )
+            .await
+            {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     let stream = futures::stream::once(async move {

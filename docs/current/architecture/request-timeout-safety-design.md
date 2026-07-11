@@ -26,6 +26,13 @@ connection-establishment failures may still retry because the upstream did not
 receive the request. Existing retry behavior for safe reads and configured HTTP
 status codes is unchanged.
 
+Streaming file uploads are the only request-body pacing exception. Client upload
+time must not consume `request_ms`, but the exception ends when reqwest consumes
+the final request-body chunk. From that point, `request_ms` bounds the remaining
+network flush and wait for upstream response headers. A post-upload deadline is
+an ambiguous header timeout: it returns `504` immediately without retrying the
+same channel or entering fallback. A zero timeout still disables this deadline.
+
 ### Do not replay state-changing requests after success headers
 
 Once the upstream has returned a successful response status, a later body read
@@ -75,6 +82,9 @@ explicit choice.
   buffer before the full body is accumulated.
 - A response-header timeout sends exactly one non-idempotent upstream request,
   does not call fallback, and returns `504`.
+- A streaming upload may take longer than `request_ms` while body chunks are
+  still arriving, but stalls after the final upload chunk are bounded by
+  `request_ms` and are not replayed; zero remains disabled.
 - A successful non-idempotent request whose body later fails is not replayed;
   idempotent `GET` and `HEAD` requests may still retry.
 - A non-SSE response remains subject to the total body deadline even if the
