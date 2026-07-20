@@ -149,17 +149,6 @@ export default function Sidebar() {
         ))}
       </div>
 
-      {/* Health footer */}
-      <div style={{
-        padding: '12px 16px',
-        borderTop: '1px solid var(--border)',
-        display: 'flex', alignItems: 'center', gap: 8,
-      }}>
-        <span className="dot dot-ok" />
-        <span style={{ fontSize: 12, color: 'var(--muted)', flex: 1 }}>All systems normal</span>
-        {info && <span className="mono muted" style={{ fontSize: 11 }}>v{info.version}</span>}
-      </div>
-
       {/* Account / account menu (bottom-left) */}
       <div ref={accountRef} style={{ position: 'relative', padding: 8, borderTop: '1px solid var(--border)' }}>
         {menuOpen && (
@@ -228,13 +217,24 @@ export default function Sidebar() {
           onMouseEnter={(e) => { if (!menuOpen) e.currentTarget.style.background = 'var(--surface)' }}
           onMouseLeave={(e) => { if (!menuOpen) e.currentTarget.style.background = 'transparent' }}
         >
-          <div style={{
-            width: 28, height: 28, borderRadius: '50%',
-            background: 'oklch(0.75 0.02 60)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            color: '#fff', fontSize: 11, fontWeight: 600, flexShrink: 0,
-          }}>
-            AP
+          <div style={{ position: 'relative', flexShrink: 0 }}>
+            <div style={{
+              width: 28, height: 28, borderRadius: '50%',
+              background: 'oklch(0.75 0.02 60)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: '#fff', fontSize: 11, fontWeight: 600,
+            }}>
+              AP
+            </div>
+            <span
+              title={info ? 'Gateway online' : 'Connecting…'}
+              style={{
+                position: 'absolute', right: -1, bottom: -1,
+                width: 9, height: 9, borderRadius: '50%',
+                background: info ? 'var(--ok)' : 'var(--muted-2)',
+                border: '2px solid var(--bg-soft)',
+              }}
+            />
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{
@@ -244,10 +244,10 @@ export default function Sidebar() {
               Apex Gateway
             </div>
             <div style={{
-              fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--font-mono)',
+              fontSize: 11, color: 'var(--muted)',
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>
-              {info ? info.listen : '—'}
+              {info ? `v${info.version}` : '—'}
             </div>
           </div>
           <Icon name="more" size={15} style={{ color: 'var(--muted)', flexShrink: 0 }} />
