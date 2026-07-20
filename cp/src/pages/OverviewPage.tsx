@@ -454,21 +454,21 @@ export default function OverviewPage() {
     queryFn: () => api.analytics(params),
   })
 
-  const actions = (
-    <FiltersBar
-      values={filters}
-      options={data?.filter_options}
-      onChange={setFilters}
-    />
-  )
-
   return (
     <>
-      <Topbar breadcrumbs={[{ label: 'Operate' }, { label: 'Overview' }]} actions={actions} />
+      <Topbar breadcrumbs={[{ label: 'Operate' }, { label: 'Overview' }]} />
       <div className="page-pad">
         <div className="page-head">
           <h1 className="page-title">Dashboard</h1>
           <p className="page-sub">Real-time gateway health across all teams, routers, and channels.</p>
+        </div>
+
+        <div className="card" style={{ padding: '12px 16px', marginBottom: 16, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <FiltersBar
+            values={filters}
+            options={data?.filter_options}
+            onChange={setFilters}
+          />
         </div>
 
         {isLoading && (
