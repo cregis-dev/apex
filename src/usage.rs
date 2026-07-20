@@ -122,7 +122,7 @@ struct UsageTrackerState {
     latency_ms: Option<f64>,
     fallback_triggered: bool,
     client_info: crate::utils::ClientInfo,
-    accumulated_data: String,
+    accumulated_data: Vec<u8>,
 }
 
 impl UsageTrackerState {
@@ -153,32 +153,35 @@ impl UsageTrackerState {
             latency_ms,
             fallback_triggered,
             client_info: crate::utils::ClientInfo::default(),
-            accumulated_data: String::new(),
+            accumulated_data: Vec::new(),
         }
     }
 
     fn process_chunk(&mut self, chunk: &[u8], is_sse: bool) {
-        if let Ok(s) = std::str::from_utf8(chunk) {
-            if is_sse {
-                self.accumulated_data.push_str(s);
-                let mut start = 0;
-                while let Some(end) = self.accumulated_data[start..].find('\n') {
-                    let line = self.accumulated_data[start..start + end].to_string();
-                    self.process_sse_line(&line);
-                    start += end + 1;
-                }
-                if start > 0 {
-                    self.accumulated_data.drain(0..start);
-                }
-            } else {
-                // For non-SSE, we expect the whole body or chunks of JSON.
-                // We'll accumulate everything and parse at the end,
-                // but since we are in a stream wrapper, we can't easily know the end without state.
-                // However, `wrap_response` handles non-SSE by reading the full body first.
-                // So this method might only be called for SSE or if we implemented a buffering stream for non-SSE.
-                // For simplicity, `wrap_response` handles non-SSE separately.
+        // Buffer at the byte level: network chunk boundaries can fall in the
+        // middle of a multi-byte UTF-8 character (common with Chinese content),
+        // so decoding each raw chunk as UTF-8 would fail and drop it — losing the
+        // trailing `usage` SSE line and recording 0 tokens. Instead we accumulate
+        // raw bytes and only decode complete lines (split on '\n', which never
+        // bisects a UTF-8 code point).
+        if is_sse {
+            self.accumulated_data.extend_from_slice(chunk);
+            let mut start = 0;
+            while let Some(offset) = self.accumulated_data[start..]
+                .iter()
+                .position(|&b| b == b'\n')
+            {
+                let line = String::from_utf8_lossy(&self.accumulated_data[start..start + offset])
+                    .into_owned();
+                self.process_sse_line(&line);
+                start += offset + 1;
+            }
+            if start > 0 {
+                self.accumulated_data.drain(0..start);
             }
         }
+        // For non-SSE, `wrap_response` reads the full body and parses it directly,
+        // so nothing to accumulate here.
     }
 
     fn process_sse_line(&mut self, line: &str) {
@@ -918,6 +921,37 @@ mod tests {
         tracker.process_chunk(b"mpt_tokens\": 2}}\n\n", true);
 
         assert_eq!(tracker.input_tokens, 2);
+    }
+
+    #[test]
+    fn test_process_chunk_sse_multibyte_split() {
+        let (_dir, logger) = create_test_logger();
+        let metrics = create_test_metrics();
+
+        let mut tracker = UsageTrackerState::new(
+            "team1".to_string(),
+            Some("req-1".to_string()),
+            "r1".to_string(),
+            Some("gpt-*".to_string()),
+            "c1".to_string(),
+            "m1".to_string(),
+            logger,
+            metrics,
+            Some(42.0),
+            false,
+        );
+
+        // A realistic OpenAI stream: a content delta carrying a Chinese char,
+        // then the final chunk carrying usage.
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}],\"usage\":null}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":54,\"completion_tokens\":26}}\n\n";
+        let bytes = sse.as_bytes();
+        // Split the network chunk boundary in the MIDDLE of the 3-byte '好'.
+        let split = sse.find('好').unwrap() + 1;
+        tracker.process_chunk(&bytes[..split], true);
+        tracker.process_chunk(&bytes[split..], true);
+
+        assert_eq!(tracker.input_tokens, 54, "input tokens lost");
+        assert_eq!(tracker.output_tokens, 26, "output tokens lost");
     }
 
     #[test]
