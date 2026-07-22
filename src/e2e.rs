@@ -98,6 +98,7 @@ pub fn build_config(env: &E2eEnv, config_path: &Path) -> Config {
             headers: upstream.headers.clone(),
             model_map: upstream.model_map.clone(),
             timeouts: upstream.timeouts.clone(),
+            pricing: None,
         })
         .collect::<Vec<_>>();
 
@@ -177,6 +178,7 @@ pub fn build_config(env: &E2eEnv, config_path: &Path) -> Config {
         }]),
         compliance: None,
         retention: Default::default(),
+        pricing: None,
     }
 }
 

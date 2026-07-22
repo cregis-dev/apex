@@ -40,6 +40,7 @@ async fn test_rule_based_routing_priority() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
     std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "channel_b".to_string(),
@@ -50,6 +51,7 @@ async fn test_rule_based_routing_priority() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     // Router with Rules

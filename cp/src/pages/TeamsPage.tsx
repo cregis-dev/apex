@@ -10,6 +10,9 @@ import { useToast } from '../components/Toast.tsx'
 import { api } from '../lib/api.ts'
 import type { AdminRouter, AdminTeam, CreateTeamRequest, RateLimit, UpdateTeamRequest } from '../lib/types.ts'
 
+// Naming note: on the wire a `Team` record with its `id` is one API key = one
+// *user*; the optional `group` field is the real *team*. The UI below labels
+// them "User" / "Team" accordingly, but wire field names (id, group) are kept.
 const DEFAULT_GROUP_LABEL = 'Default'
 
 function fmt(n: number | null | undefined): string {
@@ -172,7 +175,7 @@ function TeamEditorModal({
     <Modal
       open={open}
       onClose={busy ? () => {} : onCancel}
-      title={mode === 'create' ? 'Create team' : `Edit team · ${initial.id}`}
+      title={mode === 'create' ? 'Create user' : `Edit user · ${initial.id}`}
       width={560}
       footer={
         <>
@@ -183,7 +186,7 @@ function TeamEditorModal({
             onClick={() => onSubmit(form)}
           >
             {busy ? <span className="spinner" style={{ width: 12, height: 12 }} /> : null}
-            {mode === 'create' ? 'Create team' : 'Save changes'}
+            {mode === 'create' ? 'Create user' : 'Save changes'}
           </button>
         </>
       }
@@ -195,23 +198,23 @@ function TeamEditorModal({
       )}
 
       <div style={{ display: 'grid', gap: 14 }}>
-        <Field label="Team ID">
+        <Field label="User ID">
           <input
             className="input"
             value={form.id}
             onChange={(e) => setForm((f) => ({ ...f, id: e.target.value }))}
-            placeholder="e.g. growth-app"
+            placeholder="e.g. alice or growth-app"
             disabled={mode === 'edit'}
             style={{ width: '100%' }}
           />
           {mode === 'edit' && (
             <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
-              Team ID cannot be changed after creation.
+              User ID cannot be changed after creation.
             </div>
           )}
         </Field>
 
-        <Field label="Group">
+        <Field label="Team">
           <input
             className="input"
             value={form.group}
@@ -224,7 +227,7 @@ function TeamEditorModal({
             {existingGroups.map((g) => <option key={g} value={g} />)}
           </datalist>
           <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
-            Used to organize teams in the sidebar. Leave blank for "Default".
+            Used to group users into teams in the sidebar. Leave blank for "Default".
           </div>
         </Field>
 
@@ -370,10 +373,10 @@ export default function TeamsPage() {
       invalidate()
       setEditorOpen(false)
       setCreatedKey(created)
-      push(`Team "${created.id}" created`, 'ok')
+      push(`User "${created.id}" created`, 'ok')
     },
     onError: (err: unknown) => {
-      setEditorError(err instanceof Error ? err.message : 'Failed to create team')
+      setEditorError(err instanceof Error ? err.message : 'Failed to create user')
     },
   })
 
@@ -382,10 +385,10 @@ export default function TeamsPage() {
     onSuccess: (updated) => {
       invalidate()
       setEditorOpen(false)
-      push(`Team "${updated.id}" updated`, 'ok')
+      push(`User "${updated.id}" updated`, 'ok')
     },
     onError: (err: unknown) => {
-      setEditorError(err instanceof Error ? err.message : 'Failed to update team')
+      setEditorError(err instanceof Error ? err.message : 'Failed to update user')
     },
   })
 
@@ -394,10 +397,10 @@ export default function TeamsPage() {
       api.updateTeam(id, { enabled }),
     onSuccess: (updated) => {
       invalidate()
-      push(`Team "${updated.id}" ${updated.enabled ? 'resumed' : 'paused'}`, 'ok')
+      push(`User "${updated.id}" ${updated.enabled ? 'resumed' : 'paused'}`, 'ok')
     },
     onError: () => {
-      push('Failed to change team status')
+      push('Failed to change user status')
     },
   })
 
@@ -407,10 +410,10 @@ export default function TeamsPage() {
       invalidate()
       setPendingDelete(null)
       setDeleteError(undefined)
-      push(`Team "${id}" deleted`, 'ok')
+      push(`User "${id}" deleted`, 'ok')
     },
     onError: (err: unknown) => {
-      setDeleteError(err instanceof Error ? err.message : 'Failed to delete team')
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete user')
     },
   })
 
@@ -535,7 +538,7 @@ export default function TeamsPage() {
   return (
     <>
       <Topbar
-        breadcrumbs={[{ label: 'Access' }, { label: 'Teams' }]}
+        breadcrumbs={[{ label: 'Access' }, { label: 'Users' }]}
         actions={
           <div style={{ display: 'flex', gap: 8 }}>
             <button
@@ -548,16 +551,16 @@ export default function TeamsPage() {
             </button>
             <button className="btn btn-primary btn-sm" onClick={openCreate}>
               <Icon name="plus" size={13} />
-              New team
+              New user
             </button>
           </div>
         }
       />
       <div className="page-pad">
         <div className="page-head">
-          <h1 className="page-title">Teams</h1>
+          <h1 className="page-title">Users</h1>
           <p className="page-sub">
-            Multi-tenant boundaries. Organize teams into groups — each team has its own key,
+            Multi-tenant boundaries. Organize users into teams — each user has its own key,
             quota, and model allowlist.
           </p>
         </div>
@@ -565,8 +568,8 @@ export default function TeamsPage() {
         {/* Summary strip */}
         {teams.length > 0 && (
           <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-            <Stat label="Teams" value={teams.length} />
-            <Stat label="Groups" value={Math.max(1, allGroups.length)} />
+            <Stat label="Users" value={teams.length} />
+            <Stat label="Teams" value={Math.max(1, allGroups.length)} />
             <Stat label="Active" value={teams.filter((t) => t.enabled).length} />
             <Stat
               label="Paused"
@@ -580,14 +583,14 @@ export default function TeamsPage() {
         {teams.length > 0 && (
           <div className="card" style={{ padding: '12px 16px', marginBottom: 16, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
             <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 11, color: 'var(--muted)' }}>Group</span>
+              <span style={{ fontSize: 11, color: 'var(--muted)' }}>Team</span>
               <select
                 className="select btn-sm"
                 value={groupFilter}
                 onChange={(e) => setGroupFilter(e.target.value)}
                 style={{ height: 28, fontSize: 12, minWidth: 160 }}
               >
-                <option value="">All groups</option>
+                <option value="">All teams</option>
                 {allGroups.map((g) => <option key={g} value={g}>{g}</option>)}
                 {teams.some((t) => groupOf(t) === DEFAULT_GROUP_LABEL) && (
                   <option value={DEFAULT_GROUP_LABEL}>{DEFAULT_GROUP_LABEL}</option>
@@ -598,7 +601,7 @@ export default function TeamsPage() {
               <Icon name="search" size={13} style={{ color: 'var(--muted)' }} />
               <input
                 className="input"
-                placeholder="Search teams by id or group"
+                placeholder="Search users by id or team"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 style={{ flex: 1, height: 28, fontSize: 12 }}
@@ -624,7 +627,7 @@ export default function TeamsPage() {
 
         {error && (
           <div style={{ padding: '12px 16px', background: 'var(--err-soft)', color: 'var(--err)', borderRadius: 'var(--r-md)', fontSize: 13 }}>
-            Failed to load teams.
+            Failed to load users.
           </div>
         )}
 
@@ -632,15 +635,15 @@ export default function TeamsPage() {
           <div className="card">
             <Empty
               icon="users"
-              title="No teams configured"
-              sub="Create your first team to enable multi-tenant access control."
+              title="No users configured"
+              sub="Create your first user to enable multi-tenant access control."
             />
           </div>
         )}
 
         {!isLoading && !error && teams.length > 0 && filteredTeams.length === 0 && (
           <div className="card">
-            <Empty icon="users" title="No teams match these filters" sub="Try clearing the search or group filter." />
+            <Empty icon="users" title="No users match these filters" sub="Try clearing the search or team filter." />
           </div>
         )}
 
@@ -672,7 +675,7 @@ export default function TeamsPage() {
                   <table className="table">
                     <thead>
                       <tr>
-                        <th>Team</th>
+                        <th>User</th>
                         <th>Status</th>
                         <th>API Key</th>
                         <th>Routers</th>
@@ -839,7 +842,7 @@ export default function TeamsPage() {
           <div>
             <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--ink-2)' }}>
               This is the only time the full key for <strong>{createdKey.id}</strong> will be shown.
-              Copy it now and hand it to the team owner.
+              Copy it now and hand it to the user.
             </p>
             <div style={{
               display: 'flex', alignItems: 'center', gap: 8,
@@ -865,7 +868,7 @@ export default function TeamsPage() {
               background: 'var(--info-soft)', color: 'var(--info)',
               borderRadius: 'var(--r-sm)', fontSize: 12,
             }}>
-              On subsequent loads this key will appear masked. To rotate, delete and re-create the team.
+              On subsequent loads this key will appear masked. To rotate, delete and re-create the user.
             </div>
           </div>
         )}
@@ -875,7 +878,7 @@ export default function TeamsPage() {
       <Modal
         open={!!pendingDelete}
         onClose={() => { if (!deleteMutation.isPending) { setPendingDelete(null); setDeleteError(undefined) } }}
-        title="Delete team"
+        title="Delete user"
         width={440}
         footer={
           <>
@@ -895,7 +898,7 @@ export default function TeamsPage() {
               {deleteMutation.isPending
                 ? <span className="spinner" style={{ width: 12, height: 12 }} />
                 : <Icon name="trash" size={13} />}
-              Delete team
+              Delete user
             </button>
           </>
         }

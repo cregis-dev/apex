@@ -117,6 +117,50 @@ export interface FilterOptions {
   clients: string[]
 }
 
+// --- cost section (present only when `pricing` is configured on the backend) ---
+
+export interface CostMemberItem {
+  /** User identity (wire `team_id`). */
+  id: string
+  /** The user's team (wire `group`), if any. */
+  group: string | null
+  actual_cost: number
+  reference_cost: number
+}
+
+export interface CostModelItem {
+  name: string
+  actual_cost: number
+  reference_cost: number
+}
+
+export interface SubscriptionItem {
+  /** Name of the subscription pricing rule. */
+  name: string
+  monthly_fee: number
+  accrued_fee: number
+  /** Tokens (in+out+cache) used on this rule this window. */
+  tokens_used: number
+  /** Included quota prorated to this window (0 when no quota set). */
+  quota_tokens: number
+  /** tokens_used / quota_tokens (0 when no quota). >1 = over quota. */
+  utilization: number
+  idle_fee: number
+}
+
+export interface CostSection {
+  currency: string
+  actual_cost: number
+  reference_cost: number
+  /** Percent change in actual_cost vs the previous window. */
+  delta_actual_cost: number
+  /** 1 - actual/reference (how much cheaper than list PAYG). */
+  effective_discount: number
+  by_member: CostMemberItem[]
+  by_model: CostModelItem[]
+  subscriptions: SubscriptionItem[]
+}
+
 export interface RecordCursor {
   id: number
   timestamp: string
@@ -134,6 +178,8 @@ export interface AnalyticsResponse {
   model_router: ModelRouterSection
   /** Per-client (tool) usage breakdown; records without a detected client bucket as "Unknown". */
   client_usage: ShareItem[]
+  /** Cost breakdown — omitted entirely when the backend has no `pricing` configured. */
+  cost?: CostSection
   records_meta: { total: number; latest_cursor: RecordCursor | null }
 }
 
@@ -143,6 +189,11 @@ export interface UsageRecord {
   id: number
   timestamp: string
   request_id: string | null
+  /**
+   * Naming note: `team_id` is the identity of one API key = one *user* in the UI.
+   * The real *team* is the owning `AdminTeam.group`, resolved client-side. The
+   * wire field name stays `team_id`; only the display labels say "User"/"Team".
+   */
   team_id: string
   router: string
   matched_rule: string | null
@@ -185,6 +236,8 @@ export interface AdminChannel {
   provider_type: ProviderType
   base_url: string
   anthropic_base_url: string | null
+  /** Name of the pricing rule this channel bills under, or null (untracked). */
+  pricing: string | null
 }
 
 export interface CreateChannelRequest {
@@ -195,6 +248,8 @@ export interface CreateChannelRequest {
   anthropic_base_url?: string | null
   headers?: Record<string, string> | null
   model_map?: Record<string, string> | null
+  /** Pricing rule name, or null/omitted for untracked. */
+  pricing?: string | null
 }
 
 export interface UpdateChannelRequest {
@@ -205,6 +260,40 @@ export interface UpdateChannelRequest {
   anthropic_base_url?: string | null
   headers?: Record<string, string> | null
   model_map?: Record<string, string> | null
+  /** Omit to keep current; empty string clears it (untracked); a name sets it. */
+  pricing?: string | null
+}
+
+// --- /admin/pricing ---
+
+/** One row of a PAYG rule's rate card: a model pattern → per-token rates. */
+export interface ModelPriceRow {
+  /** Model glob, e.g. "*flash*" or "deepseek-v4-pro". First match wins; keep "*" last. */
+  match: string
+  input: number
+  output: number
+  cache_read?: number | null
+  cache_write?: number | null
+}
+
+/** One named, independent pricing rule. A channel selects one by name. */
+export interface PricingRule {
+  name: string
+  /** 'payg' = a rate card (per-model rows); 'subscription' = fixed monthly fee. */
+  type: 'payg' | 'subscription'
+  /** PAYG: per-model price rows (first match wins). */
+  prices?: ModelPriceRow[]
+  /** Subscription only. */
+  monthly_fee?: number
+  billing_day?: number
+  included_quota_tokens?: number | null
+}
+
+export interface PricingConfig {
+  currency: string
+  /** Rates are per this many tokens (default 1_000_000). */
+  unit: number
+  rules: PricingRule[]
 }
 
 /** GET /admin/channels/api_keys entry. */
@@ -281,9 +370,12 @@ export interface TeamPolicy {
   rate_limit: RateLimit | null
 }
 
+// Naming note: an `AdminTeam` record is one API key = one *user* in the UI
+// (labelled "User" / "User ID"); its `group` is the real *team* (labelled
+// "Team"). Wire field names (`id`, `group`) are unchanged — only display differs.
 export interface AdminTeam {
   id: string
-  /** Optional group label. Empty string and null both render as "Default". */
+  /** The user's *team* (wire name kept as `group`). Empty/null render as "Default". */
   group: string | null
   /** Defaults to true. When false, all model requests from this team are rejected. */
   enabled: boolean

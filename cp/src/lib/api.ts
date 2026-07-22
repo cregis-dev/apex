@@ -7,7 +7,7 @@ import type {
   CreateTeamRequest, UpdateTeamRequest,
   CreateChannelRequest, UpdateChannelRequest,
   CreateRouterRequest, UpdateRouterRequest,
-  CpInfo,
+  CpInfo, PricingConfig,
 } from './types.ts'
 
 class ApiError extends Error {
@@ -102,6 +102,12 @@ export const api = {
 
   cpInfo: () =>
     req<CpInfo>('GET', '/api/cp/info'),
+
+  pricing: () =>
+    req<PricingConfig>('GET', '/admin/pricing'),
+
+  savePricing: (body: PricingConfig) =>
+    req<PricingConfig>('PUT', '/admin/pricing', body),
 }
 
 export { ApiError }

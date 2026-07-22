@@ -119,7 +119,7 @@ export default function RateLimitsPage() {
       <div className="page-pad">
         <div className="page-head">
           <h1 className="page-title">Rate Limits &amp; Quotas</h1>
-          <p className="page-sub">Global, per-team, and per-key throttles. Token-bucket enforced at the gateway edge.</p>
+          <p className="page-sub">Global, per-user, and per-key throttles. Token-bucket enforced at the gateway edge.</p>
         </div>
 
         <div style={{
@@ -129,7 +129,7 @@ export default function RateLimitsPage() {
           display: 'flex', alignItems: 'center', gap: 8,
         }}>
           <Icon name="info" size={15} style={{ flexShrink: 0 }} />
-          Limits are per-team. Click a team to set, change, or remove its limit — usage shown is for the last 1 hour.
+          Limits are per-user. Click a user to set, change, or remove its limit — usage shown is for the last 1 hour.
         </div>
 
         {isLoading && (
@@ -145,14 +145,14 @@ export default function RateLimitsPage() {
         )}
 
         {!isLoading && !error && teams.length === 0 && (
-          <Empty icon="gauge" title="No teams configured" sub="Rate limits are per-team. Add teams to your config.json first." />
+          <Empty icon="gauge" title="No users configured" sub="Rate limits are per-user. Add users to your config.json first." />
         )}
 
         {teams.length > 0 && (
           <>
             {/* Summary */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
-              <Stat label="Total teams" value={String(teams.length)} />
+              <Stat label="Total users" value={String(teams.length)} />
               <Stat
                 label="With rate limits"
                 value={String(teamsWithLimits.length)}
@@ -177,7 +177,7 @@ export default function RateLimitsPage() {
                 />
                 <input
                   className="input"
-                  placeholder="Filter teams…"
+                  placeholder="Filter users…"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   style={{ width: '100%', paddingLeft: 30 }}
@@ -186,18 +186,18 @@ export default function RateLimitsPage() {
             </div>
 
             {nothingMatches && (
-              <Empty icon="search" title="No teams match" sub={`Nothing matches “${query.trim()}”.`} />
+              <Empty icon="search" title="No users match" sub={`Nothing matches “${query.trim()}”.`} />
             )}
 
             {/* Teams with limits */}
             {withLimitsView.length > 0 && (
               <div style={{ marginBottom: 24 }}>
-                <div className="section-title">Teams with rate limits</div>
+                <div className="section-title">Users with rate limits</div>
                 <div className="card">
                   <table className="table">
                     <thead>
                       <tr>
-                        <th>Team</th>
+                        <th>User</th>
                         <th style={{ textAlign: 'right' }}>RPM limit</th>
                         <th style={{ textAlign: 'right' }}>TPM limit</th>
                         <th style={{ textAlign: 'right' }}>Req (1h)</th>
@@ -250,7 +250,7 @@ export default function RateLimitsPage() {
             {noLimitView.length > 0 && (
               <div>
                 <div className="section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span>Teams without rate limits · {noLimitView.length}</span>
+                  <span>Users without rate limits · {noLimitView.length}</span>
                   <span style={{
                     display: 'flex', alignItems: 'center', gap: 6,
                     textTransform: 'none', letterSpacing: 'normal', fontSize: 11,

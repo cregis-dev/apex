@@ -1025,6 +1025,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let adapter = registry.adapter(&channel);
         let mapped = adapter.map_path(
@@ -1075,6 +1076,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
         let prepared = prepare_request(
@@ -1106,6 +1108,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
 
@@ -1152,6 +1155,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
 
@@ -1197,6 +1201,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
 
@@ -1232,6 +1237,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
         let prepared = prepare_request(
@@ -1330,6 +1336,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
         let prepared = prepare_request(
@@ -1366,6 +1373,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
         let prepared = prepare_request(
@@ -1394,6 +1402,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
         let prepared = prepare_request(
@@ -1425,6 +1434,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
         let prepared = prepare_request(
@@ -1457,6 +1467,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
         let body = Bytes::from(
@@ -1492,6 +1503,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
         let body = Bytes::from_static(br#"{"contents":[]}"#);
@@ -1537,6 +1549,7 @@ mod tests {
             headers: None,
             model_map: Some(model_map),
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
         let body = Bytes::from_static(br#"{"contents":[],"model":"leave-alone"}"#);
@@ -1572,6 +1585,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
         let prepared = prepare_request(
@@ -1607,6 +1621,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
 
@@ -1651,6 +1666,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
 
@@ -1684,6 +1700,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
 
@@ -1722,6 +1739,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
 
@@ -1769,6 +1787,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
 
@@ -1810,6 +1829,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
 
@@ -1854,6 +1874,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let merged = build_headers(&headers, &channel);
         assert!(merged.get("x-api-key").is_none());
@@ -1875,6 +1896,7 @@ mod tests {
             headers: Some(extra),
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let merged = build_headers(&headers, &channel);
         assert_eq!(merged.get("x-extra").unwrap(), "1");
@@ -1910,6 +1932,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         };
         let headers = HeaderMap::new();
         let prepared = prepare_request(

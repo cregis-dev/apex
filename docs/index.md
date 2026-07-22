@@ -33,3 +33,7 @@
 
 - [Project Parts](./current/metadata/project-parts.json) - 机器可读项目结构
 - [Source Tree Analysis](./current/metadata/source-tree-analysis.md) - 目录结构分析
+
+## Design (提案 / 待评审)
+
+- [Cost & Billing](./design/cost-billing.md) - 成本计费技术设计(PAYG + Coding Plan 统一)

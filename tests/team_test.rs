@@ -26,6 +26,7 @@ async fn test_team_allowed_models_case_insensitive() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     // Router
@@ -98,6 +99,7 @@ async fn test_team_allowed_models_glob() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     // Router
@@ -170,6 +172,7 @@ async fn test_team_policy_enforcement() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     // Router
@@ -243,6 +246,7 @@ async fn test_team_auth_x_api_key() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     // Router
@@ -316,6 +320,7 @@ async fn test_team_auth_x_api_key_policy() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
@@ -392,6 +397,7 @@ async fn test_invalid_key_rejection() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     // Router
@@ -511,6 +517,7 @@ async fn test_valid_global_key_acceptance() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),

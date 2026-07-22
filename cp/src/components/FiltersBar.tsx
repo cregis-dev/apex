@@ -110,10 +110,10 @@ export default function FiltersBar({
       )}
 
       <Select
-        label="Team"
+        label="User"
         value={values.team_id}
         options={options?.teams ?? []}
-        placeholder="All teams"
+        placeholder="All users"
         onChange={(v) => setOne('team_id', v)}
       />
       <Select

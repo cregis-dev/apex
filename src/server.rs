@@ -349,6 +349,10 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             patch(handle_admin_update_channel).delete(handle_admin_delete_channel),
         )
         .route(
+            "/admin/pricing",
+            get(handle_admin_get_pricing).put(handle_admin_put_pricing),
+        )
+        .route(
             "/api/cp/provider-templates",
             get(handle_cp_provider_templates),
         )
@@ -832,6 +836,58 @@ struct DashboardModelRouterSection {
     channel_summary: Vec<DashboardShareItem>,
 }
 
+// --- Cost section (present only when `pricing` is configured) ---
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardCostMemberItem {
+    /// User identity (wire `team_id`).
+    id: String,
+    /// The user's team (wire `group`), if any.
+    group: Option<String>,
+    actual_cost: f64,
+    reference_cost: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardCostModelItem {
+    name: String,
+    actual_cost: f64,
+    reference_cost: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardSubscriptionItem {
+    /// Name of the subscription pricing rule.
+    name: String,
+    monthly_fee: f64,
+    /// Fee accrued over this window (monthly_fee prorated by window duration).
+    accrued_fee: f64,
+    /// Total tokens (in + out + cache) used on this rule this window.
+    tokens_used: f64,
+    /// Included quota prorated to this window (0 when the rule has no quota).
+    quota_tokens: f64,
+    /// tokens_used / quota_tokens (0 when no quota set). >1 = over quota.
+    utilization: f64,
+    /// Accrued fee left unallocated because the rule had no traffic (pure waste).
+    idle_fee: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DashboardCostSection {
+    currency: String,
+    /// Real money out the door: PAYG reference cost + accrued subscription fees.
+    actual_cost: f64,
+    /// What all traffic would cost at standard PAYG list rates.
+    reference_cost: f64,
+    /// Percent change in actual_cost vs the previous window.
+    delta_actual_cost: f64,
+    /// 1 - actual/reference (how much cheaper than list PAYG). 0 if no reference.
+    effective_discount: f64,
+    by_member: Vec<DashboardCostMemberItem>,
+    by_model: Vec<DashboardCostModelItem>,
+    subscriptions: Vec<DashboardSubscriptionItem>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 struct DashboardTopologyNode {
     name: String,
@@ -882,6 +938,10 @@ struct DashboardAnalyticsResponse {
     system_reliability: DashboardSystemReliabilitySection,
     model_router: DashboardModelRouterSection,
     client_usage: Vec<DashboardShareItem>,
+    /// Cost breakdown. Present only when `pricing` is configured; omitted otherwise
+    /// so the dashboard can hide cost views rather than show a misleading $0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost: Option<DashboardCostSection>,
     records_meta: DashboardRecordsMeta,
 }
 
@@ -1463,6 +1523,233 @@ fn latest_cursor(records: &[DashboardUsageRecord]) -> Option<DashboardRecordCurs
     })
 }
 
+/// Reference (list PAYG) cost of one record under a resolved pricing rule: the
+/// rule's rate-card row matching the record's model. Subscriptions have no
+/// per-token rates (cost 0 here — the fee is handled separately). Cache tokens
+/// are priced separately from input.
+fn reference_cost_of(rec: &DashboardUsageRecord, rule: &crate::config::PricingRule, unit: f64) -> f64 {
+    if rule.is_subscription() {
+        return 0.0;
+    }
+    match rule.price_for(&rec.model) {
+        Some(p) => {
+            (p.input * rec.input_tokens.max(0) as f64
+                + p.output * rec.output_tokens.max(0) as f64
+                + p.cache_read_rate() * rec.cache_read_tokens.max(0) as f64
+                + p.cache_write_rate() * rec.cache_write_tokens.max(0) as f64)
+                / unit.max(1.0)
+        }
+        None => 0.0,
+    }
+}
+
+/// Build the cost section: each record bills under the rule its channel selects.
+/// PAYG rules charge the reference cost; subscription rules split an accrued
+/// monthly fee across their traffic by reference share. Records whose channel
+/// selects no (or an unknown) rule are untracked and excluded.
+fn build_cost_section(
+    current: &[DashboardUsageRecord],
+    previous: &[DashboardUsageRecord],
+    pricing: &crate::config::Pricing,
+    channels: &[Channel],
+    teams: &[crate::config::Team],
+    window_secs: f64,
+    // When the query is filtered (by channel/user/model/…), only subscriptions with
+    // traffic in the filtered window count — otherwise another channel's monthly fee
+    // would leak into a scoped view. Unfiltered keeps all rules (idle ones = waste).
+    filtered: bool,
+) -> DashboardCostSection {
+    use std::collections::HashMap;
+
+    let unit = pricing.unit;
+    // channel name -> selected rule name
+    let channel_rule: HashMap<&str, &str> = channels
+        .iter()
+        .filter_map(|ch| ch.pricing.as_deref().map(|r| (ch.name.as_str(), r)))
+        .collect();
+    // rule name -> rule
+    let rules: HashMap<&str, &crate::config::PricingRule> =
+        pricing.rules.iter().map(|r| (r.name.as_str(), r)).collect();
+    let group_by_member: HashMap<&str, Option<String>> =
+        teams.iter().map(|t| (t.id.as_str(), t.group.clone())).collect();
+
+    // The rule a record bills under (via its channel), if any.
+    let rule_for = |rec: &DashboardUsageRecord| -> Option<&crate::config::PricingRule> {
+        channel_rule
+            .get(rec.channel.as_str())
+            .and_then(|name| rules.get(name).copied())
+    };
+
+    // Subscription rules in scope: rule name -> rule.
+    // - filtered view: only rules with traffic in the (already-filtered) window;
+    // - full view: every rule referenced by a channel (idle ones show as waste).
+    let sub_rules: HashMap<&str, &crate::config::PricingRule> = if filtered {
+        current
+            .iter()
+            .filter_map(&rule_for)
+            .filter(|r| r.is_subscription())
+            .map(|r| (r.name.as_str(), r))
+            .collect()
+    } else {
+        channel_rule
+            .values()
+            .filter_map(|name| {
+                rules
+                    .get(name)
+                    .copied()
+                    .filter(|r| r.is_subscription())
+                    .map(|r| (r.name.as_str(), r))
+            })
+            .collect()
+    };
+
+    let month_secs = 30.0 * 86_400.0;
+    let window_fraction = (window_secs.max(0.0)) / month_secs;
+    let accrued = |fee: f64| fee * window_fraction;
+
+    // Total tokens (in + out + cache) a record consumed — the allocation weight
+    // for a subscription fee (subscriptions carry no per-token rates).
+    let record_tokens = |rec: &DashboardUsageRecord| -> f64 {
+        (rec.input_tokens.max(0)
+            + rec.output_tokens.max(0)
+            + rec.cache_read_tokens.max(0)
+            + rec.cache_write_tokens.max(0)) as f64
+    };
+
+    // Sum tokens per subscription rule (denominator for fee allocation).
+    let sub_token_total = |records: &[DashboardUsageRecord]| -> HashMap<String, f64> {
+        let mut m: HashMap<String, f64> = HashMap::new();
+        for rec in records {
+            if let Some(rule) = rule_for(rec)
+                && rule.is_subscription()
+            {
+                *m.entry(rule.name.clone()).or_insert(0.0) += record_tokens(rec);
+            }
+        }
+        m
+    };
+
+    // Per-record actual: PAYG = reference cost; subscription = accrued fee × token share.
+    let actual_of = |rule: &crate::config::PricingRule,
+                     rec: &DashboardUsageRecord,
+                     reference: f64,
+                     tok_totals: &HashMap<String, f64>|
+     -> f64 {
+        if rule.is_subscription() {
+            let total = tok_totals.get(&rule.name).copied().unwrap_or(0.0);
+            if total > 0.0 {
+                accrued(rule.monthly_fee) * (record_tokens(rec) / total)
+            } else {
+                0.0
+            }
+        } else {
+            reference
+        }
+    };
+
+    let cur_tok_totals = sub_token_total(current);
+    let mut by_member: HashMap<String, (f64, f64)> = HashMap::new();
+    let mut by_model: HashMap<String, (f64, f64)> = HashMap::new();
+    let mut actual_total = 0.0;
+    let mut reference_total = 0.0;
+
+    for rec in current {
+        let Some(rule) = rule_for(rec) else { continue };
+        let reference = reference_cost_of(rec, rule, unit);
+        let actual = actual_of(rule, rec, reference, &cur_tok_totals);
+        reference_total += reference;
+        actual_total += actual;
+        let m = by_member.entry(rec.team_id.clone()).or_insert((0.0, 0.0));
+        m.0 += actual;
+        m.1 += reference;
+        let md = by_model.entry(rec.model.clone()).or_insert((0.0, 0.0));
+        md.0 += actual;
+        md.1 += reference;
+    }
+
+    // Subscription rows. A rule referenced by a channel but with no traffic still
+    // accrues its fee — that's pure waste (idle_fee), and still counts as spent.
+    let mut subscriptions: Vec<DashboardSubscriptionItem> = sub_rules
+        .iter()
+        .map(|(name, rule)| {
+            let acc = accrued(rule.monthly_fee);
+            let toks = cur_tok_totals.get(*name).copied().unwrap_or(0.0);
+            let idle = if toks > 0.0 { 0.0 } else { acc };
+            actual_total += idle;
+            let quota = rule
+                .included_quota_tokens
+                .map(|q| q as f64 * window_fraction)
+                .unwrap_or(0.0);
+            DashboardSubscriptionItem {
+                name: (*name).to_string(),
+                monthly_fee: rule.monthly_fee,
+                accrued_fee: acc,
+                tokens_used: toks,
+                quota_tokens: quota,
+                utilization: if quota > 0.0 { toks / quota } else { 0.0 },
+                idle_fee: idle,
+            }
+        })
+        .collect();
+    subscriptions.sort_by(|a, b| b.accrued_fee.total_cmp(&a.accrued_fee));
+
+    // Previous-window actual (for the delta), same rules.
+    let prev_tok_totals = sub_token_total(previous);
+    let mut prev_actual = 0.0;
+    for rec in previous {
+        if let Some(rule) = rule_for(rec) {
+            let reference = reference_cost_of(rec, rule, unit);
+            prev_actual += actual_of(rule, rec, reference, &prev_tok_totals);
+        }
+    }
+    for (name, rule) in &sub_rules {
+        if prev_tok_totals.get(*name).copied().unwrap_or(0.0) <= 0.0 {
+            prev_actual += accrued(rule.monthly_fee);
+        }
+    }
+
+    let mut by_member: Vec<DashboardCostMemberItem> = by_member
+        .into_iter()
+        .map(|(id, (actual, reference))| {
+            let group = group_by_member.get(id.as_str()).cloned().flatten();
+            DashboardCostMemberItem {
+                id,
+                group,
+                actual_cost: actual,
+                reference_cost: reference,
+            }
+        })
+        .collect();
+    by_member.sort_by(|a, b| b.actual_cost.total_cmp(&a.actual_cost));
+    by_member.truncate(50);
+
+    let mut by_model: Vec<DashboardCostModelItem> = by_model
+        .into_iter()
+        .map(|(name, (actual, reference))| DashboardCostModelItem {
+            name,
+            actual_cost: actual,
+            reference_cost: reference,
+        })
+        .collect();
+    by_model.sort_by(|a, b| b.reference_cost.total_cmp(&a.reference_cost));
+    by_model.truncate(50);
+
+    DashboardCostSection {
+        currency: pricing.currency.clone(),
+        actual_cost: actual_total,
+        reference_cost: reference_total,
+        delta_actual_cost: percent_change(actual_total, prev_actual),
+        effective_discount: if reference_total > 0.0 {
+            1.0 - actual_total / reference_total
+        } else {
+            0.0
+        },
+        by_member,
+        by_model,
+        subscriptions,
+    }
+}
+
 async fn dashboard_analytics_api_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
@@ -1514,6 +1801,44 @@ async fn dashboard_analytics_api_handler(
         }
     };
 
+    // Cost section only when pricing is configured. Snapshot the config bits we
+    // need (cheap Arc clones) so we don't hold the RwLock across the DB read.
+    let (pricing_opt, channels_arc, teams_arc) = {
+        let config = state.config.read().unwrap();
+        (
+            config.pricing.clone(),
+            config.channels.clone(),
+            config.teams.clone(),
+        )
+    };
+    // Any entity filter active? (range only defines the window, not a filter.)
+    let filtered = ["team_id", "router", "channel", "model", "client", "status"]
+        .iter()
+        .any(|k| {
+            params
+                .get(*k)
+                .map(|v| !v.trim().is_empty() && !v.eq_ignore_ascii_case("all"))
+                .unwrap_or(false)
+        });
+    let cost = pricing_opt.map(|pricing| {
+        // Deltas need the previous window's rows (priced per model), which the
+        // aggregate above can't give — fetch them only when cost is enabled.
+        let previous_records = state
+            .database
+            .get_usage_records_for_analytics(&previous_query)
+            .unwrap_or_default();
+        let window_secs = (window.current_end - window.current_start).num_seconds() as f64;
+        build_cost_section(
+            &current_records,
+            &previous_records,
+            &pricing,
+            &channels_arc,
+            &teams_arc,
+            window_secs,
+            filtered,
+        )
+    });
+
     let trend = build_trend_section(&current_records, &window);
     let response = DashboardAnalyticsResponse {
         generated_at: format_dashboard_timestamp(Local::now().naive_local()),
@@ -1525,6 +1850,7 @@ async fn dashboard_analytics_api_handler(
         system_reliability: build_system_reliability_section(&current_records, &trend),
         model_router: build_model_router_section(&current_records),
         client_usage: build_client_usage_section(&current_records),
+        cost,
         records_meta: DashboardRecordsMeta {
             total: current_records.len(),
             latest_cursor: latest_cursor(&current_records),
@@ -2222,7 +2548,8 @@ async fn handle_admin_channels(
                 "name": channel.name,
                 "provider_type": channel.provider_type,
                 "base_url": channel.base_url,
-                "anthropic_base_url": channel.anthropic_base_url
+                "anthropic_base_url": channel.anthropic_base_url,
+                "pricing": channel.pricing
             })
         })
         .collect::<Vec<_>>();
@@ -2263,6 +2590,9 @@ struct CreateChannelRequest {
     headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     model_map: Option<std::collections::HashMap<String, String>>,
+    /// Name of the pricing rule this channel bills under. Omit / `null` ⇒ untracked.
+    #[serde(default)]
+    pricing: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -2283,6 +2613,10 @@ struct UpdateChannelRequest {
     headers: Option<Option<std::collections::HashMap<String, String>>>,
     #[serde(default, deserialize_with = "deserialize_optional_optional_str_map")]
     model_map: Option<Option<std::collections::HashMap<String, String>>>,
+    /// `None` leaves the pricing rule unchanged; `Some("")` clears it (untracked);
+    /// `Some(name)` sets it. The name must be an existing pricing rule.
+    #[serde(default)]
+    pricing: Option<String>,
 }
 
 fn deserialize_optional_optional_string<'de, D>(
@@ -2326,7 +2660,28 @@ fn channel_json_response(channel: &crate::config::Channel) -> serde_json::Value 
         "provider_type": channel.provider_type,
         "base_url": channel.base_url,
         "anthropic_base_url": channel.anthropic_base_url,
+        "pricing": channel.pricing,
     })
+}
+
+/// A channel's `pricing` must name an existing rule (empty string clears it).
+/// Validates against the candidate config so it runs inside `commit_config`.
+fn validate_channel_pricing(cfg: &Config, name: Option<&str>) -> Result<(), Response<Body>> {
+    if let Some(rule_name) = name
+        && !rule_name.is_empty()
+    {
+        let exists = cfg
+            .pricing
+            .as_ref()
+            .is_some_and(|p| p.rule(rule_name).is_some());
+        if !exists {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("pricing rule '{rule_name}' does not exist"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Collect router names + rule indices that reference the given channel.
@@ -2394,6 +2749,7 @@ async fn handle_admin_create_channel(
         headers: payload.headers,
         model_map: payload.model_map,
         timeouts: None,
+        pricing: payload.pricing.filter(|v| !v.is_empty()),
     };
 
     if let Err(resp) = commit_config(&state, |cfg| {
@@ -2403,6 +2759,7 @@ async fn handle_admin_create_channel(
                 "A channel with this name already exists",
             ));
         }
+        validate_channel_pricing(cfg, new_channel.pricing.as_deref())?;
         Arc::make_mut(&mut cfg.channels).push(new_channel.clone());
         Ok(())
     }) {
@@ -2439,6 +2796,8 @@ async fn handle_admin_update_channel(
     };
 
     let snapshot = match commit_config(&state, |cfg| {
+        // Validate the pricing rule exists before taking the mutable channel borrow.
+        validate_channel_pricing(cfg, payload.pricing.as_deref())?;
         let channels = Arc::make_mut(&mut cfg.channels);
         let Some(channel) = channels.iter_mut().find(|c| c.name == channel_name) else {
             return Err(error_response(StatusCode::NOT_FOUND, "Channel not found"));
@@ -2476,6 +2835,9 @@ async fn handle_admin_update_channel(
         }
         if let Some(model_map) = payload.model_map {
             channel.model_map = model_map;
+        }
+        if let Some(pricing) = payload.pricing {
+            channel.pricing = if pricing.is_empty() { None } else { Some(pricing) };
         }
 
         Ok(channel.clone())
@@ -3013,6 +3375,150 @@ async fn handle_cp_provider_templates(
         .header("content-type", "application/json")
         .body(Body::from(
             json!({ "object": "list", "data": data }).to_string(),
+        ))
+        .unwrap()
+}
+
+/// Validate a global pricing table: positive `unit`; every rule has a non-empty,
+/// unique name and a valid `type`; all rates finite and non-negative; subscription
+/// rules have a sane `monthly_fee` and `billing_day`.
+fn validate_pricing(pricing: &crate::config::Pricing) -> Result<(), Response<Body>> {
+    if !pricing.unit.is_finite() || pricing.unit <= 0.0 {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "pricing.unit must be a number > 0",
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for r in &pricing.rules {
+        let name = r.name.trim();
+        if name.is_empty() {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "each pricing rule needs a non-empty name",
+            ));
+        }
+        if !seen.insert(name.to_string()) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("duplicate pricing rule name: {name}"),
+            ));
+        }
+        if r.kind != "payg" && r.kind != "subscription" {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("rule '{name}': type must be 'payg' or 'subscription'"),
+            ));
+        }
+        // PAYG rate-card rows: each needs a valid `match` and non-negative rates.
+        for p in &r.prices {
+            if p.match_pattern.trim().is_empty() {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("rule '{name}': each price row needs a non-empty match"),
+                ));
+            }
+            if glob::Pattern::new(&p.match_pattern).is_err() {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("rule '{name}': invalid match pattern '{}'", p.match_pattern),
+                ));
+            }
+            for (label, value) in [
+                ("input", p.input),
+                ("output", p.output),
+                ("cache_read", p.cache_read.unwrap_or(0.0)),
+                ("cache_write", p.cache_write.unwrap_or(0.0)),
+            ] {
+                if !value.is_finite() || value < 0.0 {
+                    return Err(error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("rule '{name}': rate '{label}' must be a number >= 0"),
+                    ));
+                }
+            }
+        }
+        if r.is_subscription() {
+            if !r.monthly_fee.is_finite() || r.monthly_fee < 0.0 {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("rule '{name}': monthly_fee must be a number >= 0"),
+                ));
+            }
+            if !(1..=31).contains(&r.billing_day) {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("rule '{name}': billing_day must be between 1 and 31"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// GET /admin/pricing — the model reference-price table. Returns an empty default
+/// table when none is configured so the editor always has something to render.
+async fn handle_admin_get_pricing(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, _body) = req.into_parts();
+    let config = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config, &parts.headers) {
+        return resp;
+    }
+    let pricing = config
+        .pricing
+        .clone()
+        .unwrap_or_else(|| crate::config::Pricing {
+            currency: "USD".to_string(),
+            unit: 1_000_000.0,
+            rules: Vec::new(),
+        });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&pricing).unwrap_or_default(),
+        ))
+        .unwrap()
+}
+
+/// PUT /admin/pricing — replace the model reference-price table wholesale.
+/// Applied live: `commit_config` swaps the in-memory config after persisting.
+async fn handle_admin_put_pricing(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = req.into_parts();
+    let config_snapshot = state.config.read().unwrap().clone();
+    if let Err(resp) = enforce_global_auth(&config_snapshot, &parts.headers) {
+        return resp;
+    }
+    let bytes = match axum::body::to_bytes(body, 256 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Failed to read body"),
+    };
+    let pricing: crate::config::Pricing = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(err) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {err}"));
+        }
+    };
+    if let Err(resp) = validate_pricing(&pricing) {
+        return resp;
+    }
+    if let Err(resp) = commit_config(&state, |cfg| {
+        cfg.pricing = Some(pricing.clone());
+        Ok(())
+    }) {
+        return resp;
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&pricing).unwrap_or_default(),
         ))
         .unwrap()
 }
@@ -4471,6 +4977,7 @@ mod tests {
             teams: Arc::new(vec![]),
             compliance: None,
             retention: Default::default(),
+            pricing: None,
             channels: Arc::new(vec![
                 crate::config::Channel {
                     name: "test-channel".to_string(),
@@ -4481,6 +4988,7 @@ mod tests {
                     headers: None,
                     model_map: None,
                     timeouts: None,
+                    pricing: None,
                 },
                 crate::config::Channel {
                     name: "test-channel-2".to_string(),
@@ -4491,6 +4999,7 @@ mod tests {
                     headers: None,
                     model_map: None,
                     timeouts: None,
+                    pricing: None,
                 },
             ]),
             routers: Arc::new(vec![crate::config::Router {
@@ -4674,6 +5183,8 @@ mod tests {
             provider_error_body: None,
             client: None,
             user_agent: None,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         }];
 
         let topology = build_topology_section(&records);
@@ -4712,6 +5223,8 @@ mod tests {
                 provider_error_body: None,
                 client: None,
                 user_agent: None,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             },
             DashboardUsageRecord {
                 id: 2,
@@ -4734,6 +5247,8 @@ mod tests {
                 provider_error_body: None,
                 client: None,
                 user_agent: None,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             },
         ];
 
@@ -4749,6 +5264,259 @@ mod tests {
 
         assert_eq!(team_link.value, 2);
         assert_eq!(team_link.total_tokens, 70);
+    }
+
+    // ---- cost section ----
+
+    #[allow(clippy::too_many_arguments)]
+    fn cost_rec(
+        id: i64,
+        team: &str,
+        channel: &str,
+        model: &str,
+        input: i64,
+        output: i64,
+        cache_read: i64,
+        cache_write: i64,
+    ) -> DashboardUsageRecord {
+        DashboardUsageRecord {
+            id,
+            timestamp: "2026-03-12 12:00:00".to_string(),
+            request_id: None,
+            team_id: team.to_string(),
+            router: "default".to_string(),
+            matched_rule: None,
+            final_channel: channel.to_string(),
+            channel: channel.to_string(),
+            model: model.to_string(),
+            input_tokens: input,
+            output_tokens: output,
+            latency_ms: Some(50.0),
+            fallback_triggered: false,
+            status: "success".to_string(),
+            status_code: Some(200),
+            error_message: None,
+            provider_trace_id: None,
+            provider_error_body: None,
+            client: None,
+            user_agent: None,
+            cache_read_tokens: cache_read,
+            cache_write_tokens: cache_write,
+        }
+    }
+
+    fn price_row(match_pattern: &str, input: f64, output: f64, cache_read: Option<f64>) -> crate::config::ModelPrice {
+        crate::config::ModelPrice {
+            match_pattern: match_pattern.to_string(),
+            input,
+            output,
+            cache_read,
+            cache_write: None,
+        }
+    }
+
+    /// A PAYG rule with a single `*` rate-card row (the flat case).
+    fn payg_rule(name: &str, input: f64, output: f64, cache_read: Option<f64>) -> crate::config::PricingRule {
+        crate::config::PricingRule {
+            name: name.to_string(),
+            kind: "payg".to_string(),
+            prices: vec![price_row("*", input, output, cache_read)],
+            monthly_fee: 0.0,
+            billing_day: 1,
+            included_quota_tokens: None,
+        }
+    }
+
+    fn payg_card(name: &str, rows: Vec<crate::config::ModelPrice>) -> crate::config::PricingRule {
+        crate::config::PricingRule {
+            name: name.to_string(),
+            kind: "payg".to_string(),
+            prices: rows,
+            monthly_fee: 0.0,
+            billing_day: 1,
+            included_quota_tokens: None,
+        }
+    }
+
+    fn sub_rule(name: &str, monthly_fee: f64, quota: Option<u64>) -> crate::config::PricingRule {
+        crate::config::PricingRule {
+            name: name.to_string(),
+            kind: "subscription".to_string(),
+            prices: vec![],
+            monthly_fee,
+            billing_day: 1,
+            included_quota_tokens: quota,
+        }
+    }
+
+    fn pricing_of(rules: Vec<crate::config::PricingRule>) -> crate::config::Pricing {
+        crate::config::Pricing { currency: "USD".to_string(), unit: 1_000_000.0, rules }
+    }
+
+    /// A channel named `name` that bills under pricing rule `rule`.
+    fn priced_channel(name: &str, rule: &str) -> Channel {
+        Channel {
+            name: name.to_string(),
+            provider_type: crate::config::ProviderType::Openai,
+            base_url: "x".to_string(),
+            api_key: "x".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+            pricing: Some(rule.to_string()),
+        }
+    }
+
+    #[test]
+    fn reference_cost_uses_rule_rate_card() {
+        let rule = payg_rule("std", 2.5, 10.0, Some(1.25));
+        // 1M input @2.5 + 1M output @10 + 1M cache_read @1.25 = 13.75
+        let rec = cost_rec(1, "a", "c", "any-model", 1_000_000, 1_000_000, 1_000_000, 0);
+        assert!((reference_cost_of(&rec, &rule, 1_000_000.0) - 13.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reference_cost_prices_models_differently_within_one_rule() {
+        // Same rule/channel, two model tiers priced differently (DeepSeek-style).
+        let rule = payg_card(
+            "deepseek",
+            vec![
+                price_row("*flash*", 0.14, 0.28, Some(0.0028)),
+                price_row("*pro*", 0.435, 0.87, Some(0.003625)),
+                price_row("*", 0.27, 1.1, None),
+            ],
+        );
+        let flash = cost_rec(1, "a", "c", "deepseek-v4-flash", 1_000_000, 1_000_000, 0, 0);
+        let pro = cost_rec(2, "a", "c", "deepseek-v4-pro", 1_000_000, 1_000_000, 0, 0);
+        assert!((reference_cost_of(&flash, &rule, 1_000_000.0) - (0.14 + 0.28)).abs() < 1e-9);
+        assert!((reference_cost_of(&pro, &rule, 1_000_000.0) - (0.435 + 0.87)).abs() < 1e-9);
+        // unmatched model falls through to the `*` row
+        let other = cost_rec(3, "a", "c", "deepseek-chat", 1_000_000, 0, 0, 0);
+        assert!((reference_cost_of(&other, &rule, 1_000_000.0) - 0.27).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_section_payg_actual_equals_reference() {
+        let pricing = pricing_of(vec![payg_rule("std", 2.5, 10.0, None)]);
+        let channels = vec![priced_channel("openai", "std")];
+        let recs = vec![
+            cost_rec(1, "alice", "openai", "m", 1_000_000, 0, 0, 0), // $2.5
+            cost_rec(2, "bob", "openai", "m", 0, 1_000_000, 0, 0),   // $10
+        ];
+        let c = build_cost_section(&recs, &[], &pricing, &channels, &[], 86_400.0, false);
+        assert!((c.actual_cost - 12.5).abs() < 1e-9);
+        assert!((c.reference_cost - 12.5).abs() < 1e-9);
+        assert!(c.subscriptions.is_empty());
+        let alice = c.by_member.iter().find(|m| m.id == "alice").unwrap();
+        assert!((alice.actual_cost - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_section_untracked_channel_is_excluded() {
+        // No channel selects a rule → nothing is priced.
+        let pricing = pricing_of(vec![payg_rule("std", 2.5, 10.0, None)]);
+        let recs = vec![cost_rec(1, "alice", "openai", "m", 1_000_000, 0, 0, 0)];
+        let c = build_cost_section(&recs, &[], &pricing, &[], &[], 86_400.0, false);
+        assert_eq!(c.actual_cost, 0.0);
+        assert_eq!(c.reference_cost, 0.0);
+        assert!(c.by_member.is_empty());
+    }
+
+    #[test]
+    fn cost_section_subscription_allocates_fee_by_token_share() {
+        // Subscription: no per-token rates; fee split by token usage.
+        let pricing = pricing_of(vec![sub_rule("claude-plan", 300.0, None)]);
+        let channels = vec![priced_channel("sub-ch", "claude-plan")];
+        // alice 2M tokens, bob 1M tokens -> 2:1 split
+        let recs = vec![
+            cost_rec(1, "alice", "sub-ch", "m", 2_000_000, 0, 0, 0),
+            cost_rec(2, "bob", "sub-ch", "m", 1_000_000, 0, 0, 0),
+        ];
+        let month = 30.0 * 86_400.0; // full month => accrued == monthly_fee
+        let c = build_cost_section(&recs, &[], &pricing, &channels, &[], month, false);
+        assert!((c.actual_cost - 300.0).abs() < 1e-6, "actual {}", c.actual_cost);
+        assert_eq!(c.reference_cost, 0.0); // subscriptions have no reference $
+        let sub = &c.subscriptions[0];
+        assert_eq!(sub.name, "claude-plan");
+        assert!((sub.accrued_fee - 300.0).abs() < 1e-6);
+        assert!((sub.tokens_used - 3_000_000.0).abs() < 1e-6);
+        assert_eq!(sub.quota_tokens, 0.0); // no quota configured
+        assert_eq!(sub.idle_fee, 0.0);
+        let alice = c.by_member.iter().find(|m| m.id == "alice").unwrap();
+        let bob = c.by_member.iter().find(|m| m.id == "bob").unwrap();
+        assert!((alice.actual_cost - 200.0).abs() < 1e-6, "alice {}", alice.actual_cost);
+        assert!((bob.actual_cost - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cost_section_subscription_utilization_is_quota_based() {
+        // 10M/month quota; 5M used over a full month => 50% utilization.
+        let pricing = pricing_of(vec![sub_rule("plan", 300.0, Some(10_000_000))]);
+        let channels = vec![priced_channel("ch", "plan")];
+        let recs = vec![cost_rec(1, "a", "ch", "m", 5_000_000, 0, 0, 0)];
+        let c = build_cost_section(&recs, &[], &pricing, &channels, &[], 30.0 * 86_400.0, false);
+        let sub = &c.subscriptions[0];
+        assert!((sub.tokens_used - 5_000_000.0).abs() < 1e-6);
+        assert!((sub.quota_tokens - 10_000_000.0).abs() < 1e-3);
+        assert!((sub.utilization - 0.5).abs() < 1e-6, "util {}", sub.utilization);
+    }
+
+    #[test]
+    fn validate_pricing_checks_names_types_and_rates() {
+        let ok = pricing_of(vec![
+            payg_rule("gpt", 2.5, 10.0, Some(1.25)),
+            sub_rule("plan", 200.0, None),
+        ]);
+        assert!(validate_pricing(&ok).is_ok());
+
+        let mut bad_unit = ok.clone();
+        bad_unit.unit = 0.0;
+        assert!(validate_pricing(&bad_unit).is_err());
+
+        let dup = pricing_of(vec![payg_rule("x", 1.0, 1.0, None), payg_rule("x", 2.0, 2.0, None)]);
+        assert!(validate_pricing(&dup).is_err());
+
+        let neg = pricing_of(vec![payg_rule("x", -1.0, 0.0, None)]);
+        assert!(validate_pricing(&neg).is_err());
+
+        let empty_name = pricing_of(vec![payg_rule("  ", 1.0, 1.0, None)]);
+        assert!(validate_pricing(&empty_name).is_err());
+
+        let mut bad_day = sub_rule("s", 20.0, None);
+        bad_day.billing_day = 40;
+        assert!(validate_pricing(&pricing_of(vec![bad_day])).is_err());
+
+        let bad_kind = crate::config::PricingRule { kind: "weird".to_string(), ..payg_rule("k", 1.0, 1.0, None) };
+        assert!(validate_pricing(&pricing_of(vec![bad_kind])).is_err());
+    }
+
+    #[test]
+    fn cost_section_idle_subscription_is_pure_waste() {
+        let pricing = pricing_of(vec![sub_rule("idle-plan", 300.0, None)]);
+        let channels = vec![priced_channel("idle-ch", "idle-plan")];
+        let c = build_cost_section(&[], &[], &pricing, &channels, &[], 30.0 * 86_400.0, false);
+        assert!((c.actual_cost - 300.0).abs() < 1e-6);
+        assert_eq!(c.reference_cost, 0.0);
+        let sub = &c.subscriptions[0];
+        assert!((sub.idle_fee - 300.0).abs() < 1e-6);
+        assert_eq!(sub.tokens_used, 0.0);
+        assert_eq!(sub.utilization, 0.0);
+    }
+
+    #[test]
+    fn cost_section_filtered_excludes_untrafficked_subscriptions() {
+        // Idle subscription (channel referenced, no records in window).
+        let pricing = pricing_of(vec![sub_rule("idle-plan", 300.0, None)]);
+        let channels = vec![priced_channel("idle-ch", "idle-plan")];
+        // Unfiltered: fee counts as idle waste.
+        let full = build_cost_section(&[], &[], &pricing, &channels, &[], 30.0 * 86_400.0, false);
+        assert!((full.actual_cost - 300.0).abs() < 1e-6);
+        assert_eq!(full.subscriptions.len(), 1);
+        // Filtered: no traffic for this rule in scope ⇒ its fee must not leak in.
+        let scoped = build_cost_section(&[], &[], &pricing, &channels, &[], 30.0 * 86_400.0, true);
+        assert_eq!(scoped.actual_cost, 0.0);
+        assert!(scoped.subscriptions.is_empty());
     }
 
     #[test]
@@ -4775,6 +5543,8 @@ mod tests {
                 provider_error_body: None,
                 client: None,
                 user_agent: None,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             })
             .collect::<Vec<_>>();
 
@@ -4811,6 +5581,7 @@ mod tests {
             headers: None,
             model_map: None,
             timeouts: None,
+            pricing: None,
         });
 
         // Update router to match "gpt-4" to "ch2"
@@ -5093,6 +5864,8 @@ mod tests {
             None,
             None,
             None,
+            0,
+            0,
         );
 
         let (status, body) = fetch_models(
@@ -5172,6 +5945,7 @@ mod tests {
                 headers: None,
                 model_map: None,
                 timeouts: None,
+                pricing: None,
             });
             Ok::<_, Response<Body>>(())
         });
@@ -5210,6 +5984,7 @@ mod tests {
                 headers: None,
                 model_map: None,
                 timeouts: None,
+                pricing: None,
             });
             Ok::<_, Response<Body>>(())
         });

@@ -543,7 +543,7 @@ export default function RoutersPage() {
           <Empty
             icon="route"
             title="No routers configured"
-            sub="Click ‘New router’ to define how teams should route to your channels."
+            sub="Click ‘New router’ to define how requests should route to your channels."
           />
         )}
 
@@ -643,7 +643,7 @@ export default function RoutersPage() {
               style={{ background: 'var(--err)', color: '#fff', borderColor: 'transparent' }}
               disabled={deleteMutation.isPending || teamsReferencingPending.length > 0}
               onClick={() => pendingDelete && deleteMutation.mutate(pendingDelete.name)}
-              title={teamsReferencingPending.length > 0 ? 'Remove the router from all teams’ allowed_routers first' : 'Delete this router'}
+              title={teamsReferencingPending.length > 0 ? 'Remove the router from all users’ allowed_routers first' : 'Delete this router'}
             >
               {deleteMutation.isPending
                 ? <span className="spinner" style={{ width: 12, height: 12 }} />
@@ -665,7 +665,7 @@ export default function RoutersPage() {
                 fontSize: 12, marginTop: 10,
               }}>
                 <div style={{ fontWeight: 600, marginBottom: 6 }}>
-                  Blocked — still referenced by {teamsReferencingPending.length} team{teamsReferencingPending.length === 1 ? '' : 's'}:
+                  Blocked — still referenced by {teamsReferencingPending.length} user{teamsReferencingPending.length === 1 ? '' : 's'}:
                 </div>
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                   {teamsReferencingPending.map((t) => (
@@ -673,13 +673,13 @@ export default function RoutersPage() {
                   ))}
                 </div>
                 <div style={{ marginTop: 8 }}>
-                  Remove it from each team's allowed_routers in Teams page first, then come back.
+                  Remove it from each user's allowed_routers in Users page first, then come back.
                 </div>
               </div>
             ) : (
               <p>
-                Any team that still has this router in <code>allowed_routers</code> will start
-                receiving routing errors. The gateway will refuse the delete if such teams exist.
+                Any user that still has this router in <code>allowed_routers</code> will start
+                receiving routing errors. The gateway will refuse the delete if such users exist.
               </p>
             )}
             {deleteError && (

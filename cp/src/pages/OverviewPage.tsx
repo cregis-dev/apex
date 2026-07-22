@@ -6,7 +6,10 @@ import Empty from '../components/Empty.tsx'
 import Icon, { type IconName } from '../components/Icon.tsx'
 import FiltersBar, { DEFAULT_FILTERS, filterValuesToParams, type FilterValues } from '../components/FiltersBar.tsx'
 import { api } from '../lib/api.ts'
-import type { TrendPoint, TopologyNode, TopologyLink, FlowSummary } from '../lib/types.ts'
+import type {
+  TrendPoint, TopologyNode, TopologyLink, FlowSummary,
+  CostSection as CostSectionData, CostMemberItem, SubscriptionItem,
+} from '../lib/types.ts'
 
 function fmt(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -16,6 +19,20 @@ function fmt(n: number): string {
 
 function fmtMs(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms`
+}
+
+const CURRENCY_SYMBOL: Record<string, string> = { USD: '$', EUR: '€', GBP: '£', CNY: '¥', RMB: '¥' }
+
+function fmtMoney(n: number, currency: string): string {
+  const sym = CURRENCY_SYMBOL[currency.toUpperCase()] ?? ''
+  const suffix = sym ? '' : ` ${currency}`
+  const abs = Math.abs(n)
+  const body =
+    abs >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M`
+    : abs >= 1_000 ? `${(n / 1_000).toFixed(1)}k`
+    : abs >= 1 ? n.toFixed(2)
+    : n.toFixed(3)
+  return `${sym}${body}${suffix}`
 }
 
 interface StatCardProps {
@@ -115,8 +132,10 @@ function TrendChart({ points }: { points: TrendPoint[] }) {
   )
 }
 
+// KIND_ORDER values ('team') mirror the backend `kind` field (wire) and must not
+// change; COLUMN_HEADERS is display-only — a `team` node is one user's key.
 const KIND_ORDER = ['team', 'router', 'channel', 'model'] as const
-const COLUMN_HEADERS = ['TEAMS', 'ROUTERS', 'CHANNELS', 'MODELS'] as const
+const COLUMN_HEADERS = ['USERS', 'ROUTERS', 'CHANNELS', 'MODELS'] as const
 const KIND_FILL: Record<string, string> = {
   team: 'oklch(0.66 0.14 55)',
   router: 'oklch(0.62 0.14 48)',
@@ -311,7 +330,7 @@ function CompactTopology({ flows }: { flows: FlowSummary[] }) {
     return [...m.entries()].sort((a, b) => b[1] - a[1]).map(([name, value]) => ({ name, value }))
   }
   const cols: Col[] = [
-    { header: 'Teams', items: dedupe(flows.map((f) => [f.team_id, f.requests])) },
+    { header: 'Users', items: dedupe(flows.map((f) => [f.team_id, f.requests])) },
     { header: 'Routers', items: dedupe(flows.map((f) => [f.router, f.requests])) },
     { header: 'Channels', items: dedupe(flows.map((f) => [f.channel, f.requests])) },
     { header: 'Models', items: dedupe(flows.map((f) => [f.model, f.requests])) },
@@ -444,6 +463,123 @@ function RankCard({
   )
 }
 
+/** A cost stat card without a sparkline. `invertDelta` colors a *rise* red (spend). */
+function CostStatCard({
+  label, value, sub, delta, invertDelta,
+}: {
+  label: string; value: string; sub?: string; delta?: number; invertDelta?: boolean
+}) {
+  const good = delta == null ? true : invertDelta ? delta <= 0 : delta >= 0
+  return (
+    <div className="card" style={{ padding: '18px 20px' }}>
+      <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 600, letterSpacing: '-0.02em', marginBottom: 4 }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 4 }}>{sub}</div>}
+      {delta != null && (
+        <div style={{ fontSize: 12, color: good ? 'var(--ok)' : 'var(--err)' }}>
+          {delta >= 0 ? '↑' : '↓'} {Math.abs(delta).toFixed(1)}%
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Ranked users by actual cost. */
+function CostRankCard({ items, currency }: { items: CostMemberItem[]; currency: string }) {
+  const sorted = [...items].sort((a, b) => b.actual_cost - a.actual_cost).slice(0, 8)
+  const max = Math.max(...sorted.map((i) => i.actual_cost), 1e-9)
+  return (
+    <div className="card">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '14px 16px', borderBottom: '1px solid var(--border)' }}>
+        <Icon name="users" size={14} style={{ color: 'var(--muted)' }} />
+        <span style={{ fontWeight: 600, fontSize: 14 }}>Top Users by Cost</span>
+      </div>
+      <div style={{ padding: '6px 0' }}>
+        {sorted.map((it, i) => (
+          <div key={it.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 16px' }}>
+            <span style={{ width: 16, fontSize: 12, fontWeight: 600, textAlign: 'right', color: i < 3 ? 'var(--brand)' : 'var(--muted-2)' }}>{i + 1}</span>
+            <span style={{ flex: 1, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.id}>
+              {it.id}
+              {it.group && <span style={{ fontSize: 11, color: 'var(--muted)' }}> · {it.group}</span>}
+            </span>
+            <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--muted)', width: 72, textAlign: 'right' }}>
+              {fmtMoney(it.actual_cost, currency)}
+            </span>
+            <div style={{ width: 56, height: 4, background: 'var(--surface-2)', borderRadius: 2, overflow: 'hidden' }}>
+              <div style={{ width: `${(it.actual_cost / max) * 100}%`, height: '100%', background: 'var(--brand)', borderRadius: 2 }} />
+            </div>
+          </div>
+        ))}
+        {sorted.length === 0 && <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--muted)' }}>No cost data</div>}
+      </div>
+    </div>
+  )
+}
+
+/** Subscription channels: value-for-money utilization vs the accrued fee. */
+function SubscriptionsCard({ subs, currency }: { subs: SubscriptionItem[]; currency: string }) {
+  return (
+    <div className="card">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '14px 16px', borderBottom: '1px solid var(--border)' }}>
+        <Icon name="gauge" size={14} style={{ color: 'var(--muted)' }} />
+        <span style={{ fontWeight: 600, fontSize: 14 }}>Subscriptions</span>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>· usage vs. quota</span>
+      </div>
+      <div style={{ padding: '8px 0' }}>
+        {subs.map((s) => {
+          const hasQuota = s.quota_tokens > 0
+          const over = s.utilization > 1
+          const pct = hasQuota ? Math.min(100, s.utilization * 100) : 0
+          const idle = s.idle_fee > 0
+          return (
+            <div key={s.name} style={{ padding: '10px 16px' }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: hasQuota ? 6 : 2 }}>
+                <span style={{ flex: 1, fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
+                <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: over ? 'var(--warn)' : 'var(--muted)' }}>
+                  {hasQuota ? `${(s.utilization * 100).toFixed(0)}% of quota` : `${fmt(s.tokens_used)} tok`}
+                </span>
+              </div>
+              {hasQuota && (
+                <div style={{ height: 6, background: 'var(--surface-2)', borderRadius: 3, overflow: 'hidden', marginBottom: 4 }}>
+                  <div style={{ width: `${pct}%`, height: '100%', background: over ? 'var(--warn)' : 'var(--ok)', borderRadius: 3 }} />
+                </div>
+              )}
+              <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+                {fmt(s.tokens_used)} tokens · {fmtMoney(s.accrued_fee, currency)} accrued
+                {idle && <span style={{ color: 'var(--warn)' }}> · {fmtMoney(s.idle_fee, currency)} idle (no traffic)</span>}
+              </div>
+            </div>
+          )
+        })}
+        {subs.length === 0 && <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--muted)' }}>No subscription rules in use</div>}
+      </div>
+    </div>
+  )
+}
+
+/** Whole cost block — rendered only when the backend returns a `cost` section. */
+function CostBlock({ cost }: { cost: CostSectionData }) {
+  const cur = cost.currency
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>Cost</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 16 }}>
+        <CostStatCard
+          label="Spend"
+          value={fmtMoney(cost.actual_cost, cur)}
+          sub="this period"
+          delta={cost.delta_actual_cost}
+          invertDelta
+        />
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: cost.subscriptions.length > 0 ? '1fr 1fr' : '1fr', gap: 16 }}>
+        <CostRankCard items={cost.by_member} currency={cur} />
+        {cost.subscriptions.length > 0 && <SubscriptionsCard subs={cost.subscriptions} currency={cur} />}
+      </div>
+    </div>
+  )
+}
+
 export default function OverviewPage() {
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTERS)
   const [rankMetric, setRankMetric] = useState<'requests' | 'tokens'>('requests')
@@ -460,7 +596,7 @@ export default function OverviewPage() {
       <div className="page-pad">
         <div className="page-head">
           <h1 className="page-title">Dashboard</h1>
-          <p className="page-sub">Real-time gateway health across all teams, routers, and channels.</p>
+          <p className="page-sub">Real-time gateway health across all users, routers, and channels.</p>
         </div>
 
         <div className="card" style={{ padding: '12px 16px', marginBottom: 16, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -520,6 +656,9 @@ export default function OverviewPage() {
                 />
               </div>
 
+              {/* Cost (only when backend has pricing configured) */}
+              {data.cost && <CostBlock cost={data.cost} />}
+
               {/* Trend chart */}
               {trendPts.length > 0 && <TrendChart points={trendPts} />}
 
@@ -554,7 +693,7 @@ export default function OverviewPage() {
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
                     <RankCard
-                      title="Top Teams"
+                      title="Top Users"
                       icon="users"
                       metric={rankMetric}
                       items={data.team_usage.leaderboard.map((t) => ({

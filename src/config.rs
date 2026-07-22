@@ -29,6 +29,10 @@ pub struct Config {
     pub compliance: Option<Compliance>,
     #[serde(default)]
     pub retention: Retention,
+    /// Optional per-model reference prices used to compute request cost in the
+    /// dashboard. Absent ⇒ no cost is shown (graceful degradation).
+    #[serde(default)]
+    pub pricing: Option<Pricing>,
 }
 
 /// Controls pruning of usage history and request/error/latency metrics so the
@@ -58,6 +62,117 @@ impl Default for Retention {
             days: default_retention_days(),
             interval_hours: default_retention_interval_hours(),
         }
+    }
+}
+
+/// A set of named, independent pricing rules. A channel selects one by name
+/// (see `Channel.pricing`) — pricing is per-channel, not matched by model.
+/// Rates are per `unit` tokens (default 1M).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pricing {
+    #[serde(default = "default_currency")]
+    pub currency: String,
+    #[serde(default = "default_price_unit")]
+    pub unit: f64,
+    #[serde(default)]
+    pub rules: Vec<PricingRule>,
+}
+
+/// One named pricing rule. `type` is `"payg"` (a rate card: per-model rows,
+/// first match wins) or `"subscription"` (a fixed monthly fee, no per-token rates).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PricingRule {
+    pub name: String,
+    #[serde(rename = "type", default = "default_rule_kind")]
+    pub kind: String,
+    /// PAYG: per-model price rows. A model may be priced differently within the
+    /// same channel (e.g. DeepSeek V4-Flash vs V4-Pro). First match wins; put a
+    /// `*` row last as a fallback.
+    #[serde(default)]
+    pub prices: Vec<ModelPrice>,
+    /// Subscription only: fixed monthly fee.
+    #[serde(default)]
+    pub monthly_fee: f64,
+    /// Subscription only: day of month the plan renews (for month-to-date proration).
+    #[serde(default = "default_billing_day")]
+    pub billing_day: u32,
+    /// Subscription only: optional fair-use token ceiling.
+    #[serde(default)]
+    pub included_quota_tokens: Option<u64>,
+}
+
+/// One row in a PAYG rule's rate card. `match` is an exact (case-insensitive)
+/// or glob model pattern, matched like team `allowed_models`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPrice {
+    #[serde(rename = "match")]
+    pub match_pattern: String,
+    #[serde(default)]
+    pub input: f64,
+    #[serde(default)]
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: Option<f64>,
+    #[serde(default)]
+    pub cache_write: Option<f64>,
+}
+
+fn default_currency() -> String {
+    "USD".to_string()
+}
+
+fn default_price_unit() -> f64 {
+    1_000_000.0
+}
+
+fn default_rule_kind() -> String {
+    "payg".to_string()
+}
+
+fn default_billing_day() -> u32 {
+    1
+}
+
+impl Pricing {
+    /// The rule with the given name, if any.
+    pub fn rule(&self, name: &str) -> Option<&PricingRule> {
+        self.rules.iter().find(|r| r.name == name)
+    }
+}
+
+impl PricingRule {
+    pub fn is_subscription(&self) -> bool {
+        self.kind == "subscription"
+    }
+
+    /// First price row whose `match` matches `model` (exact case-insensitive,
+    /// then glob). None when nothing matches (that model is then untracked).
+    pub fn price_for(&self, model: &str) -> Option<&ModelPrice> {
+        self.prices.iter().find(|p| {
+            p.match_pattern.eq_ignore_ascii_case(model)
+                || Pattern::new(&p.match_pattern).is_ok_and(|pat| {
+                    pat.matches_with(
+                        model,
+                        MatchOptions {
+                            case_sensitive: false,
+                            require_literal_separator: false,
+                            require_literal_leading_dot: false,
+                        },
+                    )
+                })
+        })
+    }
+}
+
+impl ModelPrice {
+    /// cache_read defaults to 0 (unset ⇒ not billed separately).
+    pub fn cache_read_rate(&self) -> f64 {
+        self.cache_read.unwrap_or(0.0)
+    }
+
+    /// cache_write (creation) defaults to the input rate when unset.
+    pub fn cache_write_rate(&self) -> f64 {
+        self.cache_write.unwrap_or(self.input)
     }
 }
 
@@ -224,6 +339,10 @@ pub struct Channel {
     pub headers: Option<HashMap<String, String>>,
     pub model_map: Option<HashMap<String, String>>,
     pub timeouts: Option<Timeouts>,
+    /// Name of the `pricing` rule this channel bills under. `None` ⇒ untracked
+    /// (no cost computed). The rule decides pay-as-you-go vs subscription.
+    #[serde(default)]
+    pub pricing: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -495,7 +614,7 @@ pub fn save_config(path: &Path, config: &Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, PLACEHOLDER_AUTH_KEYS, PLACEHOLDER_TEAM_KEYS, ProviderType,
+        Channel, Config, PLACEHOLDER_AUTH_KEYS, PLACEHOLDER_TEAM_KEYS, Pricing, ProviderType,
         check_no_placeholder_credentials,
     };
 
@@ -690,5 +809,65 @@ mod tests {
 
         let serialized = serde_json::to_string(&config).unwrap();
         assert!(!serialized.contains("web_dir"));
+    }
+
+    // ---- cost/billing config ----
+
+    #[test]
+    fn config_without_pricing_still_parses() {
+        // A pre-cost config must load unchanged: pricing absent.
+        let cfg = config_with(&[], &[]);
+        assert!(cfg.pricing.is_none());
+    }
+
+    #[test]
+    fn channel_pricing_defaults_to_none_and_parses_rule_name() {
+        let untracked: Channel = serde_json::from_str(
+            r#"{"name":"c","provider_type":"openai","base_url":"u","api_key":"k"}"#,
+        )
+        .unwrap();
+        assert!(untracked.pricing.is_none());
+
+        let priced: Channel = serde_json::from_str(
+            r#"{"name":"c","provider_type":"anthropic","base_url":"u","api_key":"k",
+                "pricing":"claude-plan"}"#,
+        )
+        .unwrap();
+        assert_eq!(priced.pricing.as_deref(), Some("claude-plan"));
+    }
+
+    #[test]
+    fn pricing_rule_lookup_and_rate_card() {
+        let pricing: Pricing = serde_json::from_str(
+            r#"{"rules":[
+                {"name":"deepseek","type":"payg","prices":[
+                    {"match":"*flash*","input":0.14,"output":0.28,"cache_read":0.0028},
+                    {"match":"*pro*","input":0.435,"output":0.87,"cache_read":0.003625},
+                    {"match":"*","input":0.27,"output":1.1}
+                ]},
+                {"name":"claude-plan","type":"subscription","monthly_fee":200.0}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(pricing.currency, "USD"); // defaulted
+        assert_eq!(pricing.unit, 1_000_000.0); // defaulted
+
+        let ds = pricing.rule("deepseek").unwrap();
+        assert!(!ds.is_subscription());
+        // same channel/rule, different model → different price row (first match wins)
+        assert_eq!(ds.price_for("deepseek-v4-flash").unwrap().input, 0.14);
+        assert_eq!(ds.price_for("deepseek-v4-pro").unwrap().output, 0.87);
+        assert_eq!(ds.price_for("deepseek-v4-pro").unwrap().cache_read_rate(), 0.003625);
+        // cache_write defaults to input when unset
+        assert_eq!(ds.price_for("deepseek-v4-flash").unwrap().cache_write_rate(), 0.14);
+        // fallback row
+        assert_eq!(ds.price_for("deepseek-chat").unwrap().input, 0.27);
+
+        let plan = pricing.rule("claude-plan").unwrap();
+        assert!(plan.is_subscription());
+        assert_eq!(plan.monthly_fee, 200.0);
+        assert_eq!(plan.billing_day, 1); // defaulted
+        assert!(plan.prices.is_empty());
+        assert!(pricing.rule("missing").is_none());
     }
 }

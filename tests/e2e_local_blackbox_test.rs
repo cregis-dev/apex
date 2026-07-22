@@ -726,6 +726,7 @@ APEX_UPSTREAM_1_MODEL=reload-primary-model
             "reload-secondary-model".to_string(),
         )])),
         timeouts: None,
+        pricing: None,
     });
     std::sync::Arc::make_mut(&mut config.routers)[0].rules[0].channels = vec![TargetChannel {
         name: "reload_secondary".to_string(),
