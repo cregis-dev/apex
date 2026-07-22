@@ -14,6 +14,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PII masking engine for data compliance
 - Team governance features
 
+## [0.8.0] - 2026-07-22
+
+Cost tracking and per-channel billing for the control plane, plus a fix for the
+misleading Team/Group terminology.
+
+### Added
+- **Cost tracking**: prompt-cache tokens are now recorded per request and priced
+  separately from full-price input. Cache usage is read from each provider's usage
+  payload — Anthropic (`cache_read/creation_input_tokens`), OpenAI
+  (`prompt_tokens_details.cached_tokens`), DeepSeek (`prompt_cache_hit_tokens`) and
+  Gemini (`cachedContentTokenCount`). New `cache_read_tokens` / `cache_write_tokens`
+  columns are added via an idempotent migration.
+- **Pricing rules** (`pricing` config): named rules selected per channel
+  (`channel.pricing`). A pay-as-you-go rule is a rate card — per-model rows,
+  first match wins — so one channel can price models differently (e.g. DeepSeek
+  V4-Flash vs V4-Pro). A subscription rule is a fixed monthly fee with an optional
+  quota; the fee is allocated to users by token share and utilization is tracked
+  against the quota.
+- **Control plane**: a new **Pricing** page (read-only rule table + modal editor)
+  and a pricing-rule selector in the **Channels** editor. `GET`/`PUT /admin/pricing`
+  apply live via `commit_config` — no restart. The dashboard gains a **Cost**
+  section (spend, per-user / per-model cost, subscriptions); filtered views only
+  count subscriptions with traffic in scope.
+
+### Changed
+- **Terminology**: the control plane now calls each API key a **User** and its
+  optional group a **Team** (previously "Team" / "Group"), matching how deployments
+  actually use them. Display only — wire field names, API routes, and config keys
+  are unchanged.
+
 ## [0.7.1] - 2026-06-08
 
 Control plane polish: correct the router detail view for multi-rule routers and add a brand favicon.
