@@ -607,6 +607,14 @@ export default function OverviewPage() {
           />
         </div>
 
+        <div className="card" style={{ padding: '12px 16px', marginBottom: 16, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <FiltersBar
+            values={filters}
+            options={data?.filter_options}
+            onChange={setFilters}
+          />
+        </div>
+
         {isLoading && (
           <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
             <span className="spinner" style={{ width: 24, height: 24 }} />
