@@ -35,6 +35,8 @@ impl UsageLogger {
         latency_ms: Option<f64>,
         fallback_triggered: bool,
         client_info: &crate::utils::ClientInfo,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
     ) {
         self.db.log_usage(
             request_id,
@@ -58,6 +60,8 @@ impl UsageLogger {
             None,
             client_info.client.as_deref(),
             client_info.user_agent.as_deref(),
+            cache_read_tokens as i64,
+            cache_write_tokens as i64,
         );
     }
 
@@ -100,6 +104,8 @@ impl UsageLogger {
             provider_error_body,
             client_info.client.as_deref(),
             client_info.user_agent.as_deref(),
+            0,
+            0,
         );
     }
 
@@ -119,6 +125,8 @@ struct UsageTrackerState {
     metrics: Arc<MetricsState>,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
     latency_ms: Option<f64>,
     fallback_triggered: bool,
     client_info: crate::utils::ClientInfo,
@@ -150,6 +158,8 @@ impl UsageTrackerState {
             metrics,
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             latency_ms,
             fallback_triggered,
             client_info: crate::utils::ClientInfo::default(),
@@ -199,17 +209,47 @@ impl UsageTrackerState {
         // OpenAI / Generic / Anthropic message_delta
         if let Some(usage) = json.get("usage") {
             if let Some(prompt) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
-                self.input_tokens = prompt; // OpenAI sends cumulative or final
+                // OpenAI-compatible providers count cached tokens *inside* prompt_tokens;
+                // peel them out so input_tokens stays "full-price input" and cache is
+                // billed separately. Providers report the cached count under different
+                // keys: OpenAI/most → prompt_tokens_details.cached_tokens; DeepSeek →
+                // prompt_cache_hit_tokens. Take whichever is present.
+                let cached = usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .or_else(|| {
+                        usage
+                            .get("prompt_cache_hit_tokens")
+                            .and_then(|v| v.as_u64())
+                    })
+                    .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()))
+                    .unwrap_or(0);
+                self.input_tokens = prompt.saturating_sub(cached); // OpenAI sends cumulative or final
+                self.cache_read_tokens = cached;
             }
             if let Some(completion) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
                 self.output_tokens = completion;
             }
-            // Anthropic in message_start (sometimes nested differently) or message_delta
+            // Anthropic in message_start (sometimes nested differently) or message_delta.
+            // Anthropic's input_tokens already excludes cache, so add cache separately.
             if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
                 self.input_tokens += input;
             }
             if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
                 self.output_tokens += output;
+            }
+            if let Some(cr) = usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+            {
+                self.cache_read_tokens += cr;
+            }
+            if let Some(cw) = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+            {
+                self.cache_write_tokens += cw;
             }
         }
 
@@ -223,6 +263,18 @@ impl UsageTrackerState {
             if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
                 self.output_tokens += output;
             }
+            if let Some(cr) = usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+            {
+                self.cache_read_tokens += cr;
+            }
+            if let Some(cw) = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+            {
+                self.cache_write_tokens += cw;
+            }
         }
 
         // Gemini native generateContent / streamGenerateContent.
@@ -232,7 +284,14 @@ impl UsageTrackerState {
                 .or_else(|| usage.get("prompt_token_count"))
                 .and_then(|v| v.as_u64())
             {
-                self.input_tokens = input;
+                // Gemini's promptTokenCount includes cached content; split it out.
+                let cached = usage
+                    .get("cachedContentTokenCount")
+                    .or_else(|| usage.get("cached_content_token_count"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                self.input_tokens = input.saturating_sub(cached);
+                self.cache_read_tokens = cached;
             }
             if let Some(output) = usage
                 .get("candidatesTokenCount")
@@ -269,6 +328,8 @@ impl UsageTrackerState {
             self.latency_ms,
             self.fallback_triggered,
             &self.client_info,
+            self.cache_read_tokens,
+            self.cache_write_tokens,
         );
     }
 
@@ -598,6 +659,88 @@ mod tests {
         tracker.extract_usage(&json);
         assert_eq!(tracker.input_tokens, 15);
         assert_eq!(tracker.output_tokens, 1);
+    }
+
+    fn tracker_for_cache_test() -> UsageTrackerState {
+        let (_dir, logger) = create_test_logger();
+        UsageTrackerState::new(
+            "team1".to_string(),
+            Some("req-1".to_string()),
+            "r1".to_string(),
+            None,
+            "c1".to_string(),
+            "m1".to_string(),
+            logger,
+            create_test_metrics(),
+            Some(1.0),
+            false,
+        )
+    }
+
+    #[test]
+    fn cache_openai_cached_tokens_split_out_of_prompt() {
+        let mut t = tracker_for_cache_test();
+        // OpenAI: cached is a subset of prompt_tokens → input must exclude it.
+        t.extract_usage(&serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_tokens_details": { "cached_tokens": 30 }
+            }
+        }));
+        assert_eq!(t.input_tokens, 70);
+        assert_eq!(t.cache_read_tokens, 30);
+        assert_eq!(t.cache_write_tokens, 0);
+        assert_eq!(t.output_tokens, 20);
+    }
+
+    #[test]
+    fn cache_deepseek_hit_tokens_split_out_of_prompt() {
+        let mut t = tracker_for_cache_test();
+        // DeepSeek reports cache hits as `prompt_cache_hit_tokens` (subset of prompt).
+        t.extract_usage(&serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_cache_hit_tokens": 30,
+                "prompt_cache_miss_tokens": 70
+            }
+        }));
+        assert_eq!(t.input_tokens, 70);
+        assert_eq!(t.cache_read_tokens, 30);
+        assert_eq!(t.output_tokens, 20);
+    }
+
+    #[test]
+    fn cache_anthropic_tokens_are_separate_from_input() {
+        let mut t = tracker_for_cache_test();
+        // Anthropic: input_tokens already excludes cache; cache is additive.
+        t.extract_usage(&serde_json::json!({
+            "usage": {
+                "input_tokens": 40,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 200,
+                "cache_creation_input_tokens": 60
+            }
+        }));
+        assert_eq!(t.input_tokens, 40);
+        assert_eq!(t.cache_read_tokens, 200);
+        assert_eq!(t.cache_write_tokens, 60);
+    }
+
+    #[test]
+    fn cache_gemini_cached_content_split_out_of_prompt() {
+        let mut t = tracker_for_cache_test();
+        t.extract_usage(&serde_json::json!({
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 12,
+                "cachedContentTokenCount": 25
+            }
+        }));
+        assert_eq!(t.input_tokens, 75);
+        assert_eq!(t.cache_read_tokens, 25);
+        assert_eq!(t.output_tokens, 12);
     }
 
     #[test]
@@ -972,6 +1115,8 @@ mod tests {
             Some(12.0),
             false,
             &crate::utils::ClientInfo::default(),
+            0,
+            0,
         );
 
         assert!(

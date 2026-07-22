@@ -70,7 +70,7 @@ export default function SettingsPage() {
               <Row label="Routers">
                 {data ? <Mono>{data.routers}</Mono> : placeholder}
               </Row>
-              <Row label="Teams">
+              <Row label="Users">
                 {data ? <Mono>{data.teams}</Mono> : placeholder}
               </Row>
               <Row label="Hot reload">

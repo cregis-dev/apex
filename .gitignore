@@ -48,3 +48,4 @@ web/next-env.d.ts
 cp/node_modules/
 cp/dist/
 cp/*.tsbuildinfo
+.gstack/

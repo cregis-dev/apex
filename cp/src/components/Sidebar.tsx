@@ -33,12 +33,14 @@ const NAV: NavSection[] = [
       { id: 'channels', label: 'Channels', icon: 'plug' },
       { id: 'models', label: 'Models', icon: 'cube' },
       { id: 'routers', label: 'Routers', icon: 'route' },
+      { id: 'pricing', label: 'Pricing', icon: 'book' },
     ],
   },
   {
     section: 'Access',
     items: [
-      { id: 'teams', label: 'Teams', icon: 'users' },
+      // Route id stays 'teams' (wire/URL); the label reflects that each key is a user.
+      { id: 'teams', label: 'Users', icon: 'users' },
       { id: 'limits', label: 'Rate Limits', icon: 'gauge' },
     ],
   },
@@ -165,7 +167,7 @@ export default function Sidebar() {
                 padding: '8px 10px 12px', borderBottom: '1px solid var(--divider)',
                 marginBottom: 6, fontSize: 11, color: 'var(--muted)',
               }}>
-                {info.channels} channels · {info.routers} routers · {info.teams} teams
+                {info.channels} channels · {info.routers} routers · {info.teams} users
               </div>
             )}
             <button

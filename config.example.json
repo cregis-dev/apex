@@ -27,13 +27,15 @@
       "name": "openai-coding",
       "provider_type": "openai",
       "base_url": "https://api.openai.com/v1",
-      "api_key": "${OPENAI_API_KEY}"
+      "api_key": "${OPENAI_API_KEY}",
+      "pricing": "openai-payg"
     },
     {
       "name": "anthropic-fast",
       "provider_type": "anthropic",
       "base_url": "https://api.anthropic.com",
-      "api_key": "${ANTHROPIC_API_KEY}"
+      "api_key": "${ANTHROPIC_API_KEY}",
+      "pricing": "claude-max"
     },
     {
       "name": "aggregator-dual",
@@ -75,7 +77,8 @@
   ],
   "teams": [
     {
-      "id": "demo-team",
+      "id": "alice",
+      "group": "engineering",
       "api_key": "REPLACE-WITH-YOUR-TEAM-API-KEY",
       "policy": {
         "allowed_routers": ["default"]
@@ -93,5 +96,21 @@
   "retention": {
     "days": 90,
     "interval_hours": 24
+  },
+  "pricing": {
+    "currency": "USD",
+    "unit": 1000000,
+    "rules": [
+      {
+        "name": "openai-payg",
+        "type": "payg",
+        "prices": [
+          { "match": "gpt-4o-mini*", "input": 0.15, "output": 0.6 },
+          { "match": "gpt-4o*", "input": 2.5, "output": 10.0, "cache_read": 1.25 },
+          { "match": "*", "input": 2.5, "output": 10.0 }
+        ]
+      },
+      { "name": "claude-max", "type": "subscription", "monthly_fee": 200, "billing_day": 1 }
+    ]
   }
 }

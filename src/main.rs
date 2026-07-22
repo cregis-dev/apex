@@ -1188,6 +1188,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
         teams: std::sync::Arc::new(Vec::new()),
         compliance: None,
         retention: Default::default(),
+        pricing: None,
     };
     config::save_config(path, &config)
         .with_context(|| format!("failed to write config: {}", path.display()))?;
@@ -1288,6 +1289,7 @@ fn handle_channel_command(cli: &Cli, command: &ChannelCommand) -> anyhow::Result
                 headers,
                 model_map,
                 timeouts,
+                pricing: None,
             };
             std::sync::Arc::make_mut(&mut config.channels).push(channel.clone());
             return_or_exit_json(

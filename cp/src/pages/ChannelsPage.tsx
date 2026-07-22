@@ -10,6 +10,7 @@ import { api } from '../lib/api.ts'
 import type {
   AdminChannel,
   CreateChannelRequest,
+  PricingRule,
   ProviderTemplate,
   ProviderType,
   UpdateChannelRequest,
@@ -76,6 +77,8 @@ interface ChannelFormState {
   anthropic_base_url: string
   api_key: string
   keep_existing_key: boolean
+  /** Selected pricing rule name, or '' for untracked. */
+  pricing: string
 }
 
 function emptyForm(): ChannelFormState {
@@ -86,6 +89,7 @@ function emptyForm(): ChannelFormState {
     anthropic_base_url: '',
     api_key: '',
     keep_existing_key: false,
+    pricing: '',
   }
 }
 
@@ -97,6 +101,7 @@ function channelToForm(ch: AdminChannel): ChannelFormState {
     anthropic_base_url: ch.anthropic_base_url ?? '',
     api_key: '',
     keep_existing_key: true,
+    pricing: ch.pricing ?? '',
   }
 }
 
@@ -105,13 +110,14 @@ interface ChannelEditorProps {
   mode: 'create' | 'edit'
   initial: ChannelFormState
   templates: ProviderTemplate[]
+  rules: PricingRule[]
   busy: boolean
   error?: string
   onCancel: () => void
   onSubmit: (form: ChannelFormState) => void
 }
 
-function ChannelEditor({ open, mode, initial, templates, busy, error, onCancel, onSubmit }: ChannelEditorProps) {
+function ChannelEditor({ open, mode, initial, templates, rules, busy, error, onCancel, onSubmit }: ChannelEditorProps) {
   const [form, setForm] = useState<ChannelFormState>(initial)
 
   // Reset the form whenever the modal (re)opens with new initial values.
@@ -278,6 +284,30 @@ function ChannelEditor({ open, mode, initial, templates, busy, error, onCancel, 
             />
           )}
         </Field>
+
+        <Field
+          label="Pricing rule"
+          hint="How this channel is billed for the dashboard cost view. Manage rules on the Pricing page."
+        >
+          <select
+            className="select"
+            value={form.pricing}
+            onChange={(e) => setForm((f) => ({ ...f, pricing: e.target.value }))}
+            style={{ width: '100%' }}
+          >
+            <option value="">None (untracked)</option>
+            {rules.map((r) => (
+              <option key={r.name} value={r.name}>
+                {r.name} · {r.type === 'subscription' ? `subscription $${r.monthly_fee ?? 0}/mo` : 'pay-as-you-go'}
+              </option>
+            ))}
+          </select>
+          {form.pricing && !rules.some((r) => r.name === form.pricing) && (
+            <div style={{ fontSize: 11, color: 'var(--warn)', marginTop: 4 }}>
+              Rule "{form.pricing}" no longer exists — pick another or create it on the Pricing page.
+            </div>
+          )}
+        </Field>
       </div>
     </Modal>
   )
@@ -300,10 +330,17 @@ export default function ChannelsPage() {
     queryFn: api.providerTemplates,
     staleTime: 5 * 60_000,
   })
+  const { data: pricingData } = useQuery({
+    queryKey: ['pricing'],
+    queryFn: api.pricing,
+    staleTime: 30_000,
+  })
 
   const channels = data?.data ?? []
   const keyByName = new Map((keysData?.data ?? []).map((e) => [e.name, e.api_key]))
   const templates = templatesData?.data ?? []
+  const rules = pricingData?.rules ?? []
+  const ruleByName = new Map(rules.map((r) => [r.name, r]))
 
   const [editorOpen, setEditorOpen] = useState(false)
   const [editorMode, setEditorMode] = useState<'create' | 'edit'>('create')
@@ -392,6 +429,7 @@ export default function ChannelsPage() {
         base_url: form.base_url.trim(),
         api_key: form.api_key,
         anthropic_base_url: form.anthropic_base_url.trim() || null,
+        pricing: form.pricing || null,
       })
     } else if (editingName) {
       const body: UpdateChannelRequest = {}
@@ -405,6 +443,10 @@ export default function ChannelsPage() {
       }
       if (!form.keep_existing_key && form.api_key) {
         body.api_key = form.api_key
+      }
+      // '' from the dropdown means "untracked"; send it (empty clears on the server).
+      if (form.pricing !== (original.pricing ?? '')) {
+        body.pricing = form.pricing
       }
       if (Object.keys(body).length === 0) {
         setEditorOpen(false)
@@ -476,16 +518,18 @@ export default function ChannelsPage() {
               ) : (
                 <table className="table" style={{ tableLayout: 'fixed', width: '100%' }}>
                   <colgroup>
+                    <col style={{ width: '17%' }} />
+                    <col style={{ width: '11%' }} />
+                    <col style={{ width: '11%' }} />
+                    <col style={{ width: '31%' }} />
                     <col style={{ width: '18%' }} />
-                    <col style={{ width: '12%' }} />
-                    <col style={{ width: '36%' }} />
-                    <col style={{ width: '22%' }} />
-                    <col style={{ width: '12%' }} />
+                    <col style={{ width: '11%' }} />
                   </colgroup>
                   <thead>
                     <tr>
                       <th>Channel</th>
                       <th>Provider</th>
+                      <th>Billing</th>
                       <th>Endpoints</th>
                       <th>API Key</th>
                       <th style={{ textAlign: 'right' }}>Actions</th>
@@ -519,6 +563,31 @@ export default function ChannelsPage() {
                           </td>
                           <td>
                             <span className="badge">{ch.provider_type}</span>
+                          </td>
+                          <td>
+                            {(() => {
+                              if (!ch.pricing) {
+                                return <span className="muted" style={{ fontSize: 12 }}>—</span>
+                              }
+                              const rule = ruleByName.get(ch.pricing)
+                              const isSub = rule?.type === 'subscription'
+                              return (
+                                <span
+                                  className="badge"
+                                  style={{
+                                    background: isSub ? 'var(--brand-soft)' : 'var(--surface-2)',
+                                    color: isSub ? 'var(--brand-ink)' : 'var(--ink-2)',
+                                    borderColor: 'transparent',
+                                    overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%',
+                                  }}
+                                  title={rule
+                                    ? (isSub ? `Subscription $${rule.monthly_fee ?? 0}/mo` : 'Pay-as-you-go')
+                                    : 'Pricing rule not found'}
+                                >
+                                  {ch.pricing}
+                                </span>
+                              )
+                            })()}
                           </td>
                           <td>
                             {ch.base_url || ch.anthropic_base_url ? (
@@ -596,6 +665,7 @@ export default function ChannelsPage() {
         mode={editorMode}
         initial={editorInitial}
         templates={templates}
+        rules={rules}
         busy={createMutation.isPending || updateMutation.isPending}
         error={editorError}
         onCancel={() => setEditorOpen(false)}

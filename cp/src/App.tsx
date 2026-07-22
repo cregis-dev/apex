@@ -10,6 +10,7 @@ import RecordsPage from './pages/RecordsPage.tsx'
 import ChannelsPage from './pages/ChannelsPage.tsx'
 import RoutersPage from './pages/RoutersPage.tsx'
 import ModelsPage from './pages/ModelsPage.tsx'
+import PricingPage from './pages/PricingPage.tsx'
 import TeamsPage from './pages/TeamsPage.tsx'
 import RateLimitsPage from './pages/RateLimitsPage.tsx'
 import SettingsPage from './pages/SettingsPage.tsx'
@@ -42,6 +43,7 @@ const router = createHashRouter([
       { path: 'channels', element: <ChannelsPage /> },
       { path: 'models', element: <ModelsPage /> },
       { path: 'routers', element: <RoutersPage /> },
+      { path: 'pricing', element: <PricingPage /> },
       { path: 'teams', element: <TeamsPage /> },
       // Legacy keys URL kept for any bookmarked links; redirect to Teams.
       { path: 'keys', element: <Navigate to="/teams" replace /> },

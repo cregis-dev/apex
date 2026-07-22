@@ -100,7 +100,9 @@ impl Database {
                 provider_trace_id TEXT,
                 provider_error_body TEXT,
                 client TEXT,
-                user_agent TEXT
+                user_agent TEXT,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_records(timestamp);
@@ -192,6 +194,17 @@ impl Database {
         // Client/tool attribution (Claude Code, Codex, SDKs, …) from request headers.
         let _ = conn.execute("ALTER TABLE usage_records ADD COLUMN client TEXT", []);
         let _ = conn.execute("ALTER TABLE usage_records ADD COLUMN user_agent TEXT", []);
+        // Prompt-cache token accounting (Anthropic cache read/creation, OpenAI cached
+        // prompt tokens, Gemini cached content) — kept separate from input_tokens for
+        // provider-agnostic cost math. Default 0 so historical rows price cleanly.
+        let _ = conn.execute(
+            "ALTER TABLE usage_records ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE usage_records ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_usage_client ON usage_records(client)",
             [],
@@ -267,14 +280,16 @@ impl Database {
         provider_error_body: Option<&str>,
         client: Option<&str>,
         user_agent: Option<&str>,
+        cache_read_tokens: i64,
+        cache_write_tokens: i64,
     ) {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let model_lower = model.to_lowercase();
 
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
-                "INSERT INTO usage_records (timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                "INSERT INTO usage_records (timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent, cache_read_tokens, cache_write_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     timestamp,
                     request_id,
@@ -294,6 +309,8 @@ impl Database {
                     provider_error_body,
                     client,
                     user_agent,
+                    cache_read_tokens,
+                    cache_write_tokens,
                 ],
             );
         }
@@ -425,7 +442,7 @@ impl Database {
 
     /// Column list for `usage_records` reads, kept in lock-step with
     /// [`Self::map_usage_record`]'s positional `row.get(N)` indices.
-    const USAGE_RECORD_COLUMNS: &'static str = "id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent";
+    const USAGE_RECORD_COLUMNS: &'static str = "id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent, cache_read_tokens, cache_write_tokens";
 
     /// Map one `usage_records` row (selected via [`Self::USAGE_RECORD_COLUMNS`])
     /// into a [`UsageRecord`]. Single source of truth for column ordering.
@@ -452,6 +469,8 @@ impl Database {
             provider_error_body: row.get(16)?,
             client: row.get(17)?,
             user_agent: row.get(18)?,
+            cache_read_tokens: row.get(19)?,
+            cache_write_tokens: row.get(20)?,
         })
     }
 
@@ -1132,6 +1151,13 @@ pub struct UsageRecord {
     pub provider_error_body: Option<String>,
     pub client: Option<String>,
     pub user_agent: Option<String>,
+    /// Prompt-cache tokens billed at cache rates (Anthropic cache read, OpenAI
+    /// cached prompt, Gemini cached content). Kept out of `input_tokens`.
+    #[serde(default)]
+    pub cache_read_tokens: i64,
+    /// Cache-creation/write tokens (Anthropic `cache_creation_input_tokens`).
+    #[serde(default)]
+    pub cache_write_tokens: i64,
 }
 
 /// A bounded page of usage records plus the counts the dashboard records view

@@ -42,6 +42,7 @@ async fn test_pii_masking_email() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
@@ -118,6 +119,7 @@ async fn test_pii_blocking_credit_card() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
@@ -198,6 +200,7 @@ async fn test_pii_disabled() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
@@ -268,6 +271,7 @@ async fn test_pii_absent_noop() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
@@ -348,6 +352,7 @@ async fn test_pii_multiple_detections() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
@@ -420,6 +425,7 @@ async fn test_pii_custom_rule() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
@@ -495,6 +501,7 @@ async fn test_pii_masking_anthropic_route() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
@@ -576,6 +583,7 @@ async fn test_router_uses_original_model_when_compliance_rewrites_body() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {

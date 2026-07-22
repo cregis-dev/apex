@@ -53,6 +53,7 @@ pub fn base_config() -> Config {
         routers: std::sync::Arc::new(vec![]),
         compliance: None,
         retention: Default::default(),
+        pricing: None,
     }
 }
 

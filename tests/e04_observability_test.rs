@@ -31,6 +31,7 @@ async fn test_observability_metrics() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "test_router".to_string(),

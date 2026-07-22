@@ -59,8 +59,8 @@ function RecordDetail({ record, group, onClose }: { record: UsageRecord; group?:
         }}>
           POST /v1/chat/completions{'\n'}
           model: {record.model}{'\n'}
-          team: {record.team_id}{'\n'}
-          {group ? <>group: {group}{'\n'}</> : null}
+          user: {record.team_id}{'\n'}
+          {group ? <>team: {group}{'\n'}</> : null}
           channel: {record.final_channel || record.channel}
         </pre>
       </div>
@@ -208,9 +208,9 @@ export default function LiveTailPage() {
         value={teamFilter}
         onChange={(e) => setTeamFilter(e.target.value)}
         style={{ height: 28, fontSize: 12 }}
-        title="Filter by team"
+        title="Filter by user"
       >
-        <option value="">All teams</option>
+        <option value="">All users</option>
         {(opts?.teams ?? []).map((t) => <option key={t} value={t}>{t}</option>)}
       </select>
       <select
@@ -280,7 +280,7 @@ export default function LiveTailPage() {
                   <th style={{ width: 80 }}>Status</th>
                   <th>Model</th>
                   <th>Channel</th>
-                  <th>Team</th>
+                  <th>User</th>
                   <th style={{ width: 80, textAlign: 'right' }}>Latency</th>
                   <th style={{ width: 70, textAlign: 'right' }}>Tokens</th>
                 </tr>

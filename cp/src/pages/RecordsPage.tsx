@@ -95,8 +95,8 @@ function RecordInspector({ record, group, onClose }: { record: UsageRecord; grou
         <tbody>
           {[
             ['Time', fmtTs(record.timestamp)],
-            ['Team', record.team_id],
-            ...(group ? [['Group', group]] : []),
+            ['User', record.team_id],
+            ...(group ? [['Team', group]] : []),
             ['Router', record.router],
             ['Model', record.model],
             ['Input tokens', record.input_tokens.toLocaleString()],
@@ -165,9 +165,9 @@ export default function RecordsPage() {
     staleTime: 60_000,
   })
 
-  // Teams carry an optional group label; records only store team_id, so resolve
-  // the group client-side to show it alongside the team. Only teams with a
-  // non-empty group are mapped, so records for ungrouped teams render no group.
+  // Each user (wire `team_id`) carries an optional team (wire `group`); records
+  // only store team_id, so resolve the team client-side to show it alongside the
+  // user. Only users with a non-empty team are mapped; others render no team.
   const { data: teamsData } = useQuery({
     queryKey: ['teams-groups'],
     queryFn: () => api.teams(),
@@ -325,7 +325,7 @@ export default function RecordsPage() {
                     <tr>
                       <th>Time</th>
                       <th>Request ID</th>
-                      <th>Team</th>
+                      <th>User</th>
                       <th>Client</th>
                       <th>Model</th>
                       <th>Channel</th>

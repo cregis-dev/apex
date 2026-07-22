@@ -37,6 +37,7 @@ async fn e2e_openai_route_success() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
@@ -103,6 +104,7 @@ async fn e2e_openai_embeddings_route_forwards_path_and_body() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
@@ -193,6 +195,7 @@ async fn e2e_global_auth_required() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     let state = build_state(config).unwrap();
@@ -235,6 +238,7 @@ async fn e2e_fallback_on_failure() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
     std::sync::Arc::make_mut(&mut config.channels).push(Channel {
         name: "good".to_string(),
@@ -245,6 +249,7 @@ async fn e2e_fallback_on_failure() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
@@ -334,6 +339,7 @@ async fn admin_list_masks_keys() {
         headers: None,
         model_map: None,
         timeouts: None,
+        pricing: None,
     });
 
     let state = build_state(config).unwrap();
