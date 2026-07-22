@@ -1527,7 +1527,11 @@ fn latest_cursor(records: &[DashboardUsageRecord]) -> Option<DashboardRecordCurs
 /// rule's rate-card row matching the record's model. Subscriptions have no
 /// per-token rates (cost 0 here — the fee is handled separately). Cache tokens
 /// are priced separately from input.
-fn reference_cost_of(rec: &DashboardUsageRecord, rule: &crate::config::PricingRule, unit: f64) -> f64 {
+fn reference_cost_of(
+    rec: &DashboardUsageRecord,
+    rule: &crate::config::PricingRule,
+    unit: f64,
+) -> f64 {
     if rule.is_subscription() {
         return 0.0;
     }
@@ -1570,8 +1574,10 @@ fn build_cost_section(
     // rule name -> rule
     let rules: HashMap<&str, &crate::config::PricingRule> =
         pricing.rules.iter().map(|r| (r.name.as_str(), r)).collect();
-    let group_by_member: HashMap<&str, Option<String>> =
-        teams.iter().map(|t| (t.id.as_str(), t.group.clone())).collect();
+    let group_by_member: HashMap<&str, Option<String>> = teams
+        .iter()
+        .map(|t| (t.id.as_str(), t.group.clone()))
+        .collect();
 
     // The rule a record bills under (via its channel), if any.
     let rule_for = |rec: &DashboardUsageRecord| -> Option<&crate::config::PricingRule> {
@@ -2837,7 +2843,11 @@ async fn handle_admin_update_channel(
             channel.model_map = model_map;
         }
         if let Some(pricing) = payload.pricing {
-            channel.pricing = if pricing.is_empty() { None } else { Some(pricing) };
+            channel.pricing = if pricing.is_empty() {
+                None
+            } else {
+                Some(pricing)
+            };
         }
 
         Ok(channel.clone())
@@ -5305,7 +5315,12 @@ mod tests {
         }
     }
 
-    fn price_row(match_pattern: &str, input: f64, output: f64, cache_read: Option<f64>) -> crate::config::ModelPrice {
+    fn price_row(
+        match_pattern: &str,
+        input: f64,
+        output: f64,
+        cache_read: Option<f64>,
+    ) -> crate::config::ModelPrice {
         crate::config::ModelPrice {
             match_pattern: match_pattern.to_string(),
             input,
@@ -5316,7 +5331,12 @@ mod tests {
     }
 
     /// A PAYG rule with a single `*` rate-card row (the flat case).
-    fn payg_rule(name: &str, input: f64, output: f64, cache_read: Option<f64>) -> crate::config::PricingRule {
+    fn payg_rule(
+        name: &str,
+        input: f64,
+        output: f64,
+        cache_read: Option<f64>,
+    ) -> crate::config::PricingRule {
         crate::config::PricingRule {
             name: name.to_string(),
             kind: "payg".to_string(),
@@ -5350,7 +5370,11 @@ mod tests {
     }
 
     fn pricing_of(rules: Vec<crate::config::PricingRule>) -> crate::config::Pricing {
-        crate::config::Pricing { currency: "USD".to_string(), unit: 1_000_000.0, rules }
+        crate::config::Pricing {
+            currency: "USD".to_string(),
+            unit: 1_000_000.0,
+            rules,
+        }
     }
 
     /// A channel named `name` that bills under pricing rule `rule`.
@@ -5435,7 +5459,11 @@ mod tests {
         ];
         let month = 30.0 * 86_400.0; // full month => accrued == monthly_fee
         let c = build_cost_section(&recs, &[], &pricing, &channels, &[], month, false);
-        assert!((c.actual_cost - 300.0).abs() < 1e-6, "actual {}", c.actual_cost);
+        assert!(
+            (c.actual_cost - 300.0).abs() < 1e-6,
+            "actual {}",
+            c.actual_cost
+        );
         assert_eq!(c.reference_cost, 0.0); // subscriptions have no reference $
         let sub = &c.subscriptions[0];
         assert_eq!(sub.name, "claude-plan");
@@ -5445,7 +5473,11 @@ mod tests {
         assert_eq!(sub.idle_fee, 0.0);
         let alice = c.by_member.iter().find(|m| m.id == "alice").unwrap();
         let bob = c.by_member.iter().find(|m| m.id == "bob").unwrap();
-        assert!((alice.actual_cost - 200.0).abs() < 1e-6, "alice {}", alice.actual_cost);
+        assert!(
+            (alice.actual_cost - 200.0).abs() < 1e-6,
+            "alice {}",
+            alice.actual_cost
+        );
         assert!((bob.actual_cost - 100.0).abs() < 1e-6);
     }
 
@@ -5459,7 +5491,11 @@ mod tests {
         let sub = &c.subscriptions[0];
         assert!((sub.tokens_used - 5_000_000.0).abs() < 1e-6);
         assert!((sub.quota_tokens - 10_000_000.0).abs() < 1e-3);
-        assert!((sub.utilization - 0.5).abs() < 1e-6, "util {}", sub.utilization);
+        assert!(
+            (sub.utilization - 0.5).abs() < 1e-6,
+            "util {}",
+            sub.utilization
+        );
     }
 
     #[test]
@@ -5474,7 +5510,10 @@ mod tests {
         bad_unit.unit = 0.0;
         assert!(validate_pricing(&bad_unit).is_err());
 
-        let dup = pricing_of(vec![payg_rule("x", 1.0, 1.0, None), payg_rule("x", 2.0, 2.0, None)]);
+        let dup = pricing_of(vec![
+            payg_rule("x", 1.0, 1.0, None),
+            payg_rule("x", 2.0, 2.0, None),
+        ]);
         assert!(validate_pricing(&dup).is_err());
 
         let neg = pricing_of(vec![payg_rule("x", -1.0, 0.0, None)]);
@@ -5487,7 +5526,10 @@ mod tests {
         bad_day.billing_day = 40;
         assert!(validate_pricing(&pricing_of(vec![bad_day])).is_err());
 
-        let bad_kind = crate::config::PricingRule { kind: "weird".to_string(), ..payg_rule("k", 1.0, 1.0, None) };
+        let bad_kind = crate::config::PricingRule {
+            kind: "weird".to_string(),
+            ..payg_rule("k", 1.0, 1.0, None)
+        };
         assert!(validate_pricing(&pricing_of(vec![bad_kind])).is_err());
     }
 

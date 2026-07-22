@@ -218,7 +218,11 @@ impl UsageTrackerState {
                     .get("prompt_tokens_details")
                     .and_then(|d| d.get("cached_tokens"))
                     .and_then(|v| v.as_u64())
-                    .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(|v| v.as_u64()))
+                    .or_else(|| {
+                        usage
+                            .get("prompt_cache_hit_tokens")
+                            .and_then(|v| v.as_u64())
+                    })
                     .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()))
                     .unwrap_or(0);
                 self.input_tokens = prompt.saturating_sub(cached); // OpenAI sends cumulative or final
@@ -235,7 +239,10 @@ impl UsageTrackerState {
             if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
                 self.output_tokens += output;
             }
-            if let Some(cr) = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
+            if let Some(cr) = usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+            {
                 self.cache_read_tokens += cr;
             }
             if let Some(cw) = usage
@@ -256,7 +263,10 @@ impl UsageTrackerState {
             if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
                 self.output_tokens += output;
             }
-            if let Some(cr) = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
+            if let Some(cr) = usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+            {
                 self.cache_read_tokens += cr;
             }
             if let Some(cw) = usage

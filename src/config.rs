@@ -857,9 +857,17 @@ mod tests {
         // same channel/rule, different model → different price row (first match wins)
         assert_eq!(ds.price_for("deepseek-v4-flash").unwrap().input, 0.14);
         assert_eq!(ds.price_for("deepseek-v4-pro").unwrap().output, 0.87);
-        assert_eq!(ds.price_for("deepseek-v4-pro").unwrap().cache_read_rate(), 0.003625);
+        assert_eq!(
+            ds.price_for("deepseek-v4-pro").unwrap().cache_read_rate(),
+            0.003625
+        );
         // cache_write defaults to input when unset
-        assert_eq!(ds.price_for("deepseek-v4-flash").unwrap().cache_write_rate(), 0.14);
+        assert_eq!(
+            ds.price_for("deepseek-v4-flash")
+                .unwrap()
+                .cache_write_rate(),
+            0.14
+        );
         // fallback row
         assert_eq!(ds.price_for("deepseek-chat").unwrap().input, 0.27);
 
