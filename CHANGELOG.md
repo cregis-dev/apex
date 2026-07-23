@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based routing with content filtering
 - PII masking engine for data compliance
 
+## [0.9.1] - 2026-07-23
+
+Patch release fixing token accounting for OpenAI-compatible channels.
+
+### Fixed
+- Streaming responses on OpenAI-compatible channels (e.g. Qwen/DashScope,
+  OpenRouter, Ollama, custom-dual/Z.ai on their OpenAI route) recorded 0 tokens
+  in usage records / Live Tail. The gateway never injected
+  `stream_options.include_usage=true` on outgoing streaming requests — only the
+  Gemini adapter did — so upstreams omitted the terminal `usage` chunk and the
+  usage tracker read zero. Injection now covers every OpenAI-format outgoing
+  request, gated by protocol so Anthropic passthrough bodies are left untouched.
+  This also removes a fabricated zero-usage delta on the Anthropic→OpenAI
+  streaming conversion path.
+
 ## [0.9.0] - 2026-07-23
 
 Behavior profiling and abuse/waste detection for the control plane: identify
