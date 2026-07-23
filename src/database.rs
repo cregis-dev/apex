@@ -156,11 +156,34 @@ impl Database {
                 expires_at INTEGER NOT NULL
             );
 
+            -- Hourly pre-aggregation of usage_records for behavior baselines
+            -- (per member+model+channel). `group` is intentionally absent: it is
+            -- a mutable config attribute resolved at read time, not baked into
+            -- historical buckets. Pruned on its own retention (see prune_rollup),
+            -- independent of raw-record retention, so baselines outlive raw rows.
+            CREATE TABLE IF NOT EXISTS usage_rollup (
+                bucket_start       TEXT    NOT NULL,
+                team_id            TEXT    NOT NULL,
+                model              TEXT    NOT NULL,
+                channel            TEXT    NOT NULL,
+                requests           INTEGER NOT NULL DEFAULT 0,
+                error_requests     INTEGER NOT NULL DEFAULT 0,
+                input_tokens       INTEGER NOT NULL DEFAULT 0,
+                output_tokens      INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                zero_output_reqs   INTEGER NOT NULL DEFAULT 0,
+                latency_sum_ms     REAL    NOT NULL DEFAULT 0,
+                latency_count      INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (bucket_start, team_id, model, channel)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics_requests(timestamp);
             CREATE INDEX IF NOT EXISTS idx_metrics_errors_timestamp ON metrics_errors(timestamp);
             CREATE INDEX IF NOT EXISTS idx_metrics_fallbacks_timestamp ON metrics_fallbacks(timestamp);
             CREATE INDEX IF NOT EXISTS idx_metrics_latency_timestamp ON metrics_latency(timestamp);
             CREATE INDEX IF NOT EXISTS idx_gemini_replay_expires_at ON gemini_replay_turns(expires_at);
+            CREATE INDEX IF NOT EXISTS idx_rollup_team_bucket ON usage_rollup(team_id, bucket_start);
             ",
         )?;
 
@@ -205,8 +228,17 @@ impl Database {
             "ALTER TABLE usage_records ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        // Request fingerprint (blake3 of the semantic payload; hash only, never
+        // prompt text) — powers repeat-rate abuse detection. NULL on historical
+        // rows and whenever profiling/hash_requests is off; detection skips NULLs.
+        let _ = conn.execute("ALTER TABLE usage_records ADD COLUMN req_hash TEXT", []);
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_usage_client ON usage_records(client)",
+            [],
+        );
+        // Serves repeat-rate detection's `GROUP BY team_id, req_hash`.
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_req_hash ON usage_records(team_id, req_hash)",
             [],
         );
 
@@ -260,6 +292,160 @@ impl Database {
         Ok(deleted)
     }
 
+    /// The `SELECT` that aggregates `usage_records` into hourly rollup buckets.
+    /// Shared verbatim by the incremental and backfill paths so their column
+    /// order stays in lock-step with the `INSERT` target. `MAX(col, 0)` is
+    /// SQLite's *scalar* two-arg max (clamp negatives to 0) applied per row, then
+    /// summed — matching `get_usage_aggregate`'s convention.
+    const ROLLUP_SELECT: &'static str = "
+        SELECT strftime('%Y-%m-%d %H:00:00', timestamp) AS bucket_start,
+               team_id, model, channel,
+               COUNT(*),
+               SUM(CASE WHEN status IN ('error', 'fallback_error') THEN 1 ELSE 0 END),
+               SUM(MAX(input_tokens, 0)),
+               SUM(MAX(output_tokens, 0)),
+               SUM(cache_read_tokens),
+               SUM(cache_write_tokens),
+               SUM(CASE WHEN status NOT IN ('error', 'fallback_error') AND output_tokens <= 0 AND input_tokens > 0 THEN 1 ELSE 0 END),
+               SUM(COALESCE(latency_ms, 0)),
+               SUM(CASE WHEN latency_ms IS NOT NULL THEN 1 ELSE 0 END)
+        FROM usage_records";
+
+    const ROLLUP_INSERT_PREFIX: &'static str = "INSERT OR REPLACE INTO usage_rollup \
+        (bucket_start, team_id, model, channel, requests, error_requests, input_tokens, \
+         output_tokens, cache_read_tokens, cache_write_tokens, zero_output_reqs, \
+         latency_sum_ms, latency_count) ";
+
+    const ROLLUP_GROUP_BY: &'static str = " GROUP BY bucket_start, team_id, model, channel";
+
+    /// Refresh the hourly rollup for the trailing `lookback_hours` window.
+    /// Idempotent: `INSERT OR REPLACE` keyed on the bucket PK re-writes each
+    /// touched bucket from a full recompute (never additive double-counting), so
+    /// re-running the same window — or overlapping windows — is safe. Recomputing
+    /// only a small trailing window absorbs late writes cheaply.
+    ///
+    /// Writer-side (holds the write mutex); run via `spawn_blocking`.
+    pub fn rollup_usage(&self, lookback_hours: u64) -> Result<u64> {
+        // Align the cutoff to the hour so a partially-covered oldest bucket is
+        // still fully recomputed (the SELECT re-scans the whole hour anyway).
+        let since = (chrono::Local::now() - chrono::Duration::hours(lookback_hours.max(1) as i64))
+            .format("%Y-%m-%d %H:00:00")
+            .to_string();
+
+        let sql = format!(
+            "{}{} WHERE timestamp >= ?1{}",
+            Self::ROLLUP_INSERT_PREFIX,
+            Self::ROLLUP_SELECT,
+            Self::ROLLUP_GROUP_BY
+        );
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let n = conn.execute(&sql, params![since])?;
+        Ok(n as u64)
+    }
+
+    /// One-time full backfill of the rollup from all history, but only when the
+    /// rollup table is empty (fresh DB or first deploy of this feature). A no-op
+    /// otherwise, so it is safe to call unconditionally on startup.
+    pub fn backfill_rollup_if_empty(&self) -> Result<u64> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let existing: i64 =
+            conn.query_row("SELECT COUNT(*) FROM usage_rollup", [], |row| row.get(0))?;
+        if existing > 0 {
+            return Ok(0);
+        }
+        let sql = format!(
+            "{}{}{}",
+            Self::ROLLUP_INSERT_PREFIX,
+            Self::ROLLUP_SELECT,
+            Self::ROLLUP_GROUP_BY
+        );
+        let n = conn.execute(&sql, [])?;
+        Ok(n as u64)
+    }
+
+    /// Prune rollup buckets older than `retention_days` (by `bucket_start`).
+    /// Independent of raw-record retention; `0` keeps forever. No-op otherwise.
+    pub fn prune_rollup(&self, retention_days: u64) -> Result<u64> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = (chrono::Local::now() - chrono::Duration::days(retention_days as i64))
+            .format("%Y-%m-%d %H:00:00")
+            .to_string();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let n = conn.execute(
+            "DELETE FROM usage_rollup WHERE bucket_start < ?1",
+            params![cutoff],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Read all rollup buckets, ordered deterministically. Read-side snapshot the
+    /// detection layer builds baselines from (and tests assert against).
+    // Consumed by tests now and by the (later) detection layer; not yet called
+    // from the running binary.
+    const ROLLUP_READ_COLUMNS: &'static str = "bucket_start, team_id, model, channel, requests, error_requests, input_tokens, \
+         output_tokens, cache_read_tokens, cache_write_tokens, zero_output_reqs, \
+         latency_sum_ms, latency_count";
+
+    /// Map one `usage_rollup` row selected via [`Self::ROLLUP_READ_COLUMNS`].
+    fn map_rollup_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RollupRow> {
+        Ok(RollupRow {
+            bucket_start: row.get(0)?,
+            team_id: row.get(1)?,
+            model: row.get(2)?,
+            channel: row.get(3)?,
+            requests: row.get(4)?,
+            error_requests: row.get(5)?,
+            input_tokens: row.get(6)?,
+            output_tokens: row.get(7)?,
+            cache_read_tokens: row.get(8)?,
+            cache_write_tokens: row.get(9)?,
+            zero_output_reqs: row.get(10)?,
+            latency_sum_ms: row.get(11)?,
+            latency_count: row.get(12)?,
+        })
+    }
+
+    /// Read all rollup buckets, ordered deterministically. Full snapshot used by
+    /// tests; the detection layer uses the ranged [`Self::get_rollup_between`].
+    #[allow(dead_code)]
+    pub fn get_rollup_rows(&self) -> Result<Vec<RollupRow>> {
+        let conn = self
+            .read_conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let sql = format!(
+            "SELECT {} FROM usage_rollup ORDER BY bucket_start, team_id, model, channel",
+            Self::ROLLUP_READ_COLUMNS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([], Self::map_rollup_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Read rollup buckets with `start <= bucket_start < end` (half-open, so the
+    /// current window can be excluded from its own baseline). The detection
+    /// layer's baseline substrate — cheap because buckets are pre-aggregated.
+    pub fn get_rollup_between(&self, start: &str, end: &str) -> Result<Vec<RollupRow>> {
+        let conn = self
+            .read_conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let sql = format!(
+            "SELECT {} FROM usage_rollup WHERE bucket_start >= ?1 AND bucket_start < ?2 \
+             ORDER BY bucket_start, team_id, model, channel",
+            Self::ROLLUP_READ_COLUMNS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![start, end], Self::map_rollup_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn log_usage(
         &self,
@@ -282,14 +468,15 @@ impl Database {
         user_agent: Option<&str>,
         cache_read_tokens: i64,
         cache_write_tokens: i64,
+        req_hash: Option<&str>,
     ) {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let model_lower = model.to_lowercase();
 
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
-                "INSERT INTO usage_records (timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent, cache_read_tokens, cache_write_tokens)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                "INSERT INTO usage_records (timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent, cache_read_tokens, cache_write_tokens, req_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     timestamp,
                     request_id,
@@ -311,6 +498,7 @@ impl Database {
                     user_agent,
                     cache_read_tokens,
                     cache_write_tokens,
+                    req_hash,
                 ],
             );
         }
@@ -442,7 +630,7 @@ impl Database {
 
     /// Column list for `usage_records` reads, kept in lock-step with
     /// [`Self::map_usage_record`]'s positional `row.get(N)` indices.
-    const USAGE_RECORD_COLUMNS: &'static str = "id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent, cache_read_tokens, cache_write_tokens";
+    const USAGE_RECORD_COLUMNS: &'static str = "id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent, cache_read_tokens, cache_write_tokens, req_hash";
 
     /// Map one `usage_records` row (selected via [`Self::USAGE_RECORD_COLUMNS`])
     /// into a [`UsageRecord`]. Single source of truth for column ordering.
@@ -471,6 +659,7 @@ impl Database {
             user_agent: row.get(18)?,
             cache_read_tokens: row.get(19)?,
             cache_write_tokens: row.get(20)?,
+            req_hash: row.get(21)?,
         })
     }
 
@@ -1158,6 +1347,33 @@ pub struct UsageRecord {
     /// Cache-creation/write tokens (Anthropic `cache_creation_input_tokens`).
     #[serde(default)]
     pub cache_write_tokens: i64,
+    /// One-way fingerprint of the request's semantic payload (blake3, 128-bit
+    /// hex). `None` when profiling/hash_requests is off or the row predates it.
+    /// Used only for same-user repeat detection; never carries prompt text.
+    #[serde(default)]
+    pub req_hash: Option<String>,
+}
+
+/// One aggregated hourly rollup bucket for a `(member, model, channel)`.
+/// Produced by [`Database::get_rollup_rows`]; the substrate for behavior
+/// baselines. `latency_sum_ms / latency_count` recover an average without
+/// storing per-request latencies.
+// Fields are read by the detection layer (`build_behavior_section`) and tests.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RollupRow {
+    pub bucket_start: String,
+    pub team_id: String,
+    pub model: String,
+    pub channel: String,
+    pub requests: i64,
+    pub error_requests: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub zero_output_reqs: i64,
+    pub latency_sum_ms: f64,
+    pub latency_count: i64,
 }
 
 /// A bounded page of usage records plus the counts the dashboard records view
@@ -1238,6 +1454,165 @@ mod tests {
     use crate::database::UsageRecordQuery;
     use rusqlite::params;
     use tempfile::tempdir;
+
+    /// Insert one `usage_records` row with an explicit timestamp for rollup tests.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_rec(
+        db: &Database,
+        timestamp: &str,
+        team: &str,
+        model: &str,
+        channel: &str,
+        input: i64,
+        output: i64,
+        status: &str,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO usage_records (timestamp, team_id, router, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, cache_read_tokens, cache_write_tokens)
+             VALUES (?1, ?2, 'r', ?3, ?4, ?5, ?6, 100.0, 0, ?7, 0, 0)",
+            params![timestamp, team, channel, model, input, output, status],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rollup_backfill_aggregates_hourly_buckets() {
+        let dir = tempdir().unwrap();
+        let db = Database::new(Some(dir.path().to_string_lossy().into_owned())).unwrap();
+
+        // alice / gpt-4o / chat — hour 09: a normal success, a zero-output
+        // success, and an error; hour 10: one success. Plus bob in hour 09.
+        insert_rec(
+            &db,
+            "2026-03-10 09:15:00",
+            "alice",
+            "gpt-4o",
+            "chat",
+            100,
+            50,
+            "success",
+        );
+        insert_rec(
+            &db,
+            "2026-03-10 09:45:00",
+            "alice",
+            "gpt-4o",
+            "chat",
+            10,
+            0,
+            "success",
+        );
+        insert_rec(
+            &db,
+            "2026-03-10 09:50:00",
+            "alice",
+            "gpt-4o",
+            "chat",
+            5,
+            0,
+            "error",
+        );
+        insert_rec(
+            &db,
+            "2026-03-10 10:05:00",
+            "alice",
+            "gpt-4o",
+            "chat",
+            200,
+            100,
+            "success",
+        );
+        insert_rec(
+            &db,
+            "2026-03-10 09:20:00",
+            "bob",
+            "gpt-4o",
+            "chat",
+            1,
+            1,
+            "success",
+        );
+
+        let n = db.backfill_rollup_if_empty().unwrap();
+        assert_eq!(n, 3, "3 distinct (member, hour) buckets");
+
+        let rows = db.get_rollup_rows().unwrap();
+        let a09 = rows
+            .iter()
+            .find(|r| r.team_id == "alice" && r.bucket_start == "2026-03-10 09:00:00")
+            .unwrap();
+        assert_eq!(a09.requests, 3);
+        assert_eq!(a09.error_requests, 1);
+        assert_eq!(a09.input_tokens, 115); // 100 + 10 + 5
+        assert_eq!(a09.output_tokens, 50); // 50 + 0 + 0
+        assert_eq!(a09.zero_output_reqs, 1); // only the zero-output *success* with input>0
+
+        let a10 = rows
+            .iter()
+            .find(|r| r.team_id == "alice" && r.bucket_start == "2026-03-10 10:00:00")
+            .unwrap();
+        assert_eq!(a10.requests, 1);
+        assert_eq!(a10.input_tokens, 200);
+
+        assert_eq!(rows.iter().filter(|r| r.team_id == "bob").count(), 1);
+    }
+
+    #[test]
+    fn rollup_refresh_is_idempotent_and_backfill_is_noop_when_populated() {
+        let dir = tempdir().unwrap();
+        let db = Database::new(Some(dir.path().to_string_lossy().into_owned())).unwrap();
+
+        // Stamp rows in the current hour so they fall inside the trailing window.
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        insert_rec(&db, &now, "alice", "gpt-4o", "chat", 100, 50, "success");
+        insert_rec(&db, &now, "alice", "gpt-4o", "chat", 100, 50, "success");
+
+        // Refreshing the same window twice must overwrite, not accumulate.
+        db.rollup_usage(3).unwrap();
+        db.rollup_usage(3).unwrap();
+
+        let total: i64 = db
+            .get_rollup_rows()
+            .unwrap()
+            .iter()
+            .filter(|r| r.team_id == "alice")
+            .map(|r| r.requests)
+            .sum();
+        assert_eq!(total, 2, "INSERT OR REPLACE must overwrite the bucket");
+
+        // Backfill is a no-op once the rollup already has rows.
+        assert_eq!(db.backfill_rollup_if_empty().unwrap(), 0);
+    }
+
+    #[test]
+    fn prune_rollup_drops_only_old_buckets() {
+        let dir = tempdir().unwrap();
+        let db = Database::new(Some(dir.path().to_string_lossy().into_owned())).unwrap();
+
+        insert_rec(
+            &db,
+            "2020-01-01 09:00:00",
+            "alice",
+            "gpt-4o",
+            "chat",
+            1,
+            1,
+            "success",
+        );
+        let recent = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        insert_rec(&db, &recent, "alice", "gpt-4o", "chat", 1, 1, "success");
+        db.backfill_rollup_if_empty().unwrap();
+        assert_eq!(db.get_rollup_rows().unwrap().len(), 2);
+
+        assert_eq!(db.prune_rollup(30).unwrap(), 1);
+        let rows = db.get_rollup_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].bucket_start.as_str() > "2020-12-31");
+
+        // retention_days == 0 keeps everything.
+        assert_eq!(db.prune_rollup(0).unwrap(), 0);
+    }
 
     #[test]
     fn usage_records_are_sorted_by_latest_timestamp_first() {

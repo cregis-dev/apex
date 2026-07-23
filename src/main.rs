@@ -18,6 +18,7 @@ mod logs;
 mod metrics;
 mod middleware;
 mod providers;
+mod request_hash;
 mod router_selector;
 mod server;
 mod service;
@@ -1189,6 +1190,7 @@ fn init_config(path: &std::path::Path) -> anyhow::Result<()> {
         compliance: None,
         retention: Default::default(),
         pricing: None,
+        profiling: None,
     };
     config::save_config(path, &config)
         .with_context(|| format!("failed to write config: {}", path.display()))?;
