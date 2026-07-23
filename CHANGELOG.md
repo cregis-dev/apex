@@ -12,7 +12,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP Tools execution framework
 - Rule-based routing with content filtering
 - PII masking engine for data compliance
-- Team governance features
+
+## [0.9.0] - 2026-07-23
+
+Behavior profiling and abuse/waste detection for the control plane: identify
+loops, idle spinning, retry storms, zero-output calls, spend/rate spikes, and
+off-hours automation, then review flagged users on a new Governance page and act
+(rate-limit or disable) after manual confirmation. Opt-in via a new `profiling`
+config section; entirely inert when unconfigured.
+
+### Added
+- Request fingerprinting (`usage_records.req_hash`): a one-way blake3 hash of the
+  request's semantic payload — hash only, never prompt text — powering same-user
+  repeat detection. Gated by `profiling.hash_requests`.
+- Hourly rollup pre-aggregation table (`usage_rollup`) with a background job
+  (one-time backfill, trailing-window refresh, independent retention) as the
+  substrate for per-member behavior baselines.
+- New optional `profiling` config section (enable switch, rollup settings, and
+  detection thresholds) with validation.
+- Read-time, stateless detection in the analytics API: a `behavior` section that
+  flags members on six signals — repeat rate, rate spike, error storm, zero
+  output, spend spike, off-hours — via rule thresholds plus rolling z-score
+  baselines, with advisory suggested actions.
+- Control-plane **Governance** page: flagged-user list with evidence and
+  one-click disposition (set rate limit / disable) after manual confirmation;
+  hidden entirely when profiling is not enabled (via `/api/cp/info`).
+- Design doc: `docs/design/behavior-profiling.md`.
+
+### Fixed
+- Control plane: removed a duplicated filter bar on the Overview page.
 
 ## [0.8.0] - 2026-07-22
 
