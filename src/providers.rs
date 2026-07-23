@@ -404,12 +404,17 @@ fn openai_compatible_body(
     body: &Bytes,
     model_map: &Option<HashMap<String, String>>,
 ) -> Bytes {
-    if matches!(route, RouteKind::Anthropic) {
+    let mapped = if matches!(route, RouteKind::Anthropic) {
         let body = convert_anthropic_to_openai(body);
         apply_model_map(&body, model_map)
     } else {
         apply_model_map(body, model_map)
-    }
+    };
+    // The mapped body is always OpenAI-format here (native, or converted from
+    // Anthropic). OpenAI-compatible upstreams only emit a terminal `usage` chunk
+    // on streamed responses when the request opts in via
+    // `stream_options.include_usage`, so inject it or usage accounting reads 0.
+    ensure_openai_stream_usage(&mapped)
 }
 
 fn ensure_openai_stream_usage(body: &Bytes) -> Bytes {
@@ -440,6 +445,18 @@ fn ensure_openai_stream_usage(body: &Bytes) -> Bytes {
     serde_json::to_vec(&value)
         .map(Bytes::from)
         .unwrap_or_else(|_| body.clone())
+}
+
+/// Inject `stream_options.include_usage` for pass-through adapters that forward
+/// the request body untouched, but only on the OpenAI protocol route. Anthropic
+/// (and Gemini-native) bodies must be left alone since `stream_options` is not
+/// part of their schema and could be rejected by the upstream.
+fn ensure_openai_stream_usage_for_openai_route(route: RouteKind, body: &Bytes) -> Bytes {
+    if matches!(route, RouteKind::Openai) {
+        ensure_openai_stream_usage(body)
+    } else {
+        body.clone()
+    }
 }
 
 fn handle_openai_compatible_response(
@@ -594,11 +611,12 @@ impl ProviderAdapter for CustomDualAdapter {
 
     fn transform_body(
         &self,
-        _route: RouteKind,
+        route: RouteKind,
         body: &Bytes,
         model_map: &Option<HashMap<String, String>>,
     ) -> Bytes {
-        apply_model_map(body, model_map)
+        let mapped = apply_model_map(body, model_map);
+        ensure_openai_stream_usage_for_openai_route(route, &mapped)
     }
 
     fn apply_auth_headers(
@@ -773,11 +791,12 @@ impl ProviderAdapter for OpenRouterAdapter {
 
     fn transform_body(
         &self,
-        _route: RouteKind,
+        route: RouteKind,
         body: &Bytes,
         model_map: &Option<HashMap<String, String>>,
     ) -> Bytes {
-        apply_model_map(body, model_map)
+        let mapped = apply_model_map(body, model_map);
+        ensure_openai_stream_usage_for_openai_route(route, &mapped)
     }
 
     fn apply_auth_headers(
@@ -812,11 +831,12 @@ impl ProviderAdapter for OllamaAdapter {
 
     fn transform_body(
         &self,
-        _route: RouteKind,
+        route: RouteKind,
         body: &Bytes,
         model_map: &Option<HashMap<String, String>>,
     ) -> Bytes {
-        apply_model_map(body, model_map)
+        let mapped = apply_model_map(body, model_map);
+        ensure_openai_stream_usage_for_openai_route(route, &mapped)
     }
 
     fn apply_auth_headers(
@@ -1489,6 +1509,116 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&prepared.body).unwrap();
         assert_eq!(value["stream"], true);
         assert_eq!(value["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn openai_stream_requests_enable_usage_chunks() {
+        // Regression: openai-type channels (e.g. Qwen/DashScope) recorded 0 tokens
+        // on streamed responses because `include_usage` was never injected.
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "qwen".to_string(),
+            provider_type: ProviderType::Openai,
+            base_url: "https://dashscope.example.com/compatible-mode/v1".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+            pricing: None,
+        };
+        let headers = HeaderMap::new();
+        let body = Bytes::from(
+            r#"{"model":"qwen3.8-max-preview","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+        );
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Openai,
+            &channel.base_url,
+            "/v1/chat/completions",
+            None,
+            &headers,
+            &body,
+        )
+        .unwrap();
+
+        let value: serde_json::Value = serde_json::from_slice(&prepared.body).unwrap();
+        assert_eq!(value["stream"], true);
+        assert_eq!(value["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn openai_non_stream_requests_leave_body_untouched() {
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "qwen".to_string(),
+            provider_type: ProviderType::Openai,
+            base_url: "https://dashscope.example.com/compatible-mode/v1".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: None,
+            headers: None,
+            model_map: None,
+            timeouts: None,
+            pricing: None,
+        };
+        let headers = HeaderMap::new();
+        let body = Bytes::from(
+            r#"{"model":"qwen3.8-max-preview","messages":[{"role":"user","content":"hi"}]}"#,
+        );
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Openai,
+            &channel.base_url,
+            "/v1/chat/completions",
+            None,
+            &headers,
+            &body,
+        )
+        .unwrap();
+
+        let value: serde_json::Value = serde_json::from_slice(&prepared.body).unwrap();
+        // Non-streaming responses carry usage in the full body, so no injection.
+        assert!(value.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn custom_dual_anthropic_route_does_not_inject_stream_options() {
+        // Anthropic passthrough bodies must not gain OpenAI-only `stream_options`.
+        let registry = ProviderRegistry::new();
+        let channel = Channel {
+            name: "aggregator".to_string(),
+            provider_type: ProviderType::CustomDual,
+            base_url: "https://agg.example.com/v1".to_string(),
+            api_key: "key".to_string(),
+            anthropic_base_url: Some("https://agg.example.com/anthropic".to_string()),
+            headers: None,
+            model_map: None,
+            timeouts: None,
+            pricing: None,
+        };
+        let headers = HeaderMap::new();
+        let body = Bytes::from(
+            r#"{"model":"claude-3","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+        );
+
+        let prepared = prepare_request(
+            &registry,
+            &channel,
+            RouteKind::Anthropic,
+            channel.anthropic_base_url.as_deref().unwrap(),
+            "/v1/messages",
+            None,
+            &headers,
+            &body,
+        )
+        .unwrap();
+
+        let value: serde_json::Value = serde_json::from_slice(&prepared.body).unwrap();
+        assert!(value.get("stream_options").is_none());
     }
 
     #[test]
