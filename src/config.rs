@@ -33,6 +33,10 @@ pub struct Config {
     /// dashboard. Absent ⇒ no cost is shown (graceful degradation).
     #[serde(default)]
     pub pricing: Option<Pricing>,
+    /// Optional behavior-profiling / abuse-detection settings. Absent ⇒ feature
+    /// off: no request fingerprinting, no rollup aggregation, no governance UI.
+    #[serde(default)]
+    pub profiling: Option<Profiling>,
 }
 
 /// Controls pruning of usage history and request/error/latency metrics so the
@@ -511,6 +515,182 @@ impl Compliance {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// Behavior-profiling / abuse-detection configuration. Targets *waste-type*
+/// abuse — loops, idle spinning, retry storms, off-hours automation — using
+/// request metadata plus a one-way request fingerprint (never the prompt text).
+/// Optional and off by default; see `docs/design/behavior-profiling.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profiling {
+    /// Master switch. When false the whole feature is inert.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Fingerprint request payloads into `usage_records.req_hash` (hash only,
+    /// never the prompt text) to power repeat-rate detection. An independent
+    /// privacy switch; defaults on when profiling is enabled.
+    #[serde(default = "default_true")]
+    pub hash_requests: bool,
+    /// Pre-aggregation (rollup) job settings — the substrate baselines read from.
+    #[serde(default)]
+    pub rollup: RollupConfig,
+    /// Detection thresholds. Parsed and validated now; consumed by the detection
+    /// layer (a later phase). Present here so the wire shape is locked.
+    #[serde(default)]
+    pub thresholds: Thresholds,
+}
+
+impl Profiling {
+    /// Reject nonsensical settings early: out-of-range ratios, zero/oversized
+    /// intervals, and a lookback too short for the run interval (which would
+    /// leave permanent holes in the rollup baseline).
+    pub fn validate(&self) -> Result<(), String> {
+        let r = &self.rollup;
+        // Sane upper bounds so pathologically large values can't overflow the
+        // `chrono::Duration` casts in the rollup task (which would silently kill
+        // the tick). Generous ceilings — years, not a policy.
+        if r.interval_minutes == 0 || r.interval_minutes > 43_200 {
+            return Err("rollup.interval_minutes must be within [1, 43200] (30 days)".into());
+        }
+        if r.lookback_hours == 0 || r.lookback_hours > 8_784 {
+            return Err("rollup.lookback_hours must be within [1, 8784] (1 year)".into());
+        }
+        if r.retention_days > 36_500 {
+            return Err("rollup.retention_days must be <= 36500 (100 years)".into());
+        }
+        // The trailing window each run recomputes must cover the gap since the
+        // previous run, or records in the tail of every cycle are never rolled up.
+        if r.lookback_hours * 60 < r.interval_minutes {
+            return Err(
+                "rollup.lookback_hours * 60 must be >= rollup.interval_minutes so no window is skipped".into(),
+            );
+        }
+        let t = &self.thresholds;
+        if t.min_samples > 1_000_000_000 {
+            return Err("thresholds.min_samples must be <= 1_000_000_000".into());
+        }
+        for (name, value) in [
+            ("repeat_rate", t.repeat_rate),
+            ("error_ratio", t.error_ratio),
+            ("output_zero_ratio", t.output_zero_ratio),
+            ("night_ratio", t.night_ratio),
+        ] {
+            if !(0.0..=1.0).contains(&value) {
+                return Err(format!("thresholds.{name} must be within [0, 1]"));
+            }
+        }
+        for (name, value) in [
+            ("rate_spike_z", t.rate_spike_z),
+            ("spend_spike_z", t.spend_spike_z),
+        ] {
+            if value < 0.0 {
+                return Err(format!("thresholds.{name} must be >= 0"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Hourly rollup pre-aggregation job settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollupConfig {
+    /// How often the rollup job runs, in minutes.
+    #[serde(default = "default_rollup_interval_minutes")]
+    pub interval_minutes: u64,
+    /// Trailing window re-aggregated on each run (hours) to absorb late writes.
+    #[serde(default = "default_rollup_lookback_hours")]
+    pub lookback_hours: u64,
+    /// Days of rollup buckets to keep. Independent of raw-record retention so
+    /// baselines can look back past the raw-record horizon. `0` = keep forever.
+    #[serde(default = "default_rollup_retention_days")]
+    pub retention_days: u64,
+}
+
+fn default_rollup_interval_minutes() -> u64 {
+    15
+}
+fn default_rollup_lookback_hours() -> u64 {
+    3
+}
+fn default_rollup_retention_days() -> u64 {
+    400
+}
+
+impl Default for RollupConfig {
+    fn default() -> Self {
+        Self {
+            interval_minutes: default_rollup_interval_minutes(),
+            lookback_hours: default_rollup_lookback_hours(),
+            retention_days: default_rollup_retention_days(),
+        }
+    }
+}
+
+/// Detection thresholds. All have documented defaults; the detection layer reads
+/// them, this phase only parses and validates them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Thresholds {
+    /// Window share of requests that are repeats (same user, same fingerprint).
+    #[serde(default = "default_repeat_rate")]
+    pub repeat_rate: f64,
+    /// Request-rate z-score vs the member's own rolling baseline.
+    #[serde(default = "default_rate_spike_z")]
+    pub rate_spike_z: f64,
+    /// Window share of requests that errored.
+    #[serde(default = "default_error_ratio")]
+    pub error_ratio: f64,
+    /// Window share of successful requests producing ~zero output tokens.
+    #[serde(default = "default_output_zero_ratio")]
+    pub output_zero_ratio: f64,
+    /// Reference-cost z-score vs the member's own rolling baseline.
+    #[serde(default = "default_spend_spike_z")]
+    pub spend_spike_z: f64,
+    /// Window share of requests landing in non-working (night) hours.
+    #[serde(default = "default_night_ratio")]
+    pub night_ratio: f64,
+    /// Minimum sample count before a member is judged (suppresses false positives).
+    #[serde(default = "default_min_samples")]
+    pub min_samples: u64,
+}
+
+fn default_repeat_rate() -> f64 {
+    0.5
+}
+fn default_rate_spike_z() -> f64 {
+    3.0
+}
+fn default_error_ratio() -> f64 {
+    0.3
+}
+fn default_output_zero_ratio() -> f64 {
+    0.4
+}
+fn default_spend_spike_z() -> f64 {
+    3.0
+}
+fn default_night_ratio() -> f64 {
+    0.6
+}
+fn default_min_samples() -> u64 {
+    50
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self {
+            repeat_rate: default_repeat_rate(),
+            rate_spike_z: default_rate_spike_z(),
+            error_ratio: default_error_ratio(),
+            output_zero_ratio: default_output_zero_ratio(),
+            spend_spike_z: default_spend_spike_z(),
+            night_ratio: default_night_ratio(),
+            min_samples: default_min_samples(),
+        }
+    }
+}
+
 pub fn load_config(path: &Path) -> anyhow::Result<Config> {
     let content = fs::read_to_string(path)?;
     let mut config = serde_json::from_str::<Config>(&content)?;
@@ -520,6 +700,13 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
         compliance
             .validate()
             .map_err(|e| anyhow::anyhow!("Invalid compliance config: {}", e))?;
+    }
+
+    // Validate profiling configuration if present
+    if let Some(ref profiling) = config.profiling {
+        profiling
+            .validate()
+            .map_err(|e| anyhow::anyhow!("Invalid profiling config: {}", e))?;
     }
 
     // Migrate legacy configuration to rules
@@ -620,6 +807,66 @@ mod tests {
 
     fn parse_config(json: &str) -> Config {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn profiling_parses_with_documented_defaults() {
+        use super::Profiling;
+        // Only `enabled` provided — everything else fills from defaults.
+        let p: Profiling = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert!(p.enabled);
+        assert!(p.hash_requests, "hash_requests defaults on");
+        assert_eq!(p.rollup.interval_minutes, 15);
+        assert_eq!(p.rollup.lookback_hours, 3);
+        assert_eq!(p.rollup.retention_days, 400);
+        assert_eq!(p.thresholds.repeat_rate, 0.5);
+        assert_eq!(p.thresholds.min_samples, 50);
+        p.validate().expect("defaults are valid");
+    }
+
+    #[test]
+    fn profiling_defaults_to_disabled_and_absent() {
+        // Absent config section ⇒ feature off.
+        let cfg = config_with(&[], &[]);
+        assert!(cfg.profiling.is_none());
+        // Present but `enabled` omitted ⇒ off, hashing still defaults on.
+        let p: super::Profiling = serde_json::from_str("{}").unwrap();
+        assert!(!p.enabled);
+        assert!(p.hash_requests);
+    }
+
+    #[test]
+    fn profiling_validate_rejects_bad_values() {
+        use super::Profiling;
+        let bad_ratio: Profiling =
+            serde_json::from_str(r#"{"enabled":true,"thresholds":{"repeat_rate":1.5}}"#).unwrap();
+        assert!(bad_ratio.validate().is_err());
+
+        let bad_z: Profiling =
+            serde_json::from_str(r#"{"enabled":true,"thresholds":{"rate_spike_z":-1.0}}"#).unwrap();
+        assert!(bad_z.validate().is_err());
+
+        let bad_interval: Profiling =
+            serde_json::from_str(r#"{"enabled":true,"rollup":{"interval_minutes":0}}"#).unwrap();
+        assert!(bad_interval.validate().is_err());
+    }
+
+    #[test]
+    fn profiling_validate_rejects_lookback_shorter_than_interval() {
+        use super::Profiling;
+        // 1h lookback (60 min) < 240 min interval ⇒ the rollup would skip records
+        // written in the 60min–240min tail of every cycle.
+        let gap: Profiling = serde_json::from_str(
+            r#"{"enabled":true,"rollup":{"interval_minutes":240,"lookback_hours":1}}"#,
+        )
+        .unwrap();
+        assert!(gap.validate().is_err());
+        // A pairing where the trailing window covers the interval passes.
+        let ok: Profiling = serde_json::from_str(
+            r#"{"enabled":true,"rollup":{"interval_minutes":60,"lookback_hours":3}}"#,
+        )
+        .unwrap();
+        assert!(ok.validate().is_ok());
     }
 
     fn config_with(auth_keys: &[&str], teams: &[(&str, &str)]) -> Config {

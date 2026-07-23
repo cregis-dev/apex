@@ -11,6 +11,8 @@ interface NavItem {
   icon: IconName
   badge?: string
   live?: boolean
+  /** Only shown when the backend reports `profiling_enabled` (see /api/cp/info). */
+  requiresProfiling?: boolean
 }
 
 interface NavSection {
@@ -42,6 +44,7 @@ const NAV: NavSection[] = [
       // Route id stays 'teams' (wire/URL); the label reflects that each key is a user.
       { id: 'teams', label: 'Users', icon: 'users' },
       { id: 'limits', label: 'Rate Limits', icon: 'gauge' },
+      { id: 'governance', label: 'Governance', icon: 'shield', requiresProfiling: true },
     ],
   },
   {
@@ -104,7 +107,12 @@ export default function Sidebar() {
 
       {/* Nav sections */}
       <div style={{ flex: 1, padding: '8px 8px' }}>
-        {NAV.map((section) => (
+        {NAV.map((section) => {
+          const items = section.items.filter(
+            (item) => !item.requiresProfiling || info?.profiling_enabled
+          )
+          if (items.length === 0) return null
+          return (
           <div key={section.section} style={{ marginBottom: 8 }}>
             <div style={{
               fontSize: 10.5, fontWeight: 500, textTransform: 'uppercase',
@@ -113,7 +121,7 @@ export default function Sidebar() {
             }}>
               {section.section}
             </div>
-            {section.items.map((item) => {
+            {items.map((item) => {
               const active = location.pathname === `/${item.id}`
               return (
                 <NavLink
@@ -148,7 +156,8 @@ export default function Sidebar() {
               )
             })}
           </div>
-        ))}
+          )
+        })}
       </div>
 
       {/* Account / account menu (bottom-left) */}

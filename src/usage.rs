@@ -37,6 +37,7 @@ impl UsageLogger {
         client_info: &crate::utils::ClientInfo,
         cache_read_tokens: u64,
         cache_write_tokens: u64,
+        req_hash: Option<&str>,
     ) {
         self.db.log_usage(
             request_id,
@@ -62,6 +63,7 @@ impl UsageLogger {
             client_info.user_agent.as_deref(),
             cache_read_tokens as i64,
             cache_write_tokens as i64,
+            req_hash,
         );
     }
 
@@ -106,6 +108,9 @@ impl UsageLogger {
             client_info.user_agent.as_deref(),
             0,
             0,
+            // Failure rows carry no request fingerprint yet; the retry-storm
+            // signal that consumes it lands with the detection layer.
+            None,
         );
     }
 
@@ -130,6 +135,9 @@ struct UsageTrackerState {
     latency_ms: Option<f64>,
     fallback_triggered: bool,
     client_info: crate::utils::ClientInfo,
+    /// One-way fingerprint of the request payload (set post-construction, like
+    /// `client_info`). `None` when profiling/hash_requests is off.
+    req_hash: Option<String>,
     accumulated_data: Vec<u8>,
 }
 
@@ -163,6 +171,7 @@ impl UsageTrackerState {
             latency_ms,
             fallback_triggered,
             client_info: crate::utils::ClientInfo::default(),
+            req_hash: None,
             accumulated_data: Vec::new(),
         }
     }
@@ -330,6 +339,7 @@ impl UsageTrackerState {
             &self.client_info,
             self.cache_read_tokens,
             self.cache_write_tokens,
+            self.req_hash.as_deref(),
         );
     }
 
@@ -495,6 +505,7 @@ pub async fn wrap_response(
     latency_ms: Option<f64>,
     fallback_triggered: bool,
     client_info: crate::utils::ClientInfo,
+    request_hash: Option<String>,
 ) -> Response<Body> {
     let is_sse = response
         .headers()
@@ -519,6 +530,7 @@ pub async fn wrap_response(
             fallback_triggered,
         );
         tracker.client_info = client_info;
+        tracker.req_hash = request_hash;
         let state = Arc::new(Mutex::new(tracker));
         let stream = body.into_data_stream();
         let usage_stream = UsageStream {
@@ -572,6 +584,7 @@ pub async fn wrap_response(
             fallback_triggered,
         );
         state.client_info = client_info;
+        state.req_hash = request_hash;
 
         if let Ok(json) = serde_json::from_slice::<Value>(&bytes) {
             state.extract_usage(&json);
@@ -807,6 +820,7 @@ mod tests {
             Some(42.0),
             false,
             crate::utils::ClientInfo::default(),
+            None,
         )
         .await;
 
@@ -858,6 +872,7 @@ mod tests {
             Some(42.0),
             false,
             crate::utils::ClientInfo::default(),
+            None,
         )
         .await;
 
@@ -904,6 +919,7 @@ mod tests {
             Some(42.0),
             false,
             crate::utils::ClientInfo::default(),
+            None,
         )
         .await;
 
@@ -1117,6 +1133,7 @@ mod tests {
             &crate::utils::ClientInfo::default(),
             0,
             0,
+            None,
         );
 
         assert!(

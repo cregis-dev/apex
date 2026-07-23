@@ -54,6 +54,7 @@ pub fn base_config() -> Config {
         compliance: None,
         retention: Default::default(),
         pricing: None,
+        profiling: None,
     }
 }
 

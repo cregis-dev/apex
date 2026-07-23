@@ -13,6 +13,7 @@ import ModelsPage from './pages/ModelsPage.tsx'
 import PricingPage from './pages/PricingPage.tsx'
 import TeamsPage from './pages/TeamsPage.tsx'
 import RateLimitsPage from './pages/RateLimitsPage.tsx'
+import GovernancePage from './pages/GovernancePage.tsx'
 import SettingsPage from './pages/SettingsPage.tsx'
 import { getToken, authHeaders } from './lib/auth.ts'
 
@@ -48,6 +49,7 @@ const router = createHashRouter([
       // Legacy keys URL kept for any bookmarked links; redirect to Teams.
       { path: 'keys', element: <Navigate to="/teams" replace /> },
       { path: 'limits', element: <RateLimitsPage /> },
+      { path: 'governance', element: <GovernancePage /> },
       { path: 'settings', element: <SettingsPage /> },
     ],
   },

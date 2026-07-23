@@ -161,6 +161,62 @@ export interface CostSection {
   subscriptions: SubscriptionItem[]
 }
 
+// --- behavior section (present only when `profiling.enabled` on the backend) ---
+
+/** One tripped detection signal, with evidence and a suggested action. */
+export interface BehaviorFlag {
+  /** repeat_rate | rate_spike | error_storm | output_zero | spend_spike | off_hours */
+  signal: string
+  /** warning | critical */
+  severity: string
+  /** The metric value that tripped the flag. */
+  value: number
+  /** The configured threshold it exceeded. */
+  threshold: number
+  /** Human-readable evidence (counts, z-scores) — never prompt content. */
+  detail: string
+  /** observe | rate_limit | disable — advisory; the operator confirms. */
+  suggested_action: string
+}
+
+/** A member's raw window metrics — the numbers the flags read. */
+export interface BehaviorProfile {
+  requests: number
+  repeat_rate: number
+  error_ratio: number
+  output_zero_ratio: number
+  night_ratio: number
+  /** Request-rate z-score vs the member's baseline (omitted when too sparse). */
+  rate_z?: number
+  /** Reference-cost z-score vs baseline (omitted without pricing/baseline). */
+  spend_z?: number
+  /** Window reference cost (omitted when pricing is not configured). */
+  reference_cost?: number
+}
+
+export interface BehaviorMember {
+  /** User identity (wire `team_id`). */
+  id: string
+  /** The user's team (wire `group`), if any. */
+  group: string | null
+  /** Highest severity across this member's flags. */
+  severity: string
+  /** Escalated suggested action across this member's flags. */
+  suggested_action: string
+  profile: BehaviorProfile
+  flags: BehaviorFlag[]
+}
+
+export interface BehaviorSection {
+  window_secs: number
+  /** Members with enough samples this window to be judged. */
+  evaluated: number
+  /** Of those, how many tripped at least one flag. */
+  flagged: number
+  /** Flagged members only, most severe first. */
+  members: BehaviorMember[]
+}
+
 export interface RecordCursor {
   id: number
   timestamp: string
@@ -180,6 +236,8 @@ export interface AnalyticsResponse {
   client_usage: ShareItem[]
   /** Cost breakdown — omitted entirely when the backend has no `pricing` configured. */
   cost?: CostSection
+  /** Behavior/abuse detection — omitted entirely when `profiling` is not enabled. */
+  behavior?: BehaviorSection
   records_meta: { total: number; latest_cursor: RecordCursor | null }
 }
 
@@ -429,6 +487,8 @@ export interface CpInfo {
   teams: number
   metrics_enabled: boolean
   hot_reload: boolean
+  /** True when `profiling.enabled` on the backend — gates the Governance nav/page. */
+  profiling_enabled?: boolean
 }
 
 // --- query params ---

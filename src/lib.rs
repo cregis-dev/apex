@@ -7,6 +7,7 @@ pub mod gemini_compat;
 pub mod metrics;
 pub mod middleware;
 pub mod providers;
+pub mod request_hash;
 pub mod router_selector;
 pub mod server;
 pub mod usage;
