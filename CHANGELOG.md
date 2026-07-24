@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based routing with content filtering
 - PII masking engine for data compliance
 
+## [0.9.2] - 2026-07-24
+
+Patch release fixing token accounting for Anthropic-protocol streaming through
+OpenAI-compatible / dual-protocol channels (e.g. Claude Code → Qwen/DashScope).
+
+### Fixed
+- Streaming usage was recorded as 0 tokens when an upstream framed SSE lines as
+  `data:{...}` without the optional space after the colon (DashScope's Anthropic
+  endpoint does this). The usage tracker and the OpenAI→Anthropic stream
+  converter only matched `data: ` (with a space), so every event was skipped.
+  Both now accept `data:` with or without the leading space, per the SSE spec.
+- Anthropic streaming token counts are now taken as the max across
+  `message_start` / `message_delta` snapshots instead of summed. Upstreams that
+  repeat `input_tokens` in both frames (DashScope) no longer double-count, and a
+  latent output over-count on standard Anthropic streams is fixed.
+
 ## [0.9.1] - 2026-07-23
 
 Patch release fixing token accounting for OpenAI-compatible channels.
