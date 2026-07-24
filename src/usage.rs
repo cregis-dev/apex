@@ -204,13 +204,19 @@ impl UsageTrackerState {
     }
 
     fn process_sse_line(&mut self, line: &str) {
-        if let Some(data) = line.strip_prefix("data: ") {
-            if data.trim() == "[DONE]" {
-                return;
-            }
-            if let Ok(json) = serde_json::from_str::<Value>(data) {
-                self.extract_usage(&json);
-            }
+        // The SSE spec strips a single optional space after `data:`. Some upstreams
+        // (e.g. DashScope's Anthropic endpoint) omit it and frame lines as
+        // `data:{...}` — accept both, otherwise every usage line is silently skipped
+        // and we record 0 tokens.
+        let Some(rest) = line.strip_prefix("data:") else {
+            return;
+        };
+        let data = rest.strip_prefix(' ').unwrap_or(rest);
+        if data.trim() == "[DONE]" {
+            return;
+        }
+        if let Ok(json) = serde_json::from_str::<Value>(data) {
+            self.extract_usage(&json);
         }
     }
 
@@ -240,49 +246,54 @@ impl UsageTrackerState {
             if let Some(completion) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
                 self.output_tokens = completion;
             }
-            // Anthropic in message_start (sometimes nested differently) or message_delta.
-            // Anthropic's input_tokens already excludes cache, so add cache separately.
+            // Anthropic message_delta usage. These are cumulative snapshots, and some
+            // upstreams repeat input_tokens across message_start and message_delta
+            // (DashScope's Anthropic endpoint sends a preliminary count in
+            // message_start and the final count in message_delta), so take the max
+            // rather than summing, which would double-count. input_tokens already
+            // excludes cache, which is tracked separately.
             if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                self.input_tokens += input;
+                self.input_tokens = self.input_tokens.max(input);
             }
             if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                self.output_tokens += output;
+                self.output_tokens = self.output_tokens.max(output);
             }
             if let Some(cr) = usage
                 .get("cache_read_input_tokens")
                 .and_then(|v| v.as_u64())
             {
-                self.cache_read_tokens += cr;
+                self.cache_read_tokens = self.cache_read_tokens.max(cr);
             }
             if let Some(cw) = usage
                 .get("cache_creation_input_tokens")
                 .and_then(|v| v.as_u64())
             {
-                self.cache_write_tokens += cw;
+                self.cache_write_tokens = self.cache_write_tokens.max(cw);
             }
         }
 
-        // Anthropic message_start (usage is inside message object)
+        // Anthropic message_start (usage is inside message object). Same max
+        // semantics as message_delta so a value seen in both is not double-counted.
         if let Some(message) = json.get("message")
             && let Some(usage) = message.get("usage")
         {
             if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                self.input_tokens += input;
+                self.input_tokens = self.input_tokens.max(input);
             }
             if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                self.output_tokens += output;
+                self.output_tokens = self.output_tokens.max(output);
             }
             if let Some(cr) = usage
                 .get("cache_read_input_tokens")
                 .and_then(|v| v.as_u64())
             {
-                self.cache_read_tokens += cr;
+                self.cache_read_tokens = self.cache_read_tokens.max(cr);
             }
             if let Some(cw) = usage
                 .get("cache_creation_input_tokens")
                 .and_then(|v| v.as_u64())
             {
-                self.cache_write_tokens += cw;
+                self.cache_write_tokens = self.cache_write_tokens.max(cw);
             }
         }
 
@@ -672,6 +683,41 @@ mod tests {
         tracker.extract_usage(&json);
         assert_eq!(tracker.input_tokens, 15);
         assert_eq!(tracker.output_tokens, 1);
+    }
+
+    #[test]
+    fn anthropic_input_tokens_not_double_counted_across_start_and_delta() {
+        let mut t = tracker_for_cache_test();
+        // message_start carries a preliminary input count...
+        t.extract_usage(&serde_json::json!({
+            "type": "message_start",
+            "message": { "usage": { "input_tokens": 7, "output_tokens": 0 } }
+        }));
+        // ...message_delta carries the final (larger) count. Must resolve to 59,
+        // not 7 + 59 = 66.
+        t.extract_usage(&serde_json::json!({
+            "type": "message_delta",
+            "usage": { "input_tokens": 59, "output_tokens": 28 }
+        }));
+        assert_eq!(t.input_tokens, 59);
+        assert_eq!(t.output_tokens, 28);
+    }
+
+    #[test]
+    fn sse_data_lines_without_leading_space_are_parsed() {
+        // DashScope's Anthropic endpoint frames SSE as `data:{...}` (no space after
+        // the colon), which the parser previously skipped entirely → 0 tokens.
+        let mut t = tracker_for_cache_test();
+        let stream = concat!(
+            "event:message_start\n",
+            "data:{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":0}}}\n\n",
+            "event:message_delta\n",
+            "data:{\"type\":\"message_delta\",\"usage\":{\"input_tokens\":59,\"output_tokens\":28,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}\n\n",
+            "data:[DONE]\n\n",
+        );
+        t.process_chunk(stream.as_bytes(), true);
+        assert_eq!(t.input_tokens, 59);
+        assert_eq!(t.output_tokens, 28);
     }
 
     fn tracker_for_cache_test() -> UsageTrackerState {

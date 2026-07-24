@@ -128,7 +128,10 @@ where
                 let line_str = String::from_utf8_lossy(&line_bytes);
                 let line = line_str.trim();
 
-                if let Some(data) = line.strip_prefix("data: ") {
+                if let Some(rest) = line.strip_prefix("data:") {
+                    // Tolerate `data:{...}` without the optional space; the SSE spec
+                    // strips a single leading space and some upstreams omit it.
+                    let data = rest.strip_prefix(' ').unwrap_or(rest);
                     if data == "[DONE]" {
                         let mut events = Vec::new();
 
