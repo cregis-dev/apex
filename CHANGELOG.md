@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Planned
+- MCP Prompts API implementation
+- MCP Tools execution framework
+- Rule-based routing with content filtering
+- PII masking engine for data compliance
+
+## [0.10.0] - 2026-08-02
+
+Router rules gain in-rule failover and optional session affinity (sticky
+routing) for prompt-cache alignment, plus a reworked control-plane router
+editor for per-rule channel ordering and weights.
+
 ### Added
 - **Session affinity (sticky routing)** for router rules. A new optional
   `session_affinity` flag pins a multi-turn conversation to a single channel so
@@ -31,12 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Config reference listed a non-existent `weighted` strategy; the valid
   strategies are `round_robin`, `random`, and `priority`.
-
-### Planned
-- MCP Prompts API implementation
-- MCP Tools execution framework
-- Rule-based routing with content filtering
-- PII masking engine for data compliance
 
 ## [0.9.2] - 2026-07-24
 
