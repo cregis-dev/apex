@@ -394,6 +394,11 @@ pub struct RouterRule {
     pub channels: Vec<TargetChannel>,
     #[serde(default = "default_strategy")]
     pub strategy: String,
+    /// Pin a conversation to one channel across turns (prompt-cache affinity).
+    /// Only meaningful for the non-deterministic strategies (`random`,
+    /// `round_robin`); `priority` is already deterministic. Defaults off.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub session_affinity: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -425,6 +430,10 @@ fn default_strategy() -> String {
 
 fn is_default_strategy(s: &String) -> bool {
     s == "round_robin"
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -716,6 +725,7 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
             if let Some(metadata) = &router.metadata {
                 for (pattern, target_channel_name) in &metadata.model_matcher {
                     router.rules.push(RouterRule {
+                        session_affinity: false,
                         match_spec: MatchSpec {
                             models: vec![pattern.clone()],
                         },
@@ -731,6 +741,7 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
             // 2. Convert top-level channels to a default wildcard rule
             if !router.channels.is_empty() {
                 router.rules.push(RouterRule {
+                    session_affinity: false,
                     match_spec: MatchSpec {
                         models: vec!["*".to_string()],
                     },

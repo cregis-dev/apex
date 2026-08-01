@@ -388,6 +388,8 @@ export interface RouterRule {
   match: MatchSpec
   channels: TargetChannel[]
   strategy: string
+  /** Pin a conversation to one channel across turns (prompt-cache affinity). */
+  session_affinity?: boolean
 }
 
 export interface AdminRouter {
@@ -402,6 +404,7 @@ export interface RouterRuleInput {
   models: string[]
   channels: { name: string; weight?: number }[]
   strategy?: string
+  session_affinity?: boolean
 }
 
 export interface CreateRouterRequest {

@@ -1627,6 +1627,7 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
                         ensure_channels_exist(&config, std::slice::from_ref(&channel_name)),
                     )?;
                     rules.push(config::RouterRule {
+                        session_affinity: false,
                         match_spec: config::MatchSpec {
                             models: vec![pattern],
                         },
@@ -1642,6 +1643,7 @@ fn handle_router_command(cli: &Cli, command: &RouterCommand) -> anyhow::Result<(
             // 2. Default channels -> Catch-all rule
             if !target_channels.is_empty() {
                 rules.push(config::RouterRule {
+                    session_affinity: false,
                     match_spec: config::MatchSpec {
                         models: vec!["*".to_string()],
                     },

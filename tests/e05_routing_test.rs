@@ -64,6 +64,7 @@ async fn test_rule_based_routing_priority() {
         rules: vec![
             // Rule 1: Exact match "gpt-4" -> Channel A
             RouterRule {
+                session_affinity: false,
                 match_spec: MatchSpec {
                     models: vec!["gpt-4".to_string()],
                 },
@@ -75,6 +76,7 @@ async fn test_rule_based_routing_priority() {
             },
             // Rule 2: Glob match "gpt-*" -> Channel B
             RouterRule {
+                session_affinity: false,
                 match_spec: MatchSpec {
                     models: vec!["gpt-*".to_string()],
                 },

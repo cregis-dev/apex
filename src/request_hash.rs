@@ -31,6 +31,37 @@ pub fn request_hash(body: &[u8]) -> Option<String> {
     Some(fingerprint(canonical.as_bytes()))
 }
 
+/// A conversation-stable identifier for session affinity (sticky routing).
+///
+/// Upstream prompt caching is keyed on a request's *prefix*, so to keep a
+/// multi-turn conversation pinned to one channel we hash only the parts that
+/// stay constant as turns are appended: the top-level `system` prompt (Anthropic)
+/// and the first message of the conversation array (`messages` / `contents`).
+/// The changing tail — the latest turn, sampling params — is deliberately
+/// excluded, unlike [`request_hash`] which fingerprints the whole payload.
+///
+/// Returns `None` when there is no stable anchor (non-JSON body, or no
+/// conversation array), in which case the caller falls back to non-sticky
+/// selection. Like the fingerprint, this is one-way and stores no prompt text.
+pub fn session_key(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    // The first content-bearing element is the conversation root: it does not
+    // change as later turns are appended, so it identifies the session.
+    let head = value
+        .get("messages") // OpenAI / Anthropic chat
+        .or_else(|| value.get("contents")) // Gemini native
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())?;
+    let mut canonical = String::new();
+    // Include the system prompt when present (Anthropic sends it top-level;
+    // OpenAI/Gemini fold it into the first message) — it is part of the prefix.
+    if let Some(system) = value.get("system") {
+        write_canonical(system, &mut canonical);
+    }
+    write_canonical(head, &mut canonical);
+    Some(fingerprint(canonical.as_bytes()))
+}
+
 /// Pick the content-bearing sub-document to fingerprint, falling back to the
 /// whole body when no known field is present.
 fn semantic_payload(value: &Value) -> &Value {
@@ -125,6 +156,40 @@ mod tests {
     fn non_json_body_returns_none() {
         assert_eq!(request_hash(b"not json at all"), None);
         assert_eq!(request_hash(b""), None);
+    }
+
+    #[test]
+    fn session_key_is_stable_across_appended_turns() {
+        // Turn 1: just the first user message.
+        let t1 = br#"{"model":"gpt-4o","messages":[{"role":"user","content":"start the task"}]}"#;
+        // Turn 2: the same conversation with an assistant reply + a new user turn
+        // appended, plus jittered sampling params. The session key must not move.
+        let t2 = br#"{"model":"gpt-4o","temperature":0.7,"messages":[{"role":"user","content":"start the task"},{"role":"assistant","content":"ok"},{"role":"user","content":"continue"}]}"#;
+        assert_eq!(session_key(t1), session_key(t2));
+        assert!(session_key(t1).is_some());
+    }
+
+    #[test]
+    fn session_key_differs_for_different_conversations() {
+        let a = br#"{"messages":[{"role":"user","content":"conversation A"}]}"#;
+        let b = br#"{"messages":[{"role":"user","content":"conversation B"}]}"#;
+        assert_ne!(session_key(a), session_key(b));
+    }
+
+    #[test]
+    fn session_key_includes_system_prefix() {
+        // Same first user message, different Anthropic system prompt ⇒ distinct
+        // sessions (different cache prefixes).
+        let a = br#"{"system":"You are Alice","messages":[{"role":"user","content":"hi"}]}"#;
+        let b = br#"{"system":"You are Bob","messages":[{"role":"user","content":"hi"}]}"#;
+        assert_ne!(session_key(a), session_key(b));
+    }
+
+    #[test]
+    fn session_key_none_without_conversation_array() {
+        assert_eq!(session_key(b"not json"), None);
+        assert_eq!(session_key(br#"{"prompt":"legacy completion"}"#), None);
+        assert_eq!(session_key(br#"{"messages":[]}"#), None);
     }
 
     #[test]

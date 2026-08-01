@@ -52,6 +52,7 @@ async fn test_pii_masking_email() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -129,6 +130,7 @@ async fn test_pii_blocking_credit_card() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -210,6 +212,7 @@ async fn test_pii_disabled() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -281,6 +284,7 @@ async fn test_pii_absent_noop() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -362,6 +366,7 @@ async fn test_pii_multiple_detections() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -435,6 +440,7 @@ async fn test_pii_custom_rule() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -511,6 +517,7 @@ async fn test_pii_masking_anthropic_route() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -593,6 +600,7 @@ async fn test_router_uses_original_model_when_compliance_rewrites_body() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["gpt-4".to_string()],
             },

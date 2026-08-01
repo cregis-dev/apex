@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Session affinity (sticky routing)** for router rules. A new optional
+  `session_affinity` flag pins a multi-turn conversation to a single channel so
+  the upstream's prompt cache stays warm across turns. The session is identified
+  by a conversation-stable prefix (top-level `system` + the first message), and
+  the channel is chosen by a weighted consistent hash — weight still spreads
+  distinct sessions across channels. Only meaningful for `random` / `round_robin`
+  (`priority` is already deterministic). Exposed as a per-rule toggle in the
+  control-plane router editor.
+- Per-rule channel weight and ordering are now editable in the control-plane
+  router editor: `priority` channels can be reordered (top = primary), and
+  `round_robin` channels take a weight input.
+
+### Changed
+- Router rules now **fail over within the rule**: the matched rule's channels
+  form an ordered candidate list (primary first, then the rest by strategy), and
+  the gateway walks them before falling back to the router's `fallback_channels`.
+  Previously only a single primary was tried per rule, so `priority` never used
+  its lower-ranked channels and every strategy jumped straight to
+  `fallback_channels` on failure.
+
+### Fixed
+- Config reference listed a non-existent `weighted` strategy; the valid
+  strategies are `round_robin`, `random`, and `priority`.
+
 ### Planned
 - MCP Prompts API implementation
 - MCP Tools execution framework
