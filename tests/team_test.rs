@@ -33,6 +33,7 @@ async fn test_team_allowed_models_case_insensitive() {
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -106,6 +107,7 @@ async fn test_team_allowed_models_glob() {
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -179,6 +181,7 @@ async fn test_team_policy_enforcement() {
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -253,6 +256,7 @@ async fn test_team_auth_x_api_key() {
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -325,6 +329,7 @@ async fn test_team_auth_x_api_key_policy() {
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -404,6 +409,7 @@ async fn test_invalid_key_rejection() {
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -522,6 +528,7 @@ async fn test_valid_global_key_acceptance() {
     std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
         name: "r1".to_string(),
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },

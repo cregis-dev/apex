@@ -49,6 +49,7 @@ async fn e2e_openai_route_success() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -116,6 +117,7 @@ async fn e2e_openai_embeddings_route_forwards_path_and_body() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -176,6 +178,7 @@ async fn e2e_global_auth_required() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },
@@ -261,6 +264,7 @@ async fn e2e_fallback_on_failure() {
         metadata: None,
         fallback_channels: vec!["good".to_string()],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },

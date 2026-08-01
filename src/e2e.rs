@@ -146,6 +146,7 @@ pub fn build_config(env: &E2eEnv, config_path: &Path) -> Config {
         routers: Arc::new(vec![GatewayRouter {
             name: env.router_name.clone(),
             rules: vec![RouterRule {
+                session_affinity: false,
                 match_spec: MatchSpec {
                     models: vec!["*".to_string()],
                 },

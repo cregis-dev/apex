@@ -3480,6 +3480,8 @@ struct RouterRuleInput {
     channels: Vec<TargetChannelInput>,
     #[serde(default)]
     strategy: Option<String>,
+    #[serde(default)]
+    session_affinity: bool,
 }
 
 #[derive(serde::Deserialize, Default, Clone)]
@@ -3543,6 +3545,7 @@ fn build_rule(input: RouterRuleInput) -> Result<crate::config::RouterRule, Strin
         },
         channels,
         strategy,
+        session_affinity: input.session_affinity,
     })
 }
 
@@ -4656,40 +4659,60 @@ async fn process_request(
     tracing::Span::current().record("router_name", &router.name);
 
     // 3. Resolve Channels
-    let mut channels = Vec::new();
-    let primary_selection = state
-        .selector
-        .select_channel_with_rule(router, model_name_str);
-    let mut matched_rule = primary_selection
+    //
+    // The matched rule yields an *ordered* candidate list (primary first, then
+    // in-rule failovers). The retry loop below walks it, only reaching for the
+    // router's `fallback_channels` once every candidate has failed. When any rule
+    // opts into session affinity we derive a conversation-stable key so a
+    // multi-turn conversation keeps hitting the same channel (prompt-cache
+    // alignment); the key is computed only when needed.
+    let mut channels: Vec<&crate::config::Channel> = Vec::new();
+    let sticky_key = if router.rules.iter().any(|rule| rule.session_affinity) {
+        crate::request_hash::session_key(&bytes)
+    } else {
+        None
+    };
+    let candidates =
+        state
+            .selector
+            .select_candidates(router, model_name_str, sticky_key.as_deref());
+    let mut matched_rule = candidates
         .as_ref()
         .and_then(|selection| selection.matched_rule.clone());
 
-    if let Some(selection) = primary_selection.as_ref()
-        && let Some(ch_name) = Some(selection.channel_name.as_str())
-        && let Some(ch) = config.channels.iter().find(|c| c.name == ch_name)
-    {
-        channels.push(ch);
+    if let Some(selection) = candidates.as_ref() {
+        for name in &selection.channels {
+            if let Some(ch) = config.channels.iter().find(|c| c.name == *name) {
+                if !channels.iter().any(|c| c.name == ch.name) {
+                    channels.push(ch);
+                }
+            } else {
+                tracing::warn!("Rule channel not found: {}", name);
+            }
+        }
         tracing::info!(
-            "Channel Resolved: {} (strategy={}, model={}, matched_rule={})",
-            ch.name,
-            router.strategy,
+            "Channels Resolved: [{}] (model={}, matched_rule={}, sticky={})",
+            selection.channels.join(", "),
             model_name_str,
-            selection.matched_rule.as_deref().unwrap_or("n/a")
+            selection.matched_rule.as_deref().unwrap_or("n/a"),
+            sticky_key.is_some()
         );
-    } else {
+    }
+
+    if channels.is_empty() {
+        // No rule matched (or none of its channels exist) — resolve directly to
+        // the router's fallback channels.
         if matched_rule.is_none() {
             matched_rule = Some("fallback".to_string());
         }
         tracing::info!(
-            "Fallback Triggered: No rule matched for model '{}' or all primary channels failed. Trying fallback channels.",
+            "Fallback Triggered: No rule matched for model '{}' or its channels are missing. Trying fallback channels.",
             model_name_str
         );
 
-        // Fallback logic
         for fb_name in &router.fallback_channels {
             if let Some(channel) = config.channels.iter().find(|c| c.name == *fb_name) {
                 tracing::info!("Channel Resolved (Fallback): {}", channel.name);
-                // Avoid duplicates
                 if !channels.iter().any(|c| c.name == channel.name) {
                     channels.push(channel);
                 }
@@ -5578,6 +5601,7 @@ mod tests {
             routers: Arc::new(vec![crate::config::Router {
                 name: "test-router".to_string(),
                 rules: vec![crate::config::RouterRule {
+                    session_affinity: false,
                     match_spec: crate::config::MatchSpec {
                         models: vec!["*".to_string()],
                     },
@@ -6676,6 +6700,7 @@ mod tests {
         router.rules.insert(
             0,
             crate::config::RouterRule {
+                session_affinity: false,
                 match_spec: crate::config::MatchSpec {
                     models: vec!["gpt-4".to_string()],
                 },
@@ -6864,6 +6889,7 @@ mod tests {
 
     fn rule_matching(models: &[&str]) -> crate::config::RouterRule {
         crate::config::RouterRule {
+            session_affinity: false,
             match_spec: crate::config::MatchSpec {
                 models: models.iter().map(|s| s.to_string()).collect(),
             },

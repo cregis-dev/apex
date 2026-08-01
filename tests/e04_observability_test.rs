@@ -40,6 +40,7 @@ async fn test_observability_metrics() {
         metadata: None,
         fallback_channels: vec![],
         rules: vec![RouterRule {
+            session_affinity: false,
             match_spec: MatchSpec {
                 models: vec!["*".to_string()],
             },

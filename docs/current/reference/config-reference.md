@@ -252,8 +252,19 @@ Routers 决定如何将请求路由到不同的通道。
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `match.models` | array | 匹配的模型模式，支持通配符 `*` |
-| `channels` | array | 目标通道列表（带权重） |
-| `strategy` | string | 负载策略：`round_robin`, `random`, `weighted` |
+| `channels` | array | 目标通道列表（带权重、按顺序） |
+| `strategy` | string | 负载策略：`round_robin`（默认）, `random`, `priority` |
+| `session_affinity` | bool | 会话粘性，默认 `false`；仅对 `random` / `priority` 之外的策略生效 |
+
+### 负载策略与规则内故障转移
+
+一条 rule 的 `channels` 现在既是**候选列表**也是**规则内故障转移链**：先按策略选出主通道，主通道失败后按顺序尝试同 rule 内的其余通道，全部失败才使用路由级的 `fallback_channels`。
+
+| 策略 | 主通道选择 | 故障转移顺序 |
+|------|-----------|-------------|
+| `priority` | 永远是列表**第一个** | 按配置顺序依次向下 |
+| `round_robin` | 按 `weight` 加权随机（`weight: 0` 表示禁用该通道） | 其余通道按配置顺序 |
+| `random` | 均匀随机（忽略 `weight`） | 剩余通道随机顺序 |
 
 ### Channel 权重
 
@@ -261,7 +272,28 @@ Routers 决定如何将请求路由到不同的通道。
 { "name": "channel-name", "weight": 1 }
 ```
 
-权重用于加权轮询（weighted round-robin）。
+权重用于 `round_robin` 的加权分流（`weight: 2` 是 `weight: 1` 的两倍流量）；`weight: 0` 表示禁用该通道。`priority` 与 `random` 忽略权重。
+
+### 会话粘性（session_affinity）
+
+开启后，同一多轮会话的每一轮请求都会落在**同一个通道**上，从而对齐上游的 prompt 缓存（各家 provider 的 KV 缓存是各自独立的，跨通道跳变会导致缓存 miss）。
+
+- 会话身份由请求的**稳定前缀**推导：顶层 `system`（Anthropic）+ 会话数组（`messages` / `contents`）的第一条消息，追加新一轮不会改变它。
+- 通过对该前缀做一致性哈希选择主通道，`weight` 仍会影响不同会话在通道间的分布。
+- 主通道故障时仍会按上面的故障转移链切换，不会因粘性而卡死。
+- 对 `priority` 无意义（本就确定性），配置了也会被忽略。
+
+```json
+{
+  "match": { "models": ["*"] },
+  "channels": [
+    { "name": "qwen", "weight": 1 },
+    { "name": "qwen_seat_2", "weight": 1 }
+  ],
+  "strategy": "round_robin",
+  "session_affinity": true
+}
+```
 
 ---
 

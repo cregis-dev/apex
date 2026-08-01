@@ -29,11 +29,20 @@ function nextRuleUid(): string {
   return `rule-${ruleUidSeq}`
 }
 
+// A channel picked for a rule, plus the two knobs the backend actually reads:
+// list order (priority strategy always takes the top one) and weight
+// (round_robin distributes traffic in proportion to it).
+interface RuleChannel {
+  name: string
+  weight: number
+}
+
 interface RuleFormState {
   _uid: string
   models_csv: string
-  channels: string[]
+  channels: RuleChannel[]
   strategy: Strategy
+  session_affinity: boolean
 }
 
 interface RouterFormState {
@@ -45,9 +54,13 @@ interface RouterFormState {
 function emptyForm(): RouterFormState {
   return {
     name: '',
-    rules: [{ _uid: nextRuleUid(), models_csv: '*', channels: [], strategy: 'round_robin' }],
+    rules: [{ _uid: nextRuleUid(), models_csv: '*', channels: [], strategy: 'round_robin', session_affinity: false }],
     fallback_channels: [],
   }
+}
+
+function toRuleChannel(c: { name: string; weight?: number }): RuleChannel {
+  return { name: c.name, weight: c.weight && c.weight > 0 ? c.weight : 1 }
 }
 
 function routerToForm(r: AdminRouter): RouterFormState {
@@ -55,16 +68,18 @@ function routerToForm(r: AdminRouter): RouterFormState {
     ? r.rules.map((rule) => ({
         _uid: nextRuleUid(),
         models_csv: rule.match.models.join(', '),
-        channels: rule.channels.map((c) => c.name),
+        channels: rule.channels.map(toRuleChannel),
         strategy: (STRATEGIES.includes(rule.strategy as Strategy) ? rule.strategy : 'round_robin') as Strategy,
+        session_affinity: rule.session_affinity ?? false,
       }))
     : [{
         // Legacy router without explicit rules — surface its top-level channels
         // as a single * rule so the form is editable.
         _uid: nextRuleUid(),
         models_csv: '*',
-        channels: (r.channels ?? []).map((c) => c.name),
+        channels: (r.channels ?? []).map(toRuleChannel),
         strategy: (STRATEGIES.includes((r.strategy ?? 'round_robin') as Strategy) ? (r.strategy ?? 'round_robin') : 'round_robin') as Strategy,
+        session_affinity: false,
       }]
   return {
     name: r.name,
@@ -80,8 +95,14 @@ function ruleFromForm(rule: RuleFormState): RouterRuleInput {
     .filter(Boolean)
   return {
     models,
-    channels: rule.channels.map((name) => ({ name })),
+    // Preserve order (priority reads the top channel) and weight (round_robin
+    // splits traffic by it). random ignores both but round-tripping them keeps
+    // the config stable when the user switches strategy.
+    channels: rule.channels.map(({ name, weight }) => ({ name, weight })),
     strategy: rule.strategy,
+    // Affinity is only meaningful for the non-deterministic strategies; never
+    // persist a stray `true` under priority.
+    session_affinity: rule.strategy !== 'priority' && rule.session_affinity,
   }
 }
 
@@ -130,6 +151,142 @@ function ChannelChips({
   )
 }
 
+// What the selected channels mean for each strategy — surfaced inline so the
+// two knobs (order / weight) don't look decorative.
+const STRATEGY_HINT: Record<Strategy, string> = {
+  priority: 'Traffic always goes to the top channel. Drag order to choose it; the rest are only tried via Fallback channels below.',
+  round_robin: 'Each request is spread across channels in proportion to weight (weight 2 gets twice the traffic of weight 1).',
+  random: 'Each request picks one channel uniformly at random. Order and weight are ignored.',
+}
+
+// Per-rule channel picker. Unlike a flat chip toggle, this keeps the selection
+// as an ordered, weighted list because the backend reads both: `priority` takes
+// the first channel, `round_robin` samples by weight.
+function RuleChannelsEditor({
+  available,
+  selected,
+  strategy,
+  onChange,
+}: {
+  available: AdminChannel[]
+  selected: RuleChannel[]
+  strategy: Strategy
+  onChange: (next: RuleChannel[]) => void
+}) {
+  if (available.length === 0) {
+    return (
+      <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+        No channels are configured yet. Create channels first.
+      </div>
+    )
+  }
+
+  const chosen = new Set(selected.map((c) => c.name))
+  const unselected = available.filter((c) => !chosen.has(c.name))
+  const showWeight = strategy === 'round_robin'
+  const showOrder = strategy === 'priority'
+
+  const add = (name: string) => onChange([...selected, { name, weight: 1 }])
+  const remove = (name: string) => onChange(selected.filter((c) => c.name !== name))
+  const setWeight = (name: string, weight: number) =>
+    onChange(selected.map((c) => (c.name === name ? { ...c, weight } : c)))
+  const move = (idx: number, dir: -1 | 1) => {
+    const j = idx + dir
+    if (j < 0 || j >= selected.length) return
+    const next = selected.slice()
+    ;[next[idx], next[j]] = [next[j], next[idx]]
+    onChange(next)
+  }
+
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      {selected.length > 0 && (
+        <div style={{ display: 'grid', gap: 6 }}>
+          {selected.map((ch, i) => (
+            <div
+              key={ch.name}
+              className="card"
+              style={{ padding: '5px 6px 5px 8px', display: 'flex', alignItems: 'center', gap: 8, background: 'var(--surface)' }}
+            >
+              {showOrder && (
+                <span
+                  className="badge"
+                  style={{
+                    width: 22, height: 22, padding: 0, justifyContent: 'center',
+                    background: i === 0 ? 'var(--brand-soft)' : 'var(--surface-2)',
+                    color: i === 0 ? 'var(--brand-ink)' : 'var(--muted)',
+                    borderColor: 'transparent', fontSize: 11, fontWeight: 600,
+                  }}
+                  title={i === 0 ? 'Primary — receives traffic' : 'Only used as fallback'}
+                >
+                  {i + 1}
+                </span>
+              )}
+              <span style={{ flex: 1, fontSize: 13, fontWeight: 500 }}>{ch.name}</span>
+              {showWeight && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--muted)' }}>
+                  weight
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    value={ch.weight}
+                    onChange={(e) => setWeight(ch.name, Math.max(1, Math.floor(Number(e.target.value)) || 1))}
+                    style={{ width: 54, height: 26, padding: '0 6px', fontFamily: 'var(--font-mono)' }}
+                  />
+                </label>
+              )}
+              {showOrder && (
+                <div style={{ display: 'flex', gap: 2 }}>
+                  <button
+                    type="button" className="btn btn-ghost btn-sm" style={{ padding: '0 4px' }}
+                    disabled={i === 0} onClick={() => move(i, -1)} title="Move up"
+                  >
+                    <span style={{ display: 'inline-flex', transform: 'rotate(180deg)' }}><Icon name="chevron-down" size={12} /></span>
+                  </button>
+                  <button
+                    type="button" className="btn btn-ghost btn-sm" style={{ padding: '0 4px' }}
+                    disabled={i === selected.length - 1} onClick={() => move(i, 1)} title="Move down"
+                  >
+                    <Icon name="chevron-down" size={12} />
+                  </button>
+                </div>
+              )}
+              <button
+                type="button" className="btn btn-ghost btn-sm" style={{ padding: '0 6px', color: 'var(--err)' }}
+                onClick={() => remove(ch.name)} title="Remove channel"
+              >
+                <Icon name="x" size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {unselected.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {unselected.map((ch) => (
+            <button
+              key={ch.name}
+              type="button"
+              onClick={() => add(ch.name)}
+              className="badge"
+              style={{
+                background: 'var(--surface-2)', color: 'var(--ink-2)', borderColor: 'var(--border)',
+                cursor: 'pointer', height: 24, padding: '0 10px', fontSize: 12,
+              }}
+            >
+              <Icon name="plus" size={11} /> {ch.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div style={{ fontSize: 11, color: 'var(--muted)' }}>{STRATEGY_HINT[strategy]}</div>
+    </div>
+  )
+}
+
 function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
   return (
     <div>
@@ -173,7 +330,7 @@ function RouterEditor({ open, mode, initial, channels, busy, error, onCancel, on
   const addRule = () => {
     setForm((f) => ({
       ...f,
-      rules: [...f.rules, { _uid: nextRuleUid(), models_csv: '', channels: [], strategy: 'round_robin' }],
+      rules: [...f.rules, { _uid: nextRuleUid(), models_csv: '', channels: [] as RuleChannel[], strategy: 'round_robin', session_affinity: false }],
     }))
   }
   const removeRule = (idx: number) => {
@@ -269,17 +426,6 @@ function RouterEditor({ open, mode, initial, channels, busy, error, onCancel, on
                     style={{ width: '100%', fontFamily: 'var(--font-mono)' }}
                   />
                 </Field>
-                <Field label={`Channels · ${rule.channels.length} selected`}>
-                  <ChannelChips
-                    available={channels}
-                    selected={rule.channels}
-                    onToggle={(name) => setRule(idx, {
-                      channels: rule.channels.includes(name)
-                        ? rule.channels.filter((c) => c !== name)
-                        : [...rule.channels, name],
-                    })}
-                  />
-                </Field>
                 <Field label="Strategy">
                   <select
                     className="select"
@@ -290,6 +436,30 @@ function RouterEditor({ open, mode, initial, channels, busy, error, onCancel, on
                     {STRATEGIES.map((s) => <option key={s} value={s}>{s.replace('_', '-')}</option>)}
                   </select>
                 </Field>
+                <Field label={`Channels · ${rule.channels.length} selected`}>
+                  <RuleChannelsEditor
+                    available={channels}
+                    selected={rule.channels}
+                    strategy={rule.strategy}
+                    onChange={(next) => setRule(idx, { channels: next })}
+                  />
+                </Field>
+                {rule.strategy !== 'priority' && (
+                  <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={rule.session_affinity}
+                      onChange={(e) => setRule(idx, { session_affinity: e.target.checked })}
+                      style={{ marginTop: 2 }}
+                    />
+                    <span>
+                      <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-2)' }}>Session affinity</span>
+                      <span style={{ display: 'block', fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
+                        Keep a conversation on the same channel across turns, so upstream prompt caching stays warm. Failover still applies if that channel is down.
+                      </span>
+                    </span>
+                  </label>
+                )}
               </div>
             ))}
           </div>
@@ -348,7 +518,12 @@ function RouterDetail({ router }: { router: AdminRouter }) {
               <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--muted)' }}>
                 Rule #{i + 1}
               </span>
-              <span className="badge badge-brand">{rule.strategy.replace('_', '-')}</span>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {rule.session_affinity && rule.strategy !== 'priority' && (
+                  <span className="badge" title="Conversations stay on the same channel across turns">sticky</span>
+                )}
+                <span className="badge badge-brand">{rule.strategy.replace('_', '-')}</span>
+              </div>
             </div>
 
             <div className="section-title" style={{ margin: '0 0 6px' }}>Match models</div>
@@ -367,7 +542,10 @@ function RouterDetail({ router }: { router: AdminRouter }) {
                       {j + 1}
                     </span>
                     <span style={{ flex: 1, fontSize: 13, fontWeight: 500 }}>{ch.name}</span>
-                    {rule.strategy === 'weighted' && (
+                    {rule.strategy === 'priority' && j === 0 && (
+                      <span className="badge badge-brand" style={{ fontSize: 11 }}>primary</span>
+                    )}
+                    {rule.strategy === 'round_robin' && (
                       <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--muted)' }}>weight: {ch.weight}</span>
                     )}
                   </div>
