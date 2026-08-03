@@ -7,7 +7,7 @@ import type {
   CreateTeamRequest, UpdateTeamRequest,
   CreateChannelRequest, UpdateChannelRequest,
   CreateRouterRequest, UpdateRouterRequest,
-  CpInfo, PricingConfig,
+  CpInfo, PricingConfig, LogEntry,
 } from './types.ts'
 
 class ApiError extends Error {
@@ -108,6 +108,70 @@ export const api = {
 
   savePricing: (body: PricingConfig) =>
     req<PricingConfig>('PUT', '/admin/pricing', body),
+}
+
+/**
+ * Subscribe to the gateway's live log stream.
+ *
+ * Consumes SSE over `fetch` rather than `EventSource`: the control plane
+ * authenticates with an `Authorization` header, and `EventSource` cannot set
+ * headers. Replays a backlog first, then streams live lines.
+ *
+ * Returns an unsubscribe function that aborts the in-flight request.
+ */
+export function streamLogs(
+  params: { level?: string; after_seq?: number; limit?: number },
+  handlers: {
+    onEntry: (entry: LogEntry) => void
+    onOpen?: () => void
+    onError?: (err: unknown) => void
+  },
+): () => void {
+  const controller = new AbortController()
+
+  void (async () => {
+    try {
+      const res = await fetch(`/api/cp/logs/stream${qs(params)}`, {
+        headers: { ...authHeaders(), Accept: 'text/event-stream' },
+        signal: controller.signal,
+      })
+      if (!res.ok || !res.body) {
+        throw new ApiError(res.status, await res.text().catch(() => res.statusText))
+      }
+      handlers.onOpen?.()
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        // SSE frames are separated by a blank line; keep the trailing partial.
+        const frames = buffer.split('\n\n')
+        buffer = frames.pop() ?? ''
+        for (const frame of frames) {
+          const data = frame
+            .split('\n')
+            .filter((l) => l.startsWith('data:'))
+            .map((l) => l.slice(5).trimStart())
+            .join('\n')
+          if (!data) continue // keep-alive comment frames carry no data
+          try {
+            handlers.onEntry(JSON.parse(data) as LogEntry)
+          } catch {
+            // Ignore a malformed frame rather than tearing down the stream.
+          }
+        }
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) handlers.onError?.(err)
+    }
+  })()
+
+  return () => controller.abort()
 }
 
 export { ApiError }

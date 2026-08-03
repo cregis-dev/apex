@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Live log view in the control plane.** A new **Logs** page streams the
+  gateway's own logs in real time — the web equivalent of `apex logs`. Logs are
+  captured by a `tracing` layer into an in-process ring buffer (recent backlog)
+  plus a broadcast channel (live push), and served over SSE at
+  `GET /api/cp/logs/stream`. Unlike `apex logs`, which tails `apex.log.*` and so
+  only works under `gateway start -d`, this works however the gateway was
+  started — including the systemd/launchd service, which writes no such file.
+  Supports level filtering, text search, pause/resume (buffered, no dropped
+  lines), and a resume cursor so a reconnect neither gaps nor duplicates.
+- **`session_key` recorded on every usage row.** The conversation fingerprint
+  that session affinity already routed on (blake3 over the stable prefix:
+  top-level `system` + first message) is now persisted for *all* requests, not
+  just those matching a rule with `session_affinity`. This makes multi-turn
+  conversations groupable after the fact. One-way hash — no prompt text is
+  stored, same as `req_hash`. New nullable `usage_records.session_key` column
+  (added by migration; historical rows stay NULL), indexed on
+  `(team_id, session_key)`.
+
+### Changed
+- **Live Tail shows more per row.** Added Req ID (click to copy), Client
+  (e.g. "Claude Code" — already recorded but never displayed), Router with its
+  matched rule, and a color-coded Session chip so turns of one conversation are
+  groupable at a glance. Channel now flags `↳ failover` when the request failed
+  over off its primary. The request-detail drawer gained the same fields plus
+  the raw User-Agent.
+
 ### Planned
 - MCP Prompts API implementation
 - MCP Tools execution framework

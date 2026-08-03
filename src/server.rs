@@ -407,7 +407,11 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             "/api/cp/provider-templates",
             get(handle_cp_provider_templates),
         )
-        .route("/api/cp/info", get(handle_cp_info));
+        .route("/api/cp/info", get(handle_cp_info))
+        // Live log stream for the control plane's Logs view. Handler enforces
+        // the global auth key itself (like `/api/cp/info`) so it stays
+        // available even when the metrics route group is disabled.
+        .route("/api/cp/logs/stream", get(handle_cp_logs_stream));
 
     // Metrics (Protected by Global API Key)
     let metrics_routes = if metrics_enabled {
@@ -4122,6 +4126,86 @@ async fn handle_cp_info(State(state): State<Arc<AppState>>, req: Request<Body>) 
         .unwrap()
 }
 
+#[derive(serde::Deserialize)]
+struct LogStreamQuery {
+    /// Minimum severity to deliver (`TRACE`..`ERROR`). Note this narrows what
+    /// the *global* `EnvFilter` already let through — it cannot raise verbosity
+    /// beyond `logging.level` / `RUST_LOG`.
+    level: Option<String>,
+    /// Resume cursor: only entries with a greater `seq` are replayed.
+    after_seq: Option<u64>,
+    /// Backlog size to replay before switching to live push.
+    limit: Option<usize>,
+}
+
+/// Server-sent stream of the gateway's own logs — the control plane's
+/// equivalent of `apex logs`, but sourced from the in-process ring buffer so it
+/// works regardless of how the gateway was started (see src/log_stream.rs).
+///
+/// Replays the recent backlog first, then pushes live entries as they arrive.
+async fn handle_cp_logs_stream(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<LogStreamQuery>,
+    req: Request<Body>,
+) -> Response<Body> {
+    use axum::response::IntoResponse;
+    use axum::response::sse::{Event, KeepAlive, Sse};
+
+    let (parts, _body) = req.into_parts();
+    let config = state.config.read().unwrap().clone();
+
+    if let Err(resp) = enforce_global_auth(&config, &parts.headers) {
+        return resp;
+    }
+
+    let logs = crate::log_stream::global();
+    let min_level = query.level.as_deref().map(str::to_uppercase);
+    let limit = query.limit.unwrap_or(500).min(2_000);
+    let backlog = logs.recent(limit, min_level.as_deref(), query.after_seq);
+    let receiver = logs.subscribe();
+
+    fn to_event(entry: &crate::log_stream::LogEntry) -> Event {
+        Event::default()
+            .json_data(entry)
+            .unwrap_or_else(|_| Event::default().data("{}"))
+    }
+
+    let live_filter = min_level.clone();
+    let live = futures::stream::unfold(receiver, move |mut receiver| {
+        let min_level = live_filter.clone();
+        async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(entry) => {
+                        if !entry.at_or_above(min_level.as_deref()) {
+                            continue;
+                        }
+                        return Some((Ok(to_event(&entry)), receiver));
+                    }
+                    // This viewer fell behind; tell it how much it missed
+                    // rather than dropping the gap silently.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                        let notice = crate::log_stream::LogEntry::lagged(dropped);
+                        return Some((Ok(to_event(&notice)), receiver));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        }
+    });
+
+    let backlog = futures::stream::iter(
+        backlog
+            .into_iter()
+            .map(|entry| Ok::<Event, std::convert::Infallible>(to_event(&entry)))
+            .collect::<Vec<_>>(),
+    );
+
+    Sse::new(futures::StreamExt::chain(backlog, live))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
 // Helpers
 
 #[allow(clippy::result_large_err)]
@@ -4530,6 +4614,12 @@ async fn process_request(
         .filter(|profiling| profiling.enabled && profiling.hash_requests)
         .and_then(|_| crate::request_hash::request_hash(&bytes));
 
+    // Conversation fingerprint — the stable prefix (`system` + first message)
+    // that identifies a multi-turn conversation. Computed for every request so
+    // usage rows can be grouped by session regardless of routing config; session
+    // affinity reuses this same value when a matched rule opts in (see below).
+    let session_key = crate::request_hash::session_key(&bytes);
+
     // 2. Resolve Router
     let router_name = if let Some(name) = router_name_override {
         name
@@ -4668,7 +4758,7 @@ async fn process_request(
     // alignment); the key is computed only when needed.
     let mut channels: Vec<&crate::config::Channel> = Vec::new();
     let sticky_key = if router.rules.iter().any(|rule| rule.session_affinity) {
-        crate::request_hash::session_key(&bytes)
+        session_key.clone()
     } else {
         None
     };
@@ -4748,6 +4838,7 @@ async fn process_request(
             None,
             None,
             &client_info,
+            session_key.as_deref(),
         );
         return protocol_error_response(
             route,
@@ -4822,6 +4913,7 @@ async fn process_request(
                 None,
                 None,
                 &client_info,
+                session_key.as_deref(),
             );
             return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
         }
@@ -4910,6 +5002,7 @@ async fn process_request(
                 None,
                 None,
                 &client_info,
+                session_key.as_deref(),
             );
             return protocol_error_response(route, StatusCode::BAD_REQUEST, &reason);
         }
@@ -5012,6 +5105,7 @@ async fn process_request(
                             fallback_triggered,
                             client_info.clone(),
                             req_hash.clone(),
+                            session_key.clone(),
                         )
                         .await;
                         if crate::usage::is_upstream_body_error_response(&wrapped) {
@@ -5140,6 +5234,7 @@ async fn process_request(
                             provider_trace_id.as_deref(),
                             Some(stored_error_body.as_str()),
                             &client_info,
+                            session_key.as_deref(),
                         );
 
                         // Convert error if needed (e.g. for Anthropic)
@@ -5237,6 +5332,7 @@ async fn process_request(
         None,
         None,
         &client_info,
+        session_key.as_deref(),
     );
 
     protocol_error_response(route, StatusCode::BAD_GATEWAY, "all channels failed")
@@ -5364,6 +5460,7 @@ async fn process_gemini_native_direct_pass(
             None,
             None,
             &client_info,
+            None,
         );
         return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
     }
@@ -5432,6 +5529,7 @@ async fn process_gemini_native_direct_pass(
                 None,
                 None,
                 &client_info,
+                None,
             );
             return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
         }
@@ -5471,6 +5569,7 @@ async fn process_gemini_native_direct_pass(
             provider_trace_id.as_deref(),
             Some(stored_error_body.as_str()),
             &client_info,
+            None,
         );
         return response_from_upstream_bytes(status, &response_headers, error_body_bytes);
     }
@@ -5496,7 +5595,9 @@ async fn process_gemini_native_direct_pass(
         false,
         client_info.clone(),
         // Native-Gemini direct-pass streams the request body without buffering
-        // it, so there is nothing to fingerprint here; these rows get NULL.
+        // it, so there is nothing to fingerprint here; these rows get NULL for
+        // both the request fingerprint and the conversation/session key.
+        None,
         None,
     )
     .await;
@@ -5783,6 +5884,7 @@ mod tests {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             req_hash: None,
+            session_key: None,
         }];
 
         let topology = build_topology_section(&records);
@@ -5824,6 +5926,7 @@ mod tests {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 req_hash: None,
+                session_key: None,
             },
             DashboardUsageRecord {
                 id: 2,
@@ -5849,6 +5952,7 @@ mod tests {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 req_hash: None,
+                session_key: None,
             },
         ];
 
@@ -5903,6 +6007,7 @@ mod tests {
             cache_read_tokens: cache_read,
             cache_write_tokens: cache_write,
             req_hash: None,
+            session_key: None,
         }
     }
 
@@ -6020,6 +6125,7 @@ mod tests {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             req_hash: hash.map(|h| h.to_string()),
+            session_key: None,
         }
     }
 
@@ -6656,6 +6762,7 @@ mod tests {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 req_hash: None,
+                session_key: None,
             })
             .collect::<Vec<_>>();
 
@@ -6979,6 +7086,7 @@ mod tests {
             None,
             0,
             0,
+            None,
             None,
         );
 

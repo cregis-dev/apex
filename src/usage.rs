@@ -38,6 +38,7 @@ impl UsageLogger {
         cache_read_tokens: u64,
         cache_write_tokens: u64,
         req_hash: Option<&str>,
+        session_key: Option<&str>,
     ) {
         self.db.log_usage(
             request_id,
@@ -64,6 +65,7 @@ impl UsageLogger {
             cache_read_tokens as i64,
             cache_write_tokens as i64,
             req_hash,
+            session_key,
         );
     }
 
@@ -83,6 +85,7 @@ impl UsageLogger {
         provider_trace_id: Option<&str>,
         provider_error_body: Option<&str>,
         client_info: &crate::utils::ClientInfo,
+        session_key: Option<&str>,
     ) {
         self.db.log_usage(
             request_id,
@@ -111,6 +114,7 @@ impl UsageLogger {
             // Failure rows carry no request fingerprint yet; the retry-storm
             // signal that consumes it lands with the detection layer.
             None,
+            session_key,
         );
     }
 
@@ -138,6 +142,9 @@ struct UsageTrackerState {
     /// One-way fingerprint of the request payload (set post-construction, like
     /// `client_info`). `None` when profiling/hash_requests is off.
     req_hash: Option<String>,
+    /// Conversation fingerprint (set post-construction, like `req_hash`). `None`
+    /// when the body carries no conversation array.
+    session_key: Option<String>,
     accumulated_data: Vec<u8>,
 }
 
@@ -172,6 +179,7 @@ impl UsageTrackerState {
             fallback_triggered,
             client_info: crate::utils::ClientInfo::default(),
             req_hash: None,
+            session_key: None,
             accumulated_data: Vec::new(),
         }
     }
@@ -351,6 +359,7 @@ impl UsageTrackerState {
             self.cache_read_tokens,
             self.cache_write_tokens,
             self.req_hash.as_deref(),
+            self.session_key.as_deref(),
         );
     }
 
@@ -375,6 +384,7 @@ impl UsageTrackerState {
             None,
             Some(provider_error_body),
             &self.client_info,
+            self.session_key.as_deref(),
         );
     }
 }
@@ -517,6 +527,7 @@ pub async fn wrap_response(
     fallback_triggered: bool,
     client_info: crate::utils::ClientInfo,
     request_hash: Option<String>,
+    session_key: Option<String>,
 ) -> Response<Body> {
     let is_sse = response
         .headers()
@@ -542,6 +553,7 @@ pub async fn wrap_response(
         );
         tracker.client_info = client_info;
         tracker.req_hash = request_hash;
+        tracker.session_key = session_key;
         let state = Arc::new(Mutex::new(tracker));
         let stream = body.into_data_stream();
         let usage_stream = UsageStream {
@@ -576,6 +588,7 @@ pub async fn wrap_response(
                     None,
                     Some(&err.to_string()),
                     &client_info,
+                    session_key.as_deref(),
                 );
                 return upstream_body_error_response(route);
             }
@@ -596,6 +609,7 @@ pub async fn wrap_response(
         );
         state.client_info = client_info;
         state.req_hash = request_hash;
+        state.session_key = session_key;
 
         if let Ok(json) = serde_json::from_slice::<Value>(&bytes) {
             state.extract_usage(&json);
@@ -867,6 +881,7 @@ mod tests {
             false,
             crate::utils::ClientInfo::default(),
             None,
+            None,
         )
         .await;
 
@@ -919,6 +934,7 @@ mod tests {
             false,
             crate::utils::ClientInfo::default(),
             None,
+            None,
         )
         .await;
 
@@ -965,6 +981,7 @@ mod tests {
             Some(42.0),
             false,
             crate::utils::ClientInfo::default(),
+            None,
             None,
         )
         .await;
@@ -1179,6 +1196,7 @@ mod tests {
             &crate::utils::ClientInfo::default(),
             0,
             0,
+            None,
             None,
         );
 
