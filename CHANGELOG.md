@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Planned
+- MCP Prompts API implementation
+- MCP Tools execution framework
+- Rule-based routing with content filtering
+- PII masking engine for data compliance
+
+## [0.11.0] - 2026-08-03
+
+The control plane gains a live log view — the web equivalent of `apex logs`,
+but sourced in-process so it works however the gateway was started. Usage rows
+now record the conversation fingerprint, and Live Tail surfaces the request,
+client, route and session behind each row.
+
 ### Added
 - **Live log view in the control plane.** A new **Logs** page streams the
   gateway's own logs in real time — the web equivalent of `apex logs`. Logs are
@@ -33,12 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   groupable at a glance. Channel now flags `↳ failover` when the request failed
   over off its primary. The request-detail drawer gained the same fields plus
   the raw User-Agent.
-
-### Planned
-- MCP Prompts API implementation
-- MCP Tools execution framework
-- Rule-based routing with content filtering
-- PII masking engine for data compliance
 
 ## [0.10.0] - 2026-08-02
 
