@@ -271,6 +271,25 @@ export interface UsageRecord {
   client: string | null
   /** Raw User-Agent (truncated) for drill-down. */
   user_agent: string | null
+  /**
+   * One-way fingerprint of the conversation's stable prefix — the same key
+   * session affinity routes on. Requests sharing it are turns of one
+   * conversation. Null when the body carried no conversation array.
+   */
+  session_key: string | null
+}
+
+/** One captured gateway log line, streamed from `/api/cp/logs/stream`. */
+export interface LogEntry {
+  /** Monotonic per-process sequence number; used to resume after a reconnect. */
+  seq: number
+  timestamp: string
+  level: 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'
+  target: string
+  message: string
+  /** Present on lines emitted inside a request span; matches `UsageRecord.request_id`. */
+  request_id?: string
+  team_id?: string
 }
 
 export interface RecordsResponse {

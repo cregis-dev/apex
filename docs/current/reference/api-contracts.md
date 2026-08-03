@@ -19,6 +19,7 @@ Apex Gateway 提供以下 API 端点：
 | `/metrics` | GET | Prometheus 指标 | Optional |
 | `/api/dashboard/analytics` | GET | 控制台分析数据 | Required |
 | `/api/dashboard/records` | GET | 控制台明细记录 | Required |
+| `/api/cp/logs/stream` | GET | 网关日志实时流 (SSE) | Required |
 | `/cp` | GET | 控制台 (Control Plane) | Public |
 
 ---
@@ -340,6 +341,40 @@ GET /api/metrics/rankings?by=team&limit=5
   ]
 }
 ```
+
+### GET /api/cp/logs/stream
+
+网关自身日志的实时流 (SSE)，即控制台 Logs 页面的数据源，等价于命令行的 `apex logs`。
+日志来自进程内环形缓冲，因此无论网关以何种方式启动 (`gateway run` / `gateway start -d` /
+systemd / launchd) 都可用。
+
+先回放最近的历史 (backlog)，随后持续推送新产生的日志。
+
+**Query 参数**
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `level` | string | 无 | 最低级别 (`TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`)，只做**收窄**；提高详细度需调 `logging.level` 或 `RUST_LOG` |
+| `after_seq` | number | 无 | 断线重连游标，只返回 `seq` 更大的条目 |
+| `limit` | number | 500 | 回放的历史条数，上限 2000 |
+
+**响应** `Content-Type: text/event-stream`，每帧一条 JSON：
+
+```
+data: {"seq":42,"timestamp":"2026-08-03 14:44:49.318","level":"WARN","target":"apex::server","message":"Upstream Failed: 401 Unauthorized (95ms)","request_id":"aa1fcba4-...","team_id":"alice"}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `seq` | 进程内单调递增序号，用作 `after_seq` 游标 |
+| `request_id` | 所属请求 span 的 ID，可与 Live Tail / Records 的记录对应；非请求上下文的日志无此字段 |
+| `team_id` | 同上，仅在已鉴权的请求上下文中出现 |
+
+订阅者积压超出容量时会收到一条 `level=WARN`、`target=apex::log_stream` 的合成条目，
+说明丢弃了多少行，避免静默丢日志。
+
+> 注意：`EventSource` 无法自定义请求头，控制台改用 `fetch` + `ReadableStream` 消费该流，
+> 以便携带 `Authorization`。
 
 ---
 

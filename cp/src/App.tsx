@@ -7,6 +7,7 @@ import LoginPage from './pages/LoginPage.tsx'
 import OverviewPage from './pages/OverviewPage.tsx'
 import LiveTailPage from './pages/LiveTailPage.tsx'
 import RecordsPage from './pages/RecordsPage.tsx'
+import LogsPage from './pages/LogsPage.tsx'
 import ChannelsPage from './pages/ChannelsPage.tsx'
 import RoutersPage from './pages/RoutersPage.tsx'
 import ModelsPage from './pages/ModelsPage.tsx'
@@ -41,6 +42,7 @@ const router = createHashRouter([
       { path: 'overview', element: <OverviewPage /> },
       { path: 'live', element: <LiveTailPage /> },
       { path: 'records', element: <RecordsPage /> },
+      { path: 'logs', element: <LogsPage /> },
       { path: 'channels', element: <ChannelsPage /> },
       { path: 'models', element: <ModelsPage /> },
       { path: 'routers', element: <RoutersPage /> },

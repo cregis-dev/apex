@@ -241,6 +241,16 @@ impl Database {
             "CREATE INDEX IF NOT EXISTS idx_usage_req_hash ON usage_records(team_id, req_hash)",
             [],
         );
+        // Conversation fingerprint (blake3 of the stable prefix: `system` + first
+        // message) — the same key session affinity routes on, recorded for every
+        // request so multi-turn conversations can be grouped after the fact. NULL
+        // on historical rows and whenever the body has no conversation array.
+        let _ = conn.execute("ALTER TABLE usage_records ADD COLUMN session_key TEXT", []);
+        // Serves per-team session grouping / lookup by conversation.
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_session_key ON usage_records(team_id, session_key)",
+            [],
+        );
 
         // Separate read connection (WAL snapshot reads don't block the writer).
         // query_only guards against an accidental write slipping onto this path.
@@ -469,14 +479,15 @@ impl Database {
         cache_read_tokens: i64,
         cache_write_tokens: i64,
         req_hash: Option<&str>,
+        session_key: Option<&str>,
     ) {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let model_lower = model.to_lowercase();
 
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
-                "INSERT INTO usage_records (timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent, cache_read_tokens, cache_write_tokens, req_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                "INSERT INTO usage_records (timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent, cache_read_tokens, cache_write_tokens, req_hash, session_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
                     timestamp,
                     request_id,
@@ -499,6 +510,7 @@ impl Database {
                     cache_read_tokens,
                     cache_write_tokens,
                     req_hash,
+                    session_key,
                 ],
             );
         }
@@ -630,7 +642,7 @@ impl Database {
 
     /// Column list for `usage_records` reads, kept in lock-step with
     /// [`Self::map_usage_record`]'s positional `row.get(N)` indices.
-    const USAGE_RECORD_COLUMNS: &'static str = "id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent, cache_read_tokens, cache_write_tokens, req_hash";
+    const USAGE_RECORD_COLUMNS: &'static str = "id, timestamp, request_id, team_id, router, matched_rule, channel, model, input_tokens, output_tokens, latency_ms, fallback_triggered, status, status_code, error_message, provider_trace_id, provider_error_body, client, user_agent, cache_read_tokens, cache_write_tokens, req_hash, session_key";
 
     /// Map one `usage_records` row (selected via [`Self::USAGE_RECORD_COLUMNS`])
     /// into a [`UsageRecord`]. Single source of truth for column ordering.
@@ -660,6 +672,7 @@ impl Database {
             cache_read_tokens: row.get(19)?,
             cache_write_tokens: row.get(20)?,
             req_hash: row.get(21)?,
+            session_key: row.get(22)?,
         })
     }
 
@@ -1352,6 +1365,12 @@ pub struct UsageRecord {
     /// Used only for same-user repeat detection; never carries prompt text.
     #[serde(default)]
     pub req_hash: Option<String>,
+    /// One-way fingerprint of the conversation's stable prefix (`system` + first
+    /// message). Identifies a multi-turn conversation across its requests — the
+    /// same key session affinity routes on, but recorded for every request.
+    /// `None` when the body carries no conversation array (or predates this).
+    #[serde(default)]
+    pub session_key: Option<String>,
 }
 
 /// One aggregated hourly rollup bucket for a `(member, model, channel)`.
@@ -1668,6 +1687,62 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].request_id.as_deref(), Some("req-success"));
         assert_eq!(records[1].request_id.as_deref(), Some("req-error"));
+    }
+
+    #[test]
+    fn session_key_round_trips_through_log_usage() {
+        let dir = tempdir().expect("create temp dir");
+        let db = Database::new(Some(dir.path().to_string_lossy().into_owned())).expect("create db");
+
+        // Two turns of one conversation share a session key; a third request
+        // from a different conversation has its own. Rows with no conversation
+        // array (e.g. the unbuffered gemini-native path) store NULL.
+        for (request_id, session_key) in [
+            ("req-turn-1", Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+            ("req-turn-2", Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+            ("req-other", Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
+            ("req-none", None),
+        ] {
+            db.log_usage(
+                Some(request_id),
+                "team-a",
+                "primary",
+                Some("*"),
+                "chat",
+                "gpt-4o",
+                10,
+                20,
+                Some(100.0),
+                false,
+                "success",
+                Some(200),
+                None,
+                None,
+                None,
+                None,
+                None,
+                0,
+                0,
+                None,
+                session_key,
+            );
+        }
+
+        let (records, _) = db
+            .get_usage_records(None, None, None, None, None, None, None, 20, 0)
+            .expect("query usage records");
+
+        let key_of = |id: &str| {
+            records
+                .iter()
+                .find(|r| r.request_id.as_deref() == Some(id))
+                .unwrap_or_else(|| panic!("missing {id}"))
+                .session_key
+                .clone()
+        };
+        assert_eq!(key_of("req-turn-1"), key_of("req-turn-2"));
+        assert_ne!(key_of("req-turn-1"), key_of("req-other"));
+        assert_eq!(key_of("req-none"), None);
     }
 
     #[test]

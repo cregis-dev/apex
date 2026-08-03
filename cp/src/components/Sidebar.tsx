@@ -27,6 +27,7 @@ const NAV: NavSection[] = [
       { id: 'overview', label: 'Overview', icon: 'home' },
       { id: 'live', label: 'Live Tail', icon: 'activity', live: true },
       { id: 'records', label: 'Records', icon: 'list' },
+      { id: 'logs', label: 'Logs', icon: 'zap' },
     ],
   },
   {

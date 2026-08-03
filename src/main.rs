@@ -14,6 +14,7 @@ mod converters;
 mod database;
 mod gemini_compat;
 mod install_metadata;
+mod log_stream;
 mod logs;
 mod metrics;
 mod middleware;
@@ -636,6 +637,9 @@ fn main() -> anyhow::Result<()> {
                     .with_writer(non_blocking)
                     .with_ansi(false),
             )
+            // Mirror into the in-process ring buffer that backs the control
+            // plane's live log view (see src/log_stream.rs).
+            .with(log_stream::LogLayer)
             .init();
 
         Some(guard)
@@ -647,6 +651,9 @@ fn main() -> anyhow::Result<()> {
                     .unwrap_or_else(|_| env_filter.into()),
             )
             .with(tracing_subscriber::fmt::layer())
+            // Same in-process mirror as the daemon branch: the control plane's
+            // log view works no matter how the gateway was started.
+            .with(log_stream::LogLayer)
             .init();
         None
     };

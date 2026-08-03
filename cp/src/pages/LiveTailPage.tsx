@@ -27,6 +27,60 @@ function fmtTs(ts: string) {
   catch { return ts }
 }
 
+/**
+ * Stable hue for a session key, so turns of the same conversation share a color
+ * and interleaved conversations are groupable at a glance. Hue only — chroma and
+ * lightness stay fixed so every chip sits at the same weight as the token palette.
+ */
+function sessionHue(key: string) {
+  let h = 0
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) % 360
+  return h
+}
+
+function SessionChip({ sessionKey }: { sessionKey: string | null }) {
+  if (!sessionKey) return <span style={{ color: 'var(--muted-2)' }}>—</span>
+  const hue = sessionHue(sessionKey)
+  return (
+    <span
+      title={`Session ${sessionKey}`}
+      style={{
+        fontFamily: 'var(--font-mono)', fontSize: 11,
+        padding: '1px 6px', borderRadius: 999,
+        color: `oklch(0.45 0.11 ${hue})`,
+        background: `oklch(0.95 0.035 ${hue})`,
+      }}
+    >
+      {sessionKey.slice(0, 6)}
+    </span>
+  )
+}
+
+/** Request id cell: truncated, click to copy without opening the row drawer. */
+function RequestIdCell({ id }: { id: string | null }) {
+  const [copied, setCopied] = useState(false)
+  if (!id) return <span style={{ color: 'var(--muted-2)' }}>—</span>
+  return (
+    <span
+      title={`${id} — click to copy`}
+      onClick={(e) => {
+        e.stopPropagation()
+        void navigator.clipboard.writeText(id).then(() => {
+          setCopied(true)
+          setTimeout(() => setCopied(false), 1200)
+        })
+      }}
+      style={{
+        fontFamily: 'var(--font-mono)', fontSize: 11,
+        color: copied ? 'var(--ok)' : 'var(--muted)',
+        cursor: 'pointer',
+      }}
+    >
+      {copied ? 'copied' : id.slice(0, 8)}
+    </span>
+  )
+}
+
 function RecordDetail({ record, group, onClose }: { record: UsageRecord; group?: string; onClose: () => void }) {
   const curlCmd = `curl -X POST http://localhost/v1/chat/completions \\
   -H "Authorization: Bearer <team-key>" \\
@@ -61,7 +115,13 @@ function RecordDetail({ record, group, onClose }: { record: UsageRecord; group?:
           model: {record.model}{'\n'}
           user: {record.team_id}{'\n'}
           {group ? <>team: {group}{'\n'}</> : null}
+          {record.request_id ? <>request_id: {record.request_id}{'\n'}</> : null}
+          {record.client ? <>client: {record.client}{'\n'}</> : null}
+          {record.user_agent ? <>user_agent: {record.user_agent}{'\n'}</> : null}
+          {record.session_key ? <>session_key: {record.session_key}{'\n'}</> : null}
+          router: {record.router}{record.matched_rule ? ` (rule: ${record.matched_rule})` : ''}{'\n'}
           channel: {record.final_channel || record.channel}
+          {record.fallback_triggered ? '\n↳ failed over from the primary channel' : ''}
         </pre>
       </div>
 
@@ -265,7 +325,7 @@ export default function LiveTailPage() {
           </div>
         </div>
 
-        <div className="card" style={{ maxHeight: 'calc(100vh - 220px)', overflowY: 'auto' }}>
+        <div className="card" style={{ maxHeight: 'calc(100vh - 220px)', overflowY: 'auto', overflowX: 'auto' }}>
           {rows.length === 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 64, color: 'var(--muted)' }}>
               <span className="spinner" style={{ width: 20, height: 20, marginBottom: 16 }} />
@@ -276,13 +336,17 @@ export default function LiveTailPage() {
             <table className="table" style={{ tableLayout: 'fixed' }}>
               <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
                 <tr>
-                  <th style={{ width: 110 }}>Time</th>
-                  <th style={{ width: 80 }}>Status</th>
+                  <th style={{ width: 96 }}>Time</th>
+                  <th style={{ width: 78 }}>Req ID</th>
+                  <th style={{ width: 68 }}>Status</th>
                   <th>Model</th>
                   <th>Channel</th>
+                  <th>Router</th>
+                  <th style={{ width: 104 }}>Client</th>
                   <th>User</th>
-                  <th style={{ width: 80, textAlign: 'right' }}>Latency</th>
-                  <th style={{ width: 70, textAlign: 'right' }}>Tokens</th>
+                  <th style={{ width: 74 }}>Session</th>
+                  <th style={{ width: 76, textAlign: 'right' }}>Latency</th>
+                  <th style={{ width: 66, textAlign: 'right' }}>Tokens</th>
                 </tr>
               </thead>
               <tbody>
@@ -300,6 +364,7 @@ export default function LiveTailPage() {
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
                       {fmtTs(r.timestamp)}
                     </td>
+                    <td><RequestIdCell id={r.request_id} /></td>
                     <td>
                       <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: statusColor(r.status) }}>
                         {r.status_code ?? r.status}
@@ -310,6 +375,22 @@ export default function LiveTailPage() {
                     </td>
                     <td style={{ fontSize: 12, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {r.channel}
+                      {r.fallback_triggered && (
+                        <div title="Request failed over from the primary channel" style={{ fontSize: 11, color: 'var(--warn)' }}>
+                          ↳ failover
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ fontSize: 12, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {r.router}
+                      {r.matched_rule && (
+                        <div title={`Matched rule: ${r.matched_rule}`} style={{ fontSize: 11, color: 'var(--muted-2)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {r.matched_rule}
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ fontSize: 12, color: r.client ? 'var(--ink-2)' : 'var(--muted-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {r.client ?? '—'}
                     </td>
                     <td style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {r.team_id}
@@ -319,6 +400,7 @@ export default function LiveTailPage() {
                         </div>
                       )}
                     </td>
+                    <td><SessionChip sessionKey={r.session_key} /></td>
                     <td style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 12, color: r.latency_ms != null && r.latency_ms > 1000 ? 'var(--warn)' : undefined }}>
                       {fmtMs(r.latency_ms)}
                     </td>
