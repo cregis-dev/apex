@@ -13,6 +13,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based routing with content filtering
 - PII masking engine for data compliance
 
+## [0.11.1] - 2026-08-17
+
+Patch release fixing spurious 502s on slow non-streaming completions. Observed
+against DeepSeek, but the cause is generic to any upstream that answers
+`200 OK` before it starts generating.
+
+### Fixed
+- Non-streaming responses were guarded by a per-chunk *idle* timeout, which they
+  can never satisfy. Providers send response headers before the model generates
+  anything and then deliver the whole body at once when generation finishes, so
+  the body is legitimately idle for the entire generation — measured at ~100s on
+  DeepSeek for an 8k-token completion, against a 30s `response_ms`. Every
+  completion slower than `response_ms` failed with
+  `failed to read upstream response body: response timeout`, was retried into a
+  second full (billed) generation, and returned 502 after roughly twice the
+  timeout. Buffered bodies now get a whole-body deadline instead of an idle one.
+- Upstream body timeouts are no longer retried. An identical retry re-runs a
+  generation that the upstream has already produced and billed for, only to hit
+  the same deadline — it doubled the cost and the client's wait before an
+  unchanged 502. Transient transport errors are still retried.
+
+### Changed
+- `timeouts.request_ms` now does something. It was parsed, reported by the
+  config API and documented, but never applied to any request; it is now the
+  total response-body budget for non-streaming responses, while `response_ms`
+  keeps its documented meaning as the inter-chunk idle timeout for streaming
+  responses. The two cannot share one value: streaming wants a short idle guard
+  to detect dead connections, buffered responses want a long total budget to
+  accommodate slow models.
+
+  The effective non-streaming budget is `max(request_ms, response_ms)`. Because
+  `response_ms` previously guarded buffered bodies too, deployments that raised
+  it to accommodate a slow model keep working on upgrade instead of newly timing
+  out at a shorter `request_ms`. No config change is required; to tighten
+  streaming dead-connection detection again, lower `response_ms` and set
+  `request_ms` to the long budget.
+
 ## [0.11.0] - 2026-08-03
 
 The control plane gains a live log view — the web equivalent of `apex logs`,

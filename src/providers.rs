@@ -26,6 +26,24 @@ pub enum RouteKind {
     GeminiNative,
 }
 
+/// Timeouts guarding the upstream response body.
+///
+/// Streaming and buffered responses fail in different ways, so they need
+/// different guards. A streaming (SSE) response emits chunks continuously, so a
+/// long gap between chunks means the connection is dead — `idle` catches that
+/// quickly. A buffered response is the opposite: providers answer `200 OK` with
+/// headers *before* generating anything, then emit the whole body at once when
+/// generation finishes. Its body is legitimately idle for as long as the model
+/// takes to think, so an idle guard kills healthy requests; it gets `total`, a
+/// wall-clock budget for the entire body, instead.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseTimeouts {
+    /// Max gap between two chunks of a streaming response.
+    pub idle: Duration,
+    /// Max wall-clock time to receive a complete buffered response body.
+    pub total: Duration,
+}
+
 /// Represents a request prepared for sending to the upstream provider.
 pub struct PreparedRequest {
     pub url: Url,
@@ -102,9 +120,9 @@ pub trait ProviderAdapter: Send + Sync {
         &self,
         _route: RouteKind,
         resp: reqwest::Response,
-        timeout: Duration,
+        timeouts: ResponseTimeouts,
     ) -> Response<Body> {
-        convert_response(resp, timeout)
+        convert_response(resp, timeouts)
     }
 }
 
@@ -236,7 +254,72 @@ pub fn error_response(status: StatusCode, message: &str) -> Response<Body> {
         .unwrap()
 }
 
-pub fn convert_response(resp: reqwest::Response, timeout: Duration) -> Response<Body> {
+fn is_event_stream(resp: &reqwest::Response) -> bool {
+    resp.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/event-stream"))
+        .unwrap_or(false)
+}
+
+/// Guards a streaming body with a per-chunk idle timeout.
+///
+/// The timer resets on every chunk, so this bounds how long the stream may stall,
+/// not how long it may run.
+fn with_idle_timeout<S, E>(
+    body: S,
+    idle: Duration,
+) -> impl stream::Stream<Item = Result<Bytes, io::Error>>
+where
+    S: stream::Stream<Item = Result<Bytes, E>>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    body.timeout(idle).map(|item| match item {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(err)) => Err(io::Error::other(err)),
+        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
+    })
+}
+
+/// Guards a buffered body with a single wall-clock deadline for the whole body.
+///
+/// Unlike a per-chunk timeout this deadline does not reset as bytes arrive, so a
+/// body that is slow to *start* — the normal case, since providers send headers
+/// before the model has generated anything — gets the same budget as one that is
+/// slow to finish.
+fn with_total_deadline<S, E>(
+    body: S,
+    total: Duration,
+) -> impl stream::Stream<Item = Result<Bytes, io::Error>>
+where
+    S: stream::Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let deadline = tokio::time::Instant::now() + total;
+    stream::unfold(Some(Box::pin(body)), move |state| async move {
+        let mut inner = state?;
+        match tokio::time::timeout_at(deadline, inner.next()).await {
+            Err(_) => Some((
+                Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
+                None,
+            )),
+            Ok(None) => None,
+            Ok(Some(Ok(bytes))) => Some((Ok(bytes), Some(inner))),
+            Ok(Some(Err(err))) => Some((Err(io::Error::other(err)), None)),
+        }
+    })
+}
+
+/// Wraps an upstream body in the guard that matches how it is delivered.
+fn guarded_body(resp: reqwest::Response, timeouts: ResponseTimeouts) -> Body {
+    if is_event_stream(&resp) {
+        Body::from_stream(with_idle_timeout(resp.bytes_stream(), timeouts.idle))
+    } else {
+        Body::from_stream(with_total_deadline(resp.bytes_stream(), timeouts.total))
+    }
+}
+
+pub fn convert_response(resp: reqwest::Response, timeouts: ResponseTimeouts) -> Response<Body> {
     let status = resp.status();
     let mut builder = Response::builder().status(status);
     for (name, value) in resp.headers().iter() {
@@ -244,14 +327,8 @@ pub fn convert_response(resp: reqwest::Response, timeout: Duration) -> Response<
             builder = builder.header(name, value);
         }
     }
-    let stream = resp.bytes_stream().timeout(timeout);
-    let stream = stream.map(|item| match item {
-        Ok(Ok(bytes)) => Ok(bytes),
-        Ok(Err(err)) => Err(io::Error::other(err)),
-        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
-    });
     builder
-        .body(Body::from_stream(stream))
+        .body(guarded_body(resp, timeouts))
         .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "invalid response"))
 }
 
@@ -462,23 +539,11 @@ fn ensure_openai_stream_usage_for_openai_route(route: RouteKind, body: &Bytes) -
 fn handle_openai_compatible_response(
     route: RouteKind,
     resp: reqwest::Response,
-    timeout: Duration,
+    timeouts: ResponseTimeouts,
 ) -> Response<Body> {
     if matches!(route, RouteKind::Anthropic) {
-        let is_stream = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.contains("text/event-stream"))
-            .unwrap_or(false);
-
-        if is_stream {
-            let stream = resp.bytes_stream().timeout(timeout);
-            let stream = stream.map(|item| match item {
-                Ok(Ok(bytes)) => Ok(bytes),
-                Ok(Err(err)) => Err(io::Error::other(err)),
-                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
-            });
+        if is_event_stream(&resp) {
+            let stream = with_idle_timeout(resp.bytes_stream(), timeouts.idle);
             let converted_stream = convert_openai_stream_to_anthropic(stream);
 
             return Response::builder()
@@ -498,12 +563,7 @@ fn handle_openai_compatible_response(
             }
         }
 
-        let stream = resp.bytes_stream().timeout(timeout);
-        let stream = stream.map(|item| match item {
-            Ok(Ok(bytes)) => Ok(bytes),
-            Ok(Err(err)) => Err(io::Error::other(err)),
-            Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "response timeout")),
-        });
+        let stream = with_total_deadline(resp.bytes_stream(), timeouts.total);
 
         let future = stream
             .try_fold(Vec::new(), |mut acc, bytes| async move {
@@ -518,7 +578,7 @@ fn handle_openai_compatible_response(
             .body(Body::from_stream(stream::once(future)))
             .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "invalid response"))
     } else {
-        convert_response(resp, timeout)
+        convert_response(resp, timeouts)
     }
 }
 
@@ -555,9 +615,9 @@ impl ProviderAdapter for DefaultAdapter {
         &self,
         route: RouteKind,
         resp: reqwest::Response,
-        timeout: Duration,
+        timeouts: ResponseTimeouts,
     ) -> Response<Body> {
-        handle_openai_compatible_response(route, resp, timeout)
+        handle_openai_compatible_response(route, resp, timeouts)
     }
 }
 
@@ -592,9 +652,9 @@ impl ProviderAdapter for OpenAiAdapter {
         &self,
         route: RouteKind,
         resp: reqwest::Response,
-        timeout: Duration,
+        timeouts: ResponseTimeouts,
     ) -> Response<Body> {
-        handle_openai_compatible_response(route, resp, timeout)
+        handle_openai_compatible_response(route, resp, timeouts)
     }
 }
 
@@ -740,9 +800,9 @@ impl ProviderAdapter for GeminiAdapter {
         &self,
         route: RouteKind,
         resp: reqwest::Response,
-        timeout: Duration,
+        timeouts: ResponseTimeouts,
     ) -> Response<Body> {
-        handle_openai_compatible_response(route, resp, timeout)
+        handle_openai_compatible_response(route, resp, timeouts)
     }
 }
 
@@ -1021,7 +1081,10 @@ mod tests {
         let converted = handle_openai_compatible_response(
             RouteKind::Anthropic,
             resp,
-            Duration::from_millis(10),
+            ResponseTimeouts {
+                idle: Duration::from_millis(10),
+                total: Duration::from_secs(60),
+            },
         );
         let mut stream = converted.into_body().into_data_stream();
         let next = tokio::time::timeout(Duration::from_millis(250), stream.next())
@@ -1031,6 +1094,69 @@ mod tests {
 
         handle.abort();
         assert!(item.is_err());
+    }
+
+    /// A buffered body arrives in one piece after the model finishes generating,
+    /// so it looks "idle" for the whole generation. The idle guard kills it; the
+    /// total-deadline guard is what it actually needs. This pairing is the bug
+    /// that surfaced as upstream 502s on slow non-streaming completions.
+    #[tokio::test]
+    async fn buffered_body_needs_a_total_deadline_not_an_idle_timeout() {
+        fn slow_body() -> impl stream::Stream<Item = Result<Bytes, io::Error>> + Send + 'static {
+            stream::once(async {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                Ok(Bytes::from_static(b"{\"ok\":true}"))
+            })
+        }
+
+        // An idle timeout shorter than the generation kills a healthy response:
+        // the body errors before its bytes ever arrive, which is what callers
+        // buffering with `to_bytes` see.
+        let killed = Box::pin(with_idle_timeout(slow_body(), Duration::from_millis(20)))
+            .next()
+            .await
+            .expect("idle guard should yield an item");
+        assert_eq!(killed.unwrap_err().kind(), io::ErrorKind::TimedOut);
+
+        // The same body under a total deadline that covers it comes through intact.
+        let delivered: Vec<_> = with_total_deadline(slow_body(), Duration::from_secs(5))
+            .collect()
+            .await;
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].as_ref().unwrap(), "{\"ok\":true}");
+    }
+
+    #[tokio::test]
+    async fn total_deadline_still_bounds_a_body_that_never_arrives() {
+        let body = stream::pending::<Result<Bytes, io::Error>>();
+        let items: Vec<_> = with_total_deadline(body, Duration::from_millis(50))
+            .collect()
+            .await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].as_ref().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
+    /// The deadline covers the whole body, so chunks that individually beat it
+    /// still fail once their total exceeds it — that is the point of `total`.
+    #[tokio::test]
+    async fn total_deadline_does_not_reset_between_chunks() {
+        let body = stream::unfold(0u8, |n| async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Some((Ok::<_, io::Error>(Bytes::from_static(b"x")), n + 1))
+        });
+        let items: Vec<_> = with_total_deadline(body, Duration::from_millis(100))
+            .collect()
+            .await;
+        let (ok, err): (Vec<_>, Vec<_>) = items.iter().partition(|i| i.is_ok());
+        assert!(
+            !ok.is_empty(),
+            "some chunks should arrive before the deadline"
+        );
+        assert_eq!(err.len(), 1, "stream should end on a single timeout error");
+        assert_eq!(err[0].as_ref().unwrap_err().kind(), io::ErrorKind::TimedOut);
     }
 
     #[test]
