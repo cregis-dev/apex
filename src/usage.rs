@@ -437,9 +437,39 @@ where
 
 pub const UPSTREAM_BODY_ERROR_MESSAGE: &str = "failed to read upstream response body";
 const UPSTREAM_BODY_ERROR_HEADER: &str = "x-apex-upstream-body-error";
+const UPSTREAM_BODY_ERROR_TIMEOUT: &str = "timeout";
+const UPSTREAM_BODY_ERROR_TRANSPORT: &str = "transport";
 
 pub fn is_upstream_body_error_response(response: &Response<Body>) -> bool {
     response.headers().contains_key(UPSTREAM_BODY_ERROR_HEADER)
+}
+
+/// Whether re-sending the request could plausibly succeed.
+///
+/// A body that timed out will time out again on an identical retry, and the
+/// upstream has already generated (and billed for) the response it could not
+/// deliver in time — so retrying only doubles the cost and the client's wait
+/// before the same 502. Transient transport errors are still worth a retry.
+pub fn is_upstream_body_error_retryable(response: &Response<Body>) -> bool {
+    response
+        .headers()
+        .get(UPSTREAM_BODY_ERROR_HEADER)
+        .and_then(|value| value.to_str().ok())
+        != Some(UPSTREAM_BODY_ERROR_TIMEOUT)
+}
+
+/// Walks the error chain looking for an I/O timeout raised by the body guards.
+fn is_timeout_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(err) = current {
+        if let Some(io_err) = err.downcast_ref::<io::Error>()
+            && io_err.kind() == io::ErrorKind::TimedOut
+        {
+            return true;
+        }
+        current = err.source();
+    }
+    false
 }
 
 fn route_label(route: RouteKind) -> &'static str {
@@ -480,7 +510,7 @@ fn stream_error_event(route: RouteKind) -> Bytes {
     }
 }
 
-fn upstream_body_error_response(route: RouteKind) -> Response<Body> {
+fn upstream_body_error_response(route: RouteKind, timed_out: bool) -> Response<Body> {
     let body = match route {
         RouteKind::Anthropic => serde_json::json!({
             "type": "error",
@@ -506,7 +536,14 @@ fn upstream_body_error_response(route: RouteKind) -> Response<Body> {
     Response::builder()
         .status(StatusCode::BAD_GATEWAY)
         .header("content-type", "application/json")
-        .header(UPSTREAM_BODY_ERROR_HEADER, "1")
+        .header(
+            UPSTREAM_BODY_ERROR_HEADER,
+            if timed_out {
+                UPSTREAM_BODY_ERROR_TIMEOUT
+            } else {
+                UPSTREAM_BODY_ERROR_TRANSPORT
+            },
+        )
         .body(Body::from(body.to_string()))
         .unwrap()
 }
@@ -590,7 +627,7 @@ pub async fn wrap_response(
                     &client_info,
                     session_key.as_deref(),
                 );
-                return upstream_body_error_response(route);
+                return upstream_body_error_response(route, is_timeout_error(&err));
             }
         };
 
@@ -625,6 +662,42 @@ mod tests {
     use super::*;
     use crate::database::Database;
     use tempfile::{TempDir, tempdir};
+
+    async fn body_error(kind: io::ErrorKind) -> axum::Error {
+        let body = Body::from_stream(futures::stream::once(async move {
+            Err::<Bytes, io::Error>(io::Error::new(kind, "boom"))
+        }));
+        axum::body::to_bytes(body, 1024)
+            .await
+            .expect_err("stream error should surface as a body error")
+    }
+
+    /// The retry decision hinges on spotting the guard's timeout after axum has
+    /// wrapped it, so assert against a real `to_bytes` failure rather than a
+    /// hand-built error.
+    #[tokio::test]
+    async fn body_timeout_is_detected_through_the_axum_error_chain() {
+        assert!(is_timeout_error(&body_error(io::ErrorKind::TimedOut).await));
+        assert!(!is_timeout_error(
+            &body_error(io::ErrorKind::ConnectionReset).await
+        ));
+    }
+
+    #[tokio::test]
+    async fn only_timeouts_suppress_the_retry() {
+        assert!(!is_upstream_body_error_retryable(
+            &upstream_body_error_response(RouteKind::Anthropic, true)
+        ));
+        assert!(is_upstream_body_error_retryable(
+            &upstream_body_error_response(RouteKind::Anthropic, false)
+        ));
+        // The marker header must still identify these as body errors either way.
+        for timed_out in [true, false] {
+            assert!(is_upstream_body_error_response(
+                &upstream_body_error_response(RouteKind::Openai, timed_out)
+            ));
+        }
+    }
 
     fn create_test_metrics() -> Arc<MetricsState> {
         Arc::new(MetricsState::new().unwrap())

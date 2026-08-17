@@ -17,8 +17,8 @@ use crate::middleware::compliance::{OriginalModelName, compliance_middleware};
 use crate::middleware::policy::team_policy;
 use crate::middleware::ratelimit::TeamRateLimiter;
 use crate::providers::{
-    AccessAudit, NoOpAccessAudit, NoOpRateLimiter, ProviderRegistry, RateLimiter, RouteKind,
-    prepare_request,
+    AccessAudit, NoOpAccessAudit, NoOpRateLimiter, ProviderRegistry, RateLimiter, ResponseTimeouts,
+    RouteKind, prepare_request,
 };
 use crate::router_selector::RouterSelector;
 use crate::usage::UsageLogger;
@@ -4530,8 +4530,15 @@ fn truncate_for_storage(input: &str, limit: usize) -> String {
     input.chars().take(limit).collect()
 }
 
-fn response_timeout_for(global: &Timeouts, channel: &Channel) -> Duration {
-    Duration::from_millis(channel.timeouts.as_ref().unwrap_or(global).response_ms)
+fn response_timeouts_for(global: &Timeouts, channel: &Channel) -> ResponseTimeouts {
+    let timeouts = channel.timeouts.as_ref().unwrap_or(global);
+    ResponseTimeouts {
+        idle: Duration::from_millis(timeouts.response_ms),
+        // `response_ms` used to guard buffered bodies too, so operators raised it
+        // to accommodate slow models. Taking the max keeps those configs working
+        // instead of newly timing them out at a shorter `request_ms`.
+        total: Duration::from_millis(timeouts.request_ms.max(timeouts.response_ms)),
+    }
 }
 
 async fn process_request(
@@ -5079,7 +5086,7 @@ async fn process_request(
                         let mut response = adapter.handle_response(
                             route,
                             resp,
-                            response_timeout_for(&config.global.timeouts, channel),
+                            response_timeouts_for(&config.global.timeouts, channel),
                         );
                         if channel.provider_type == crate::config::ProviderType::Gemini
                             && matches!(route, RouteKind::Anthropic)
@@ -5118,7 +5125,9 @@ async fn process_request(
                             state
                                 .access_audit
                                 .audit(&channel.provider_type, route, false);
-                            if attempt + 1 < max_attempts {
+                            if attempt + 1 < max_attempts
+                                && crate::usage::is_upstream_body_error_retryable(&wrapped)
+                            {
                                 tokio::time::sleep(Duration::from_millis(
                                     config.global.retries.backoff_ms,
                                 ))
@@ -5578,7 +5587,7 @@ async fn process_gemini_native_direct_pass(
     let response = adapter.handle_response(
         route,
         resp,
-        response_timeout_for(&config.global.timeouts, channel),
+        response_timeouts_for(&config.global.timeouts, channel),
     );
     let wrapped = crate::usage::wrap_response(
         response,
