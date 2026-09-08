@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based routing with content filtering
 - PII masking engine for data compliance
 
+## [0.11.2] - 2026-09-08
+
+Patch release fixing display defects in the control plane's Channels table.
+
+### Fixed
+- Long pricing-rule names wrapped out of their billing badge instead of
+  truncating: `.badge` is a fixed-height `inline-flex`, so `text-overflow` on the
+  badge itself never applied to its text and the second line rendered outside the
+  pill. Badge labels now truncate inside the pill, and `.badge` no longer wraps.
+- Channel names were cut off far earlier than the column needed
+  (`qwen_tp_intl_plan_80` rendered as `qwen_tp_i…`). The Channel column is wider,
+  the name carries a `title` with the full value, and the table now scrolls
+  horizontally below 940px instead of squeezing every column.
+- The `ANTHROPIC` endpoint label ran into its URL — the label column was 60px
+  against 63px of text — and is now wide enough for both labels.
+- `custom_dual`, `openrouter`, `zai` and `jina` channels showed a grey `?` avatar
+  because they had no provider mark. They now have their own marks, and unknown
+  providers fall back to initials with a name-derived hue instead of `?`.
+
 ## [0.11.1] - 2026-08-17
 
 Patch release fixing spurious 502s on slow non-streaming completions. Observed
