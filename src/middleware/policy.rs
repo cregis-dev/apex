@@ -9,6 +9,9 @@ use axum::{
 };
 use std::sync::Arc;
 
+// Err carries a ready-to-return Response, as elsewhere in the axum layers
+// (see the module-level allow in src/server.rs); boxing it would buy nothing.
+#[allow(clippy::result_large_err)]
 pub async fn team_policy(
     State(state): State<Arc<AppState>>,
     req: Request,

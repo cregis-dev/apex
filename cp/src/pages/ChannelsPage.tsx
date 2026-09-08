@@ -38,7 +38,7 @@ function EndpointLine({ label, url }: { label: string; url: string }) {
           fontSize: 10, fontWeight: 600,
           textTransform: 'uppercase', letterSpacing: '0.04em',
           color: 'var(--muted)',
-          width: 60,
+          width: 68,
         }}
       >
         {label}
@@ -508,7 +508,7 @@ export default function ChannelsPage() {
               </div>
             )}
 
-            <div className="card">
+            <div className="card" style={{ overflow: 'hidden' }}>
               {channels.length === 0 ? (
                 <Empty
                   icon="plug"
@@ -516,14 +516,15 @@ export default function ChannelsPage() {
                   sub="Click ‘New channel’ to connect an upstream LLM provider."
                 />
               ) : (
-                <table className="table" style={{ tableLayout: 'fixed', width: '100%' }}>
+                <div style={{ overflowX: 'auto' }}>
+                <table className="table" style={{ tableLayout: 'fixed', width: '100%', minWidth: 940 }}>
                   <colgroup>
+                    <col style={{ width: '21%' }} />
+                    <col style={{ width: '11%' }} />
+                    <col style={{ width: '13%' }} />
+                    <col style={{ width: '28%' }} />
                     <col style={{ width: '17%' }} />
-                    <col style={{ width: '11%' }} />
-                    <col style={{ width: '11%' }} />
-                    <col style={{ width: '31%' }} />
-                    <col style={{ width: '18%' }} />
-                    <col style={{ width: '11%' }} />
+                    <col style={{ width: '10%' }} />
                   </colgroup>
                   <thead>
                     <tr>
@@ -543,10 +544,9 @@ export default function ChannelsPage() {
                           <td>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
                               <ProviderMark kind={ch.provider_type} size={28} />
-                              <span style={{
-                                fontWeight: 500,
-                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                              }}>{ch.name}</span>
+                              <span className="ellipsis" title={ch.name} style={{ fontWeight: 500 }}>
+                                {ch.name}
+                              </span>
                               {ch.anthropic_base_url && (
                                 <span
                                   className="badge"
@@ -562,7 +562,9 @@ export default function ChannelsPage() {
                             </div>
                           </td>
                           <td>
-                            <span className="badge">{ch.provider_type}</span>
+                            <span className="badge" title={ch.provider_type}>
+                              <span className="ellipsis">{ch.provider_type}</span>
+                            </span>
                           </td>
                           <td>
                             {(() => {
@@ -578,13 +580,12 @@ export default function ChannelsPage() {
                                     background: isSub ? 'var(--brand-soft)' : 'var(--surface-2)',
                                     color: isSub ? 'var(--brand-ink)' : 'var(--ink-2)',
                                     borderColor: 'transparent',
-                                    overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%',
                                   }}
                                   title={rule
-                                    ? (isSub ? `Subscription $${rule.monthly_fee ?? 0}/mo` : 'Pay-as-you-go')
-                                    : 'Pricing rule not found'}
+                                    ? `${ch.pricing} — ${isSub ? `subscription $${rule.monthly_fee ?? 0}/mo` : 'pay-as-you-go'}`
+                                    : `${ch.pricing} — pricing rule not found`}
                                 >
-                                  {ch.pricing}
+                                  <span className="ellipsis">{ch.pricing}</span>
                                 </span>
                               )
                             })()}
@@ -654,6 +655,7 @@ export default function ChannelsPage() {
                     })}
                   </tbody>
                 </table>
+                </div>
               )}
             </div>
           </>
