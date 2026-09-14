@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Planned
+- MCP Prompts API implementation
+- MCP Tools execution framework
+- Rule-based routing with content filtering
+- PII masking engine for data compliance
+
+## [0.12.0] - 2026-09-15
+
+Channels gain a `model_map` editor in the control plane. The field already
+existed in `config.json` and was honoured at request time; it just had no UI
+and could not be read back over the admin API.
+
 ### Added
 - **Model mapping in the channel editor.** The channel form now edits a
   channel's `model_map` — the per-channel rewrite of a requested model name to
@@ -20,12 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET /admin/channels` and the channel create/update responses now include
   `model_map`. The write paths already accepted it, but the read paths dropped
   it, so any client reading a channel back could not see its mapping.
-
-### Planned
-- MCP Prompts API implementation
-- MCP Tools execution framework
-- Rule-based routing with content filtering
-- PII masking engine for data compliance
+- A model named `__proto__` no longer disappears from a channel's mapping. The
+  gateway stores the key verbatim, but the control plane rebuilt the map by
+  object assignment, which hits `Object.prototype`'s inherited accessor instead
+  of creating an own property. The row vanished on save, and because the
+  rebuilt map then compared as "changed to empty", the channel's *entire*
+  mapping was cleared — on a save that never touched the model map. The same
+  key was also dropped by the list query's structural sharing on every refetch
+  after the first.
 
 ## [0.11.2] - 2026-09-08
 
