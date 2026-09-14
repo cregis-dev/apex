@@ -486,4 +486,31 @@ async fn admin_channel_model_map_round_trips() {
     let persisted: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
     assert_eq!(persisted["channels"][0]["name"], "mm");
+
+    // A model named `__proto__` is nonsense as a model, but it is a legal JSON
+    // key and the gateway stores it verbatim — so the control plane has to
+    // carry it too. On the JS side it is the one key that object *assignment*
+    // silently swallows (it hits Object.prototype's accessor), which is how a
+    // client can drop the mapping without ever touching it. Pin the server
+    // half here so the wire format stays honest.
+    let (status, updated) = send(
+        "PATCH",
+        "/admin/channels/mm",
+        Some(json!({ "model_map": { "__proto__": "MiniMax-M2", "plain": "MiniMax-Text-01" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["model_map"]["__proto__"], "MiniMax-M2");
+    assert_eq!(updated["model_map"]["plain"], "MiniMax-Text-01");
+
+    let (status, listed) = send("GET", "/admin/channels", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["data"][0]["model_map"]["__proto__"], "MiniMax-M2");
+
+    let persisted: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    assert_eq!(
+        persisted["channels"][0]["model_map"]["__proto__"],
+        "MiniMax-M2"
+    );
 }

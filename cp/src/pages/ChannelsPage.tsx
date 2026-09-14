@@ -80,15 +80,21 @@ function modelMapToRows(map: Record<string, string> | null | undefined): ModelMa
   return Object.entries(map ?? {}).map(([from, to]) => ({ from, to }))
 }
 
-/** Drop blank/half-filled rows; later duplicates overwrite earlier ones. */
+/**
+ * Drop blank/half-filled rows; later duplicates overwrite earlier ones.
+ *
+ * Built via `Object.fromEntries` rather than by assignment: `out[from] = to`
+ * on a plain object hits the inherited accessor when `from` is `__proto__`,
+ * so that row would vanish — and since the server round-trips such a key
+ * fine (`JSON.parse` gives it as an own property), the rebuilt map would then
+ * read as "changed to empty" and clear the channel's mapping on any save.
+ */
 function rowsToModelMap(rows: ModelMapRow[]): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const row of rows) {
-    const from = row.from.trim()
-    const to = row.to.trim()
-    if (from && to) out[from] = to
-  }
-  return out
+  return Object.fromEntries(
+    rows
+      .map((row) => [row.from.trim(), row.to.trim()])
+      .filter(([from, to]) => from && to),
+  )
 }
 
 /** Order-insensitive equality, so reordering rows alone isn't a "change". */
@@ -450,6 +456,13 @@ export default function ChannelsPage() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['channels'],
     queryFn: api.channels,
+    // `model_map` is keyed by arbitrary model names. React Query's structural
+    // sharing rebuilds cached objects by assignment, which silently drops a
+    // `__proto__` key on every refetch after the first — the form would then
+    // reopen without that row and save the mapping away. Keep the parsed
+    // response verbatim; this list is small, so the lost referential
+    // stability costs nothing.
+    structuralSharing: false,
   })
   const { data: keysData } = useQuery({
     queryKey: ['channels', 'api_keys'],
