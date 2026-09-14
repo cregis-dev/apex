@@ -398,3 +398,92 @@ async fn admin_list_masks_keys() {
     assert!(api_key.ends_with("cdef"));
     assert_ne!(api_key, "sk-channel-abcdef");
 }
+
+/// `model_map` must survive the full control-plane round trip: the create/update
+/// handlers already accepted it, but the read endpoints used to drop it, so the
+/// UI reopened an edit form with the mapping silently missing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_channel_model_map_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.json");
+
+    let mut config = base_config();
+    config.global.auth_keys = vec!["admin-key".to_string()];
+    config.hot_reload.config_path = cfg_path.to_string_lossy().to_string();
+
+    let state = build_state(config).unwrap();
+    let app = build_app(state);
+
+    let send = |method: &'static str, uri: &'static str, body: Option<serde_json::Value>| {
+        let app = app.clone();
+        async move {
+            let builder = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("Authorization", "Bearer admin-key")
+                .header("content-type", "application/json");
+            let req = match body {
+                Some(v) => builder.body(Body::from(v.to_string())).unwrap(),
+                None => builder.body(Body::empty()).unwrap(),
+            };
+            let resp = app.oneshot(req).await.unwrap();
+            let (status, text) = response_text(resp).await;
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap_or(json!(null));
+            (status, value)
+        }
+    };
+
+    // Create with a mapping — the create response echoes it back.
+    let (status, created) = send(
+        "POST",
+        "/admin/channels",
+        Some(json!({
+            "name": "mm",
+            "provider_type": "minimax",
+            "base_url": "https://api.minimax.io/v1",
+            "api_key": "sk-mm",
+            "model_map": { "claude-sonnet-4": "MiniMax-M2" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["model_map"]["claude-sonnet-4"], "MiniMax-M2");
+
+    // The list endpoint is what the edit form reads back.
+    let (status, listed) = send("GET", "/admin/channels", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(
+        listed["data"][0]["model_map"]["claude-sonnet-4"],
+        "MiniMax-M2"
+    );
+
+    // An object replaces the whole map rather than merging into it.
+    let (status, updated) = send(
+        "PATCH",
+        "/admin/channels/mm",
+        Some(json!({ "model_map": { "gpt-4": "MiniMax-Text-01" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["model_map"]["gpt-4"], "MiniMax-Text-01");
+    assert!(updated["model_map"].get("claude-sonnet-4").is_none());
+
+    // Explicit null clears it; omitting the field would have left it alone.
+    let (status, cleared) = send(
+        "PATCH",
+        "/admin/channels/mm",
+        Some(json!({ "model_map": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert!(cleared["model_map"].is_null());
+
+    let (status, listed) = send("GET", "/admin/channels", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(listed["data"][0]["model_map"].is_null());
+
+    // And the mapping round-tripped through the on-disk config, not just memory.
+    let persisted: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    assert_eq!(persisted["channels"][0]["name"], "mm");
+}

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Model mapping in the channel editor.** The channel form now edits a
+  channel's `model_map` — the per-channel rewrite of a requested model name to
+  the upstream model, previously reachable only by hand-editing `config.json`.
+  Mappings are edited as `requested model → upstream model` rows; duplicate
+  source models and half-filled rows block the save instead of silently
+  dropping a mapping. Removing every row clears the map. The channel list shows
+  an `N mapped` badge whose tooltip lists the mappings.
+
+### Fixed
+- `GET /admin/channels` and the channel create/update responses now include
+  `model_map`. The write paths already accepted it, but the read paths dropped
+  it, so any client reading a channel back could not see its mapping.
+
 ### Planned
 - MCP Prompts API implementation
 - MCP Tools execution framework

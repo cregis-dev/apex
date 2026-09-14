@@ -70,6 +70,52 @@ function Field({ label, children, hint }: { label: string; children: React.React
   )
 }
 
+/**
+ * One `model_map` entry as edited in the form. Kept as an ordered array rather
+ * than an object so rows stay put while typing (and half-filled rows survive).
+ */
+interface ModelMapRow { from: string; to: string }
+
+function modelMapToRows(map: Record<string, string> | null | undefined): ModelMapRow[] {
+  return Object.entries(map ?? {}).map(([from, to]) => ({ from, to }))
+}
+
+/** Drop blank/half-filled rows; later duplicates overwrite earlier ones. */
+function rowsToModelMap(rows: ModelMapRow[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const row of rows) {
+    const from = row.from.trim()
+    const to = row.to.trim()
+    if (from && to) out[from] = to
+  }
+  return out
+}
+
+/** Order-insensitive equality, so reordering rows alone isn't a "change". */
+function sameModelMap(a: Record<string, string>, b: Record<string, string>): boolean {
+  const ka = Object.keys(a)
+  const kb = Object.keys(b)
+  return ka.length === kb.length && ka.every((k) => b[k] === a[k])
+}
+
+/** Source model names typed more than once — one would silently shadow the other. */
+function duplicateSources(rows: ModelMapRow[]): string[] {
+  const seen = new Set<string>()
+  const dupes = new Set<string>()
+  for (const row of rows) {
+    const from = row.from.trim()
+    if (!from) continue
+    if (seen.has(from)) dupes.add(from)
+    seen.add(from)
+  }
+  return [...dupes]
+}
+
+/** A row with exactly one side filled in — almost certainly unfinished. */
+function hasIncompleteRow(rows: ModelMapRow[]): boolean {
+  return rows.some((r) => !!r.from.trim() !== !!r.to.trim())
+}
+
 interface ChannelFormState {
   name: string
   provider_type: ProviderType
@@ -79,6 +125,7 @@ interface ChannelFormState {
   keep_existing_key: boolean
   /** Selected pricing rule name, or '' for untracked. */
   pricing: string
+  model_map: ModelMapRow[]
 }
 
 function emptyForm(): ChannelFormState {
@@ -90,6 +137,7 @@ function emptyForm(): ChannelFormState {
     api_key: '',
     keep_existing_key: false,
     pricing: '',
+    model_map: [],
   }
 }
 
@@ -102,6 +150,7 @@ function channelToForm(ch: AdminChannel): ChannelFormState {
     api_key: '',
     keep_existing_key: true,
     pricing: ch.pricing ?? '',
+    model_map: modelMapToRows(ch.model_map),
   }
 }
 
@@ -160,11 +209,24 @@ function ChannelEditor({ open, mode, initial, templates, rules, busy, error, onC
     }))
   }
 
+  const setMapRow = (i: number, k: keyof ModelMapRow, v: string) =>
+    setForm((f) => ({
+      ...f,
+      model_map: f.model_map.map((row, idx) => (idx === i ? { ...row, [k]: v } : row)),
+    }))
+  const addMapRow = () =>
+    setForm((f) => ({ ...f, model_map: [...f.model_map, { from: '', to: '' }] }))
+  const removeMapRow = (i: number) =>
+    setForm((f) => ({ ...f, model_map: f.model_map.filter((_, idx) => idx !== i) }))
+
   const idInvalid = mode === 'create' && !form.name.trim()
   const baseInvalid = !form.base_url.trim()
   const keyInvalid = mode === 'create'
     ? !form.api_key.trim()
     : !form.keep_existing_key && !form.api_key.trim()
+  const mapDupes = duplicateSources(form.model_map)
+  // Block on ambiguity/unfinished input rather than silently dropping a mapping.
+  const mapInvalid = mapDupes.length > 0 || hasIncompleteRow(form.model_map)
 
   return (
     <Modal
@@ -177,7 +239,7 @@ function ChannelEditor({ open, mode, initial, templates, rules, busy, error, onC
           <button className="btn btn-sm" onClick={onCancel} disabled={busy}>Cancel</button>
           <button
             className="btn btn-primary btn-sm"
-            disabled={busy || idInvalid || baseInvalid || keyInvalid}
+            disabled={busy || idInvalid || baseInvalid || keyInvalid || mapInvalid}
             onClick={() => onSubmit(form)}
           >
             {busy ? <span className="spinner" style={{ width: 12, height: 12 }} /> : null}
@@ -308,6 +370,75 @@ function ChannelEditor({ open, mode, initial, templates, rules, busy, error, onC
             </div>
           )}
         </Field>
+
+        <Field
+          label="Model mapping (optional)"
+          hint="Rewrites the model name before the request leaves for this channel. Exact match — no wildcards; unlisted models pass through untouched."
+        >
+          {form.model_map.length > 0 && (
+            <div
+              style={{
+                display: 'grid', gridTemplateColumns: '1fr 1fr 28px', gap: 8,
+                fontSize: 10, color: 'var(--muted)',
+                textTransform: 'uppercase', letterSpacing: '0.04em',
+                padding: '0 2px', marginBottom: 6,
+              }}
+            >
+              <span>Requested model</span><span>Upstream model</span><span />
+            </div>
+          )}
+          <div style={{ display: 'grid', gap: 8 }}>
+            {form.model_map.map((row, i) => {
+              const dupe = !!row.from.trim() && mapDupes.includes(row.from.trim())
+              return (
+                <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 28px', gap: 8, alignItems: 'center' }}>
+                  <input
+                    className="input btn-sm"
+                    value={row.from}
+                    onChange={(e) => setMapRow(i, 'from', e.target.value)}
+                    placeholder="claude-sonnet-4"
+                    style={{
+                      height: 30, fontFamily: 'var(--font-mono)', fontSize: 12,
+                      borderColor: dupe ? 'var(--err)' : undefined,
+                    }}
+                  />
+                  <input
+                    className="input btn-sm"
+                    value={row.to}
+                    onChange={(e) => setMapRow(i, 'to', e.target.value)}
+                    placeholder="MiniMax-M2"
+                    style={{ height: 30, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                  />
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    title="Remove mapping"
+                    onClick={() => removeMapRow(i)}
+                    style={{ padding: 0, height: 30, color: 'var(--err)' }}
+                  >
+                    <Icon name="trash" size={12} />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+          <button
+            className="btn btn-sm"
+            onClick={addMapRow}
+            style={{ marginTop: form.model_map.length > 0 ? 8 : 0 }}
+          >
+            <Icon name="plus" size={12} /> Add mapping
+          </button>
+          {mapDupes.length > 0 && (
+            <div style={{ fontSize: 11, color: 'var(--err)', marginTop: 6 }}>
+              Duplicate requested model: {mapDupes.join(', ')} — each one can map to a single upstream model.
+            </div>
+          )}
+          {mapDupes.length === 0 && hasIncompleteRow(form.model_map) && (
+            <div style={{ fontSize: 11, color: 'var(--warn)', marginTop: 6 }}>
+              Fill in both sides of every mapping, or remove the unfinished row.
+            </div>
+          )}
+        </Field>
       </div>
     </Modal>
   )
@@ -422,6 +553,7 @@ export default function ChannelsPage() {
 
   function submitEditor(form: ChannelFormState) {
     setEditorError(undefined)
+    const modelMap = rowsToModelMap(form.model_map)
     if (editorMode === 'create') {
       createMutation.mutate({
         name: form.name.trim(),
@@ -429,6 +561,7 @@ export default function ChannelsPage() {
         base_url: form.base_url.trim(),
         api_key: form.api_key,
         anthropic_base_url: form.anthropic_base_url.trim() || null,
+        model_map: Object.keys(modelMap).length ? modelMap : null,
         pricing: form.pricing || null,
       })
     } else if (editingName) {
@@ -443,6 +576,10 @@ export default function ChannelsPage() {
       }
       if (!form.keep_existing_key && form.api_key) {
         body.api_key = form.api_key
+      }
+      // null clears the map server-side; omitting the field leaves it untouched.
+      if (!sameModelMap(modelMap, original.model_map ?? {})) {
+        body.model_map = Object.keys(modelMap).length ? modelMap : null
       }
       // '' from the dropdown means "untracked"; send it (empty clears on the server).
       if (form.pricing !== (original.pricing ?? '')) {
@@ -559,6 +696,22 @@ export default function ChannelsPage() {
                                   Dual
                                 </span>
                               )}
+                              {(() => {
+                                const entries = Object.entries(ch.model_map ?? {})
+                                if (entries.length === 0) return null
+                                return (
+                                  <span
+                                    className="badge"
+                                    style={{
+                                      background: 'var(--surface-2)', color: 'var(--ink-2)',
+                                      borderColor: 'transparent', flexShrink: 0,
+                                    }}
+                                    title={`Model mapping\n${entries.map(([k, v]) => `${k} → ${v}`).join('\n')}`}
+                                  >
+                                    {entries.length} mapped
+                                  </span>
+                                )
+                              })()}
                             </div>
                           </td>
                           <td>
