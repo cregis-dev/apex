@@ -135,13 +135,32 @@ When required and credentials are available:
 
 ### 5. Commit release prep changes
 
+`main` is covered by the `Protect-Main` ruleset: direct pushes are rejected, and
+a pull request passing `rust-quality` and `local-e2e` is required. So the release
+prep commit goes through a PR like any other change:
+
 ```bash
+git checkout -b release/v0.1.1
 git add .
 git commit -m "release: prepare v0.1.1"
-git push origin main
+git push -u origin release/v0.1.1
+gh pr create --base main --title "release: prepare v0.1.1" --fill
 ```
 
+Merge the PR once both checks are green.
+
 ### 6. Create and push the release tag
+
+Tag the release commit **on `main`**, after the PR has merged — not the branch
+head you pushed, which is a different commit once the PR is squashed:
+
+```bash
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+```
+
+Tags are not covered by a ruleset, so the tag itself pushes directly.
 
 ```bash
 git tag v0.1.1
