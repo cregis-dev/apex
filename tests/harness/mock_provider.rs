@@ -363,7 +363,7 @@ async fn gemini_native_generate(
     axum::extract::Path(model_action): axum::extract::Path<String>,
     body: Bytes,
 ) -> Response {
-    let body_json = serde_json::from_slice::<Value>(&body).unwrap_or_else(|_| json!(null));
+    let body_json = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
     if model_action.ends_with(":streamGenerateContent") {
         let mut response = Response::new(axum::body::Body::from(format!(
             "data: {}\n\n",
@@ -452,7 +452,7 @@ async fn gemini_native_interaction_create(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let body_json = serde_json::from_slice::<Value>(&body).unwrap_or_else(|_| json!(null));
+    let body_json = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
     Json(json!({
         "id": format!("interactions/{}-research-1", state.name),
         "status": "in_progress",
