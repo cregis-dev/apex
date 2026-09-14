@@ -313,6 +313,8 @@ export interface AdminChannel {
   provider_type: ProviderType
   base_url: string
   anthropic_base_url: string | null
+  /** Requested model name -> upstream model name. Exact match; null when unset. */
+  model_map: Record<string, string> | null
   /** Name of the pricing rule this channel bills under, or null (untracked). */
   pricing: string | null
 }

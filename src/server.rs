@@ -3106,6 +3106,7 @@ async fn handle_admin_channels(
                 "provider_type": channel.provider_type,
                 "base_url": channel.base_url,
                 "anthropic_base_url": channel.anthropic_base_url,
+                "model_map": channel.model_map,
                 "pricing": channel.pricing
             })
         })
@@ -3217,6 +3218,7 @@ fn channel_json_response(channel: &crate::config::Channel) -> serde_json::Value 
         "provider_type": channel.provider_type,
         "base_url": channel.base_url,
         "anthropic_base_url": channel.anthropic_base_url,
+        "model_map": channel.model_map,
         "pricing": channel.pricing,
     })
 }
