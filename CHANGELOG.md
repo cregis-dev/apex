@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `apex service status` on macOS reported an installed-but-stopped service as a
+  hard error. `launchctl print` fails on an unloaded label with a bare
+  `Could not find service ... in domain for user gui: <uid>`, which reads like a
+  broken install. The two states are now distinguished: a missing plist still
+  tells you to run `service install`, while an installed-but-idle one reports as
+  such and prints the plist path plus the `service start` command.
+
 ### Planned
 - MCP Prompts API implementation
 - MCP Tools execution framework

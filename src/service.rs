@@ -276,13 +276,40 @@ pub fn status_service(definition: &ServiceDefinition) -> anyhow::Result<()> {
                 .arg("status")
                 .arg(systemd_unit(definition)),
         )?,
-        ServiceManager::Launchd => run_command(
-            Command::new("launchctl")
-                .arg("print")
-                .arg(launchd_target(&launchd_domain(), &definition.service_name)),
-        )?,
+        ServiceManager::Launchd => {
+            // `launchctl print` on an unloaded label fails with a bare
+            // "Could not find service ... in domain for user gui: <uid>",
+            // which reads like a broken install. Distinguish the two states
+            // ourselves so a not-yet-started service reports as such, with
+            // the command that would start it.
+            let path = service_path(definition);
+            if !path.exists() {
+                bail!(
+                    "service definition not found at {}; run service install first",
+                    path.display()
+                );
+            }
+            let target = launchd_target(&launchd_domain(), &definition.service_name);
+            if launchd_service_is_loaded(&target) {
+                run_command(Command::new("launchctl").arg("print").arg(&target))?;
+            } else {
+                println!("{}", launchd_not_loaded_message(definition, &path, &target));
+            }
+        }
     }
     Ok(())
+}
+
+/// Status text for a launchd service whose plist is installed but not loaded.
+fn launchd_not_loaded_message(definition: &ServiceDefinition, path: &Path, target: &str) -> String {
+    format!(
+        "Service installed but not loaded: {target}\n\
+         Service definition: {path}\n\
+         Start it with: {binary} service start --install-dir {install_dir}",
+        path = path.display(),
+        binary = definition.install_dir.join("apex").display(),
+        install_dir = definition.install_dir.display()
+    )
 }
 
 pub fn service_is_active(definition: &ServiceDefinition) -> bool {
@@ -414,6 +441,27 @@ fn _path_exists(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launchd_not_loaded_message_names_plist_and_start_command() {
+        let definition = ServiceDefinition::new(
+            PathBuf::from("/Users/alice/.apex"),
+            PathBuf::from("/Users/alice/.apex/config.json"),
+            "dev.cregis.apex".to_string(),
+            ServiceManager::Launchd,
+        );
+        let path = PathBuf::from("/Users/alice/Library/LaunchAgents/dev.cregis.apex.plist");
+        let message = launchd_not_loaded_message(&definition, &path, "gui/501/dev.cregis.apex");
+
+        // The three things a user needs to act on: that it is installed but
+        // idle, where the plist lives, and how to start it.
+        assert!(message.contains("Service installed but not loaded: gui/501/dev.cregis.apex"));
+        assert!(message.contains("/Users/alice/Library/LaunchAgents/dev.cregis.apex.plist"));
+        assert!(
+            message
+                .contains("/Users/alice/.apex/apex service start --install-dir /Users/alice/.apex")
+        );
+    }
 
     #[test]
     fn renders_systemd_unit_for_gateway_run() {
