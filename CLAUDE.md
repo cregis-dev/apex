@@ -55,8 +55,9 @@ Apex Gateway 是一个 Rust 编写的 AI API 网关，支持多提供商路由�
 ### 2. Routers (路由)
 基于模型名匹配规则，将请求路由到不同通道：
 - 匹配模式: 通配符 `*` (如 `gpt-4*`)
-- 负载策略: `round_robin`（按 weight 加权随机，weight 为 0 表示禁用）、
-  `random`、`priority`（总是选第一个）
+- 负载策略: `round_robin`（按 weight 加权随机）、`random`、`priority`（总是选第一个）
+- weight 为 0 的通道会被排除；但**当规则内所有通道 weight 都为 0 时会回退到全部通道**，
+  所以把权重全清零并不能停掉一条规则（见 `order_channels`），要停用请移除规则或通道
 - 支持规则内 failover 与 `session_affinity`（同一会话粘到同一通道）
 
 ### 3. Teams (团队)
@@ -67,10 +68,12 @@ Apex Gateway 是一个 Rust 编写的 AI API 网关，支持多提供商路由�
 
 ### 4. 控制面 (Control Plane)
 `cp/` 下的 React SPA，由网关在 `/cp/` 提供。涵盖总览、Live Tail、用量记录、
-日志、通道/路由/计费/限流配置与团队管理。通过 `/admin/*` 与 `/api/cp/*` 读写配置，
+日志、通道/路由/计费/限流配置与团队管理。配置的增删改全部走 `/admin/*`；
+`/api/cp/*` 目前只有只读接口（`provider-templates`、`info`、`logs/stream`）。
 写入会落盘到 `config.json` 并被热重载接管。
 
-> 注：MCP (Model Context Protocol) 相关能力已在 v0.2.0 下线，代码中不再有 `src/mcp/`。
+> 注：MCP (Model Context Protocol) 相关能力已下线，代码中不再有 `src/mcp/`。
+> v0.2.0 仍包含该模块，第一个不含 MCP 的版本是 v0.2.1。
 
 ## 运行方式
 
