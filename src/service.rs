@@ -290,7 +290,11 @@ pub fn status_service(definition: &ServiceDefinition) -> anyhow::Result<()> {
                 );
             }
             let target = launchd_target(&launchd_domain(), &definition.service_name);
-            if launchd_service_is_loaded(&target) {
+            // Only a definitive "not loaded" becomes the idle status. If we
+            // could not run launchctl at all, that is still an error — it was
+            // one before this branch existed, and silently reporting "stopped"
+            // would hide a broken environment.
+            if launchd_probe_service_loaded(&target)? {
                 run_command(Command::new("launchctl").arg("print").arg(&target))?;
             } else {
                 println!("{}", launchd_not_loaded_message(definition, &path, &target));
@@ -307,9 +311,22 @@ fn launchd_not_loaded_message(definition: &ServiceDefinition, path: &Path, targe
          Service definition: {path}\n\
          Start it with: {binary} service start --install-dir {install_dir}",
         path = path.display(),
-        binary = definition.install_dir.join("apex").display(),
-        install_dir = definition.install_dir.display()
+        binary = shell_quote(&definition.install_dir.join("apex").to_string_lossy()),
+        install_dir = shell_quote(&definition.install_dir.to_string_lossy())
     )
+}
+
+/// POSIX single-quoting, so a copy-pasted path survives spaces and shell
+/// metacharacters. Left bare when the value has nothing a shell would touch.
+fn shell_quote(value: &str) -> String {
+    let safe = !value.is_empty()
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@' | '+' | ',')
+        });
+    if safe {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 pub fn service_is_active(definition: &ServiceDefinition) -> bool {
@@ -403,16 +420,23 @@ fn launchd_target(domain: &str, service_name: &str) -> String {
     format!("{domain}/{service_name}")
 }
 
-fn launchd_service_is_loaded(target: &str) -> bool {
-    Command::new("launchctl")
+/// `Ok(true/false)` for loaded / not loaded; `Err` only when launchctl could
+/// not be run at all (missing binary, bad PATH). Callers that cannot act on
+/// the distinction use [`launchd_service_is_loaded`].
+fn launchd_probe_service_loaded(target: &str) -> anyhow::Result<bool> {
+    let status = Command::new("launchctl")
         .arg("print")
         .arg(target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .with_context(|| format!("failed to run launchctl print {target}"))?;
+    Ok(status.success())
+}
+
+fn launchd_service_is_loaded(target: &str) -> bool {
+    launchd_probe_service_loaded(target).unwrap_or(false)
 }
 
 fn run_command(command: &mut Command) -> anyhow::Result<()> {
@@ -461,6 +485,41 @@ mod tests {
             message
                 .contains("/Users/alice/.apex/apex service start --install-dir /Users/alice/.apex")
         );
+    }
+
+    #[test]
+    fn shell_quote_leaves_ordinary_paths_bare() {
+        assert_eq!(shell_quote("/Users/alice/.apex"), "/Users/alice/.apex");
+        assert_eq!(shell_quote("/opt/apex-2.0_beta"), "/opt/apex-2.0_beta");
+    }
+
+    #[test]
+    fn shell_quote_protects_spaces_and_metacharacters() {
+        assert_eq!(
+            shell_quote("/Users/Alice Smith/.apex"),
+            "'/Users/Alice Smith/.apex'"
+        );
+        assert_eq!(shell_quote("/tmp/a;rm -rf b"), "'/tmp/a;rm -rf b'");
+        assert_eq!(shell_quote("/tmp/$(whoami)"), "'/tmp/$(whoami)'");
+        // An embedded single quote has to close, escape, and reopen.
+        assert_eq!(shell_quote("/tmp/it's"), r"'/tmp/it'\''s'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn launchd_not_loaded_message_quotes_paths_with_spaces() {
+        let definition = ServiceDefinition::new(
+            PathBuf::from("/Users/Alice Smith/.apex"),
+            PathBuf::from("/Users/Alice Smith/.apex/config.json"),
+            "dev.cregis.apex".to_string(),
+            ServiceManager::Launchd,
+        );
+        let path = PathBuf::from("/Users/Alice Smith/Library/LaunchAgents/dev.cregis.apex.plist");
+        let message = launchd_not_loaded_message(&definition, &path, "gui/501/dev.cregis.apex");
+
+        assert!(message.contains(
+            "'/Users/Alice Smith/.apex/apex' service start --install-dir '/Users/Alice Smith/.apex'"
+        ));
     }
 
     #[test]
