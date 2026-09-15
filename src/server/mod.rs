@@ -4,7 +4,20 @@
 // fundamentally at odds with that design, so allow it module-wide.
 #![allow(clippy::result_large_err)]
 
-use crate::config::{Channel, Config, Timeouts};
+mod auth;
+mod errors;
+mod request_utils;
+
+use auth::enforce_global_auth;
+pub(crate) use errors::error_response;
+use errors::{format_error_chain, gemini_native_error_response, protocol_error_response};
+use request_utils::{
+    anthropic_request_contains_tool_result, provider_trace_id_from_headers, request_id_from_parts,
+    response_from_upstream_bytes, response_timeouts_for, summarize_anthropic_request,
+    truncate_for_storage,
+};
+
+use crate::config::{Channel, Config};
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::database::{
     Database, RollupRow, UsageAggregate, UsageRecord as DashboardUsageRecord, UsageRecordPage,
@@ -17,8 +30,8 @@ use crate::middleware::compliance::{OriginalModelName, compliance_middleware};
 use crate::middleware::policy::team_policy;
 use crate::middleware::ratelimit::TeamRateLimiter;
 use crate::providers::{
-    AccessAudit, NoOpAccessAudit, NoOpRateLimiter, ProviderRegistry, RateLimiter, ResponseTimeouts,
-    RouteKind, prepare_request,
+    AccessAudit, NoOpAccessAudit, NoOpRateLimiter, ProviderRegistry, RateLimiter, RouteKind,
+    prepare_request,
 };
 use crate::router_selector::RouterSelector;
 use crate::usage::UsageLogger;
@@ -26,7 +39,7 @@ use crate::web_assets::{WebAssetError, load_web_asset};
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{OriginalUri, State};
-use axum::http::{HeaderMap, HeaderValue, Method, Request, Response as HttpResponse, StatusCode};
+use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::response::{Redirect, Response};
 use axum::routing::{delete, get, patch, post};
 use chrono::{Duration as ChronoDuration, Local, NaiveDateTime};
@@ -3891,7 +3904,7 @@ async fn handle_admin_channels_api_keys(
 // always has data even when the file isn't present in the process CWD (e.g.
 // installed deployments). A runtime providers.json, when present, takes
 // precedence so operators can customize the default catalog.
-const EMBEDDED_PROVIDERS_JSON: &str = include_str!("../providers.json");
+const EMBEDDED_PROVIDERS_JSON: &str = include_str!("../../providers.json");
 
 #[derive(serde::Deserialize)]
 struct CpProviderFile {
@@ -4210,59 +4223,7 @@ async fn handle_cp_logs_stream(
 
 // Helpers
 
-#[allow(clippy::result_large_err)]
-fn enforce_global_auth(config: &Config, headers: &HeaderMap) -> Result<(), Response<Body>> {
-    let keys = &config.global.auth_keys;
-
-    // If no auth_keys configured, skip validation
-    if keys.is_empty() {
-        return Ok(());
-    }
-
-    let candidates = [
-        read_auth_token(headers, "authorization"),
-        read_auth_token(headers, "x-api-key"),
-    ];
-
-    for token in candidates.into_iter().flatten() {
-        if keys.contains(&token) {
-            return Ok(());
-        }
-    }
-
-    tracing::warn!("Auth Failed: No valid token found in Authorization or x-api-key headers.");
-    Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized"))
-}
-
-fn read_auth_token(headers: &HeaderMap, key: &str) -> Option<String> {
-    if let Some(val) = headers.get(key)
-        && let Ok(s) = val.to_str()
-    {
-        if key == "authorization" && s.starts_with("Bearer ") {
-            return Some(s[7..].to_string());
-        }
-        return Some(s.to_string());
-    }
-    None
-}
-
 use crate::utils::mask_secret;
-
-pub(crate) fn error_response(status: StatusCode, message: &str) -> Response<Body> {
-    let body = json!({
-        "error": {
-            "message": message,
-            "type": "invalid_request_error",
-            "param": null,
-            "code": null
-        }
-    });
-    Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap()
-}
 
 struct GeminiNativeRoute {
     routing_model: String,
@@ -4359,188 +4320,6 @@ fn gemini_native_resource_router_is_deterministic(
             && rule.strategy == "priority"
             && rule.channels.len() == 1
     })
-}
-
-fn gemini_native_error_response(
-    status: StatusCode,
-    message: &str,
-    gemini_status: &str,
-) -> Response<Body> {
-    let body = json!({
-        "error": {
-            "code": status.as_u16(),
-            "message": message,
-            "status": gemini_status,
-        }
-    });
-    Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap()
-}
-
-fn protocol_error_response(route: RouteKind, status: StatusCode, message: &str) -> Response<Body> {
-    if matches!(route, RouteKind::GeminiNative) {
-        let gemini_status = match status {
-            StatusCode::NOT_FOUND => "NOT_FOUND",
-            StatusCode::FORBIDDEN => "PERMISSION_DENIED",
-            StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
-            StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
-            StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
-            _ => "INVALID_ARGUMENT",
-        };
-        gemini_native_error_response(status, message, gemini_status)
-    } else if matches!(route, RouteKind::Anthropic) {
-        let body = json!({
-            "type": "error",
-            "error": {
-                "type": "invalid_request_error",
-                "message": message,
-            }
-        });
-        Response::builder()
-            .status(status)
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap()
-    } else {
-        error_response(status, message)
-    }
-}
-
-fn format_error_chain(error: &dyn std::error::Error) -> String {
-    let mut parts = vec![error.to_string()];
-    let mut current = error.source();
-    while let Some(source) = current {
-        parts.push(source.to_string());
-        current = source.source();
-    }
-    parts.join(" | caused by: ")
-}
-
-fn anthropic_request_contains_tool_result(body: &Bytes) -> bool {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return false;
-    };
-
-    value
-        .get("messages")
-        .and_then(serde_json::Value::as_array)
-        .map(|messages| {
-            messages.iter().any(|message| {
-                message
-                    .get("content")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|parts| {
-                        parts.iter().any(|part| {
-                            part.get("type").and_then(serde_json::Value::as_str)
-                                == Some("tool_result")
-                        })
-                    })
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-fn summarize_anthropic_request(body: &Bytes) -> String {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return "invalid_json".to_string();
-    };
-    let Some(messages) = value.get("messages").and_then(serde_json::Value::as_array) else {
-        return "messages=missing".to_string();
-    };
-
-    let mut referenced_tool_use_ids = Vec::new();
-    let mut segments = Vec::new();
-    for (index, message) in messages.iter().enumerate() {
-        let role = message
-            .get("role")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown");
-        let mut kinds = Vec::new();
-        if let Some(content) = message.get("content").and_then(serde_json::Value::as_array) {
-            for block in content {
-                let kind = block
-                    .get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("unknown");
-                kinds.push(kind.to_string());
-                if kind == "tool_result"
-                    && let Some(tool_use_id) =
-                        block.get("tool_use_id").and_then(serde_json::Value::as_str)
-                {
-                    referenced_tool_use_ids.push(tool_use_id.to_string());
-                }
-            }
-        }
-        segments.push(format!("{index}:{role}[{}]", kinds.join(",")));
-    }
-
-    format!(
-        "messages={} {} tool_result_ids={:?}",
-        messages.len(),
-        segments.join(" "),
-        referenced_tool_use_ids
-    )
-}
-
-fn request_id_from_parts(parts: &axum::http::request::Parts) -> Option<String> {
-    parts
-        .extensions
-        .get::<tower_http::request_id::RequestId>()
-        .and_then(|id| id.header_value().to_str().ok())
-        .map(|id| id.to_string())
-}
-
-fn provider_trace_id_from_headers(headers: &HeaderMap) -> Option<String> {
-    const TRACE_HEADERS: [&str; 5] = [
-        "x-request-id",
-        "request-id",
-        "x-trace-id",
-        "trace-id",
-        "cf-ray",
-    ];
-
-    TRACE_HEADERS.iter().find_map(|name| {
-        headers
-            .get(*name)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.to_string())
-    })
-}
-
-fn response_from_upstream_bytes(
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: Bytes,
-) -> Response<Body> {
-    let mut builder = HttpResponse::builder().status(status);
-    for (name, value) in headers {
-        if crate::providers::should_forward_response_header(name) {
-            builder = builder.header(name, value);
-        }
-    }
-
-    builder
-        .body(Body::from(body))
-        .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "invalid upstream response"))
-}
-
-fn truncate_for_storage(input: &str, limit: usize) -> String {
-    input.chars().take(limit).collect()
-}
-
-fn response_timeouts_for(global: &Timeouts, channel: &Channel) -> ResponseTimeouts {
-    let timeouts = channel.timeouts.as_ref().unwrap_or(global);
-    ResponseTimeouts {
-        idle: Duration::from_millis(timeouts.response_ms),
-        // `response_ms` used to guard buffered bodies too, so operators raised it
-        // to accommodate slow models. Taking the max keeps those configs working
-        // instead of newly timing them out at a shorter `request_ms`.
-        total: Duration::from_millis(timeouts.request_ms.max(timeouts.response_ms)),
-    }
 }
 
 async fn process_request(
@@ -5850,23 +5629,6 @@ mod tests {
         assert!(!calls.is_empty());
         assert_eq!(calls[0].0, ProviderType::Openai);
         assert!(!calls[0].1); // Failed
-    }
-
-    #[test]
-    fn test_read_auth_token() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-api-key", "secret".parse().unwrap());
-        assert_eq!(
-            read_auth_token(&headers, "x-api-key"),
-            Some("secret".to_string())
-        );
-
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", "Bearer token".parse().unwrap());
-        assert_eq!(
-            read_auth_token(&headers, "authorization"),
-            Some("token".to_string())
-        );
     }
 
     #[test]
