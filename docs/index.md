@@ -16,7 +16,7 @@
 
 ### Reference
 
-- [API Contracts](./current/reference/api-contracts.md) - HTTP 与 MCP API 合同
+- [API Contracts](./current/reference/api-contracts.md) - HTTP API 合同
 - [Data Models](./current/reference/data-models.md) - 数据模型与存储设计
 - [Config Reference](./current/reference/config-reference.md) - 配置字段说明与示例
 - [Logging Spec](./current/reference/logging-spec.md) - 日志规范

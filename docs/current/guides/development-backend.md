@@ -106,8 +106,8 @@ cargo watch -x run -- --config config.json
 # 运行所有测试
 cargo test
 
-# 运行特定测试
-cargo test mcp
+# 运行特定测试（按名字过滤）
+cargo test model_map
 
 # 运行集成测试
 cargo test --test gateway
@@ -256,7 +256,7 @@ async fn new_endpoint_handler(
 RUST_LOG=apex=debug,tower_http=debug cargo run
 
 # 只看特定模块
-RUST_LOG=apex::mcp=debug cargo run
+RUST_LOG=apex::providers=debug cargo run --bin apex -- --config config.json gateway run
 ```
 
 ### 使用 cargo-watch 自动重载
