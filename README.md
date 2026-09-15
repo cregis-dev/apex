@@ -22,7 +22,6 @@ Unlike personal AI gateways, Apex is built for **Teams**:
 | **Performance** | Rust-based, sub-millisecond overhead | Often Python/Node.js |
 | **Resilience** | Automatic Retries & Fallbacks | Basic |
 | **Multi-Tenancy** | Team-based API Keys, Rate Limiting, Model Restrictions | Single tenant |
-| **MCP Protocol** | Built-in Model Context Protocol for AI Agents | Not available |
 
 ## 🏗 Architecture
 
