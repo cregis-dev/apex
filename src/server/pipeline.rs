@@ -28,6 +28,91 @@ use super::{AppState, MAX_REQUEST_BODY_BYTES};
 /// the team's allowed routers that can serve the model, else — under global
 /// auth — any router that matches it.
 #[allow(clippy::too_many_arguments)]
+/// The per-request facts every usage row is attributed to, fixed once routing
+/// has been decided.
+///
+/// These seven values were passed identically to all eight `log_failure` call
+/// sites in this module — carrying them once keeps each failure exit to the
+/// handful of arguments that actually differ.
+struct Attribution {
+    request_id: Option<String>,
+    team_id: String,
+    router_name: String,
+    matched_rule: Option<String>,
+    model: String,
+    route_label: &'static str,
+    client_info: crate::utils::ClientInfo,
+    session_key: Option<String>,
+}
+
+impl Attribution {
+    /// Record a request that failed, without deciding how to answer the client.
+    #[allow(clippy::too_many_arguments)]
+    fn log_failure(
+        &self,
+        state: &AppState,
+        channel: &str,
+        latency_ms: Option<f64>,
+        fallback_triggered: bool,
+        status: StatusCode,
+        message: &str,
+        provider_trace_id: Option<&str>,
+        provider_error_body: Option<&str>,
+    ) {
+        state.usage_logger.log_failure(
+            self.request_id.as_deref(),
+            &self.team_id,
+            &self.router_name,
+            self.matched_rule.as_deref(),
+            channel,
+            &self.model,
+            latency_ms,
+            fallback_triggered,
+            status.as_u16() as i64,
+            message,
+            provider_trace_id,
+            provider_error_body,
+            &self.client_info,
+            self.session_key.as_deref(),
+        );
+    }
+
+    /// Refuse a request before it reaches an upstream: audit the attempt, count
+    /// it, write the usage row, and produce the response to return.
+    fn reject(
+        &self,
+        state: &AppState,
+        route: RouteKind,
+        channel: &crate::config::Channel,
+        fallback_triggered: bool,
+        status: StatusCode,
+        message: &str,
+    ) -> Response<Body> {
+        state
+            .access_audit
+            .audit(&channel.provider_type, route, false);
+        state
+            .metrics
+            .error_total
+            .with_label_values(&[self.route_label, &self.router_name])
+            .inc();
+        state
+            .database
+            .log_error(self.route_label, &self.router_name);
+        self.log_failure(
+            state,
+            &channel.name,
+            None,
+            fallback_triggered,
+            status,
+            message,
+            None,
+            None,
+        );
+        protocol_error_response(route, status, message)
+    }
+}
+
 fn resolve_router_name(
     state: &AppState,
     config: &crate::config::Config,
@@ -363,26 +448,36 @@ pub(super) async fn process_request(
         session_key.as_deref(),
     );
 
+    let route_label = match route {
+        RouteKind::Openai => "openai",
+        RouteKind::Anthropic => "anthropic",
+        RouteKind::GeminiNative => "gemini_native",
+    };
+    let attribution = Attribution {
+        request_id: request_id.clone(),
+        team_id: team_id.clone(),
+        router_name: router_name.clone(),
+        matched_rule: matched_rule.clone(),
+        model: model_name_str.to_string(),
+        route_label,
+        client_info: client_info.clone(),
+        session_key: session_key.clone(),
+    };
+
     if channels.is_empty() {
         tracing::warn!(
             "Channel Resolution Failed: No channels configured or matched for router: {}",
             router_name
         );
-        state.usage_logger.log_failure(
-            request_id.as_deref(),
-            &team_id,
-            &router_name,
-            matched_rule.as_deref(),
+        attribution.log_failure(
+            &state,
             "unresolved",
-            model_name_str,
             None,
             false,
-            StatusCode::BAD_GATEWAY.as_u16() as i64,
+            StatusCode::BAD_GATEWAY,
             "no channels configured or matched",
             None,
             None,
-            &client_info,
-            session_key.as_deref(),
         );
         return protocol_error_response(
             route,
@@ -391,11 +486,6 @@ pub(super) async fn process_request(
         );
     }
 
-    let route_label = match route {
-        RouteKind::Openai => "openai",
-        RouteKind::Anthropic => "anthropic",
-        RouteKind::GeminiNative => "gemini_native",
-    };
     state
         .metrics
         .request_total
@@ -434,32 +524,14 @@ pub(super) async fn process_request(
                 channel.name
             );
             tracing::warn!("Request Rejected: {}", message);
-            state
-                .access_audit
-                .audit(&channel.provider_type, route, false);
-            state
-                .metrics
-                .error_total
-                .with_label_values(&[route_label, &router_name])
-                .inc();
-            state.database.log_error(route_label, &router_name);
-            state.usage_logger.log_failure(
-                request_id.as_deref(),
-                &team_id,
-                &router_name,
-                matched_rule.as_deref(),
-                &channel.name,
-                model_name_str,
-                None,
+            return attribution.reject(
+                &state,
+                route,
+                channel,
                 fallback_triggered,
-                StatusCode::BAD_GATEWAY.as_u16() as i64,
+                StatusCode::BAD_GATEWAY,
                 &message,
-                None,
-                None,
-                &client_info,
-                session_key.as_deref(),
             );
-            return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
         }
 
         if index > 0 {
@@ -523,32 +595,14 @@ pub(super) async fn process_request(
             let request_summary = summarize_anthropic_request(&effective_bytes);
             tracing::warn!("Gemini replay rejection summary: {}", request_summary);
             tracing::warn!("Request Rejected: {}", reason);
-            state
-                .access_audit
-                .audit(&channel.provider_type, route, false);
-            state
-                .metrics
-                .error_total
-                .with_label_values(&[route_label, &router_name])
-                .inc();
-            state.database.log_error(route_label, &router_name);
-            state.usage_logger.log_failure(
-                request_id.as_deref(),
-                &team_id,
-                &router_name,
-                matched_rule.as_deref(),
-                &channel.name,
-                model_name_str,
-                None,
+            return attribution.reject(
+                &state,
+                route,
+                channel,
                 fallback_triggered,
-                StatusCode::BAD_REQUEST.as_u16() as i64,
+                StatusCode::BAD_REQUEST,
                 &reason,
-                None,
-                None,
-                &client_info,
-                session_key.as_deref(),
             );
-            return protocol_error_response(route, StatusCode::BAD_REQUEST, &reason);
         }
 
         for attempt in 0..max_attempts {
@@ -764,23 +818,17 @@ pub(super) async fn process_request(
                         if !stored_error_body.is_empty() {
                             tracing::warn!("Upstream Error Body: {}", stored_error_body);
                         }
-                        state.usage_logger.log_failure(
-                            request_id.as_deref(),
-                            &team_id,
-                            &router_name,
-                            matched_rule.as_deref(),
+                        attribution.log_failure(
+                            &state,
                             &channel.name,
-                            model_name_str,
                             Some(elapsed),
                             fallback_triggered,
-                            status.as_u16() as i64,
+                            status,
                             status
                                 .canonical_reason()
                                 .unwrap_or("upstream request failed"),
                             provider_trace_id.as_deref(),
                             Some(stored_error_body.as_str()),
-                            &client_info,
-                            session_key.as_deref(),
                         );
 
                         // Convert error if needed (e.g. for Anthropic)
@@ -864,21 +912,15 @@ pub(super) async fn process_request(
         .last()
         .map(|channel| channel.name.as_str())
         .unwrap_or("unresolved");
-    state.usage_logger.log_failure(
-        request_id.as_deref(),
-        &team_id,
-        &router_name,
-        matched_rule.as_deref(),
+    attribution.log_failure(
+        &state,
         last_channel,
-        model_name_str,
         None,
         fallback_triggered,
-        StatusCode::BAD_GATEWAY.as_u16() as i64,
+        StatusCode::BAD_GATEWAY,
         "all channels failed",
         None,
         None,
-        &client_info,
-        session_key.as_deref(),
     );
 
     protocol_error_response(route, StatusCode::BAD_GATEWAY, "all channels failed")
@@ -975,6 +1017,17 @@ pub(super) async fn process_gemini_native_direct_pass(
         );
     };
     let matched_rule = selection.matched_rule.clone();
+    let attribution = Attribution {
+        request_id: request_id.clone(),
+        team_id: team_id.clone(),
+        router_name: router_name.clone(),
+        matched_rule: matched_rule.clone(),
+        model: routing_model.clone(),
+        route_label,
+        client_info: client_info.clone(),
+        session_key: None,
+    };
+
     let Some(channel) = config
         .channels
         .iter()
@@ -992,20 +1045,14 @@ pub(super) async fn process_gemini_native_direct_pass(
             "Gemini native route resolved to non-Gemini channel '{}'",
             channel.name
         );
-        state.usage_logger.log_failure(
-            request_id.as_deref(),
-            &team_id,
-            &router_name,
-            matched_rule.as_deref(),
+        attribution.log_failure(
+            &state,
             &channel.name,
-            &routing_model,
             None,
             false,
-            StatusCode::BAD_GATEWAY.as_u16() as i64,
+            StatusCode::BAD_GATEWAY,
             &message,
             None,
-            None,
-            &client_info,
             None,
         );
         return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
@@ -1061,20 +1108,14 @@ pub(super) async fn process_gemini_native_direct_pass(
         Ok(resp) => resp,
         Err(err) => {
             let message = format_error_chain(&err);
-            state.usage_logger.log_failure(
-                request_id.as_deref(),
-                &team_id,
-                &router_name,
-                matched_rule.as_deref(),
+            attribution.log_failure(
+                &state,
                 &channel.name,
-                &routing_model,
                 None,
                 false,
-                StatusCode::BAD_GATEWAY.as_u16() as i64,
+                StatusCode::BAD_GATEWAY,
                 &message,
                 None,
-                None,
-                &client_info,
                 None,
             );
             return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
@@ -1099,23 +1140,17 @@ pub(super) async fn process_gemini_native_direct_pass(
         let error_body_bytes = resp.bytes().await.unwrap_or_default();
         let stored_error_body =
             truncate_for_storage(&String::from_utf8_lossy(&error_body_bytes), 4000);
-        state.usage_logger.log_failure(
-            request_id.as_deref(),
-            &team_id,
-            &router_name,
-            matched_rule.as_deref(),
+        attribution.log_failure(
+            &state,
             &channel.name,
-            &routing_model,
             Some(elapsed),
             false,
-            status.as_u16() as i64,
+            status,
             status
                 .canonical_reason()
                 .unwrap_or("upstream request failed"),
             provider_trace_id.as_deref(),
             Some(stored_error_body.as_str()),
-            &client_info,
-            None,
         );
         return response_from_upstream_bytes(status, &response_headers, error_body_bytes);
     }
