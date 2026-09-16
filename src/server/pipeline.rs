@@ -17,6 +17,7 @@ use crate::gemini_compat::gemini_replay_missing_signature;
 use crate::middleware::auth::TeamContext;
 use crate::middleware::compliance::OriginalModelName;
 use crate::providers::{RouteKind, prepare_request};
+use crate::usage::Attribution;
 
 use super::auth::enforce_global_auth;
 use super::errors::{format_error_chain, protocol_error_response};
@@ -28,55 +29,7 @@ use super::{AppState, MAX_REQUEST_BODY_BYTES};
 /// the team's allowed routers that can serve the model, else — under global
 /// auth — any router that matches it.
 #[allow(clippy::too_many_arguments)]
-/// The per-request facts every usage row is attributed to, fixed once routing
-/// has been decided.
-///
-/// These seven values were passed identically to all eight `log_failure` call
-/// sites in this module — carrying them once keeps each failure exit to the
-/// handful of arguments that actually differ.
-struct Attribution {
-    request_id: Option<String>,
-    team_id: String,
-    router_name: String,
-    matched_rule: Option<String>,
-    model: String,
-    route_label: &'static str,
-    client_info: crate::utils::ClientInfo,
-    session_key: Option<String>,
-}
-
 impl Attribution {
-    /// Record a request that failed, without deciding how to answer the client.
-    #[allow(clippy::too_many_arguments)]
-    fn log_failure(
-        &self,
-        state: &AppState,
-        channel: &str,
-        latency_ms: Option<f64>,
-        fallback_triggered: bool,
-        status: StatusCode,
-        message: &str,
-        provider_trace_id: Option<&str>,
-        provider_error_body: Option<&str>,
-    ) {
-        state.usage_logger.log_failure(
-            self.request_id.as_deref(),
-            &self.team_id,
-            &self.router_name,
-            self.matched_rule.as_deref(),
-            channel,
-            &self.model,
-            latency_ms,
-            fallback_triggered,
-            status.as_u16() as i64,
-            message,
-            provider_trace_id,
-            provider_error_body,
-            &self.client_info,
-            self.session_key.as_deref(),
-        );
-    }
-
     /// Refuse a request before it reaches an upstream: audit the attempt, count
     /// it, write the usage row, and produce the response to return.
     fn reject(
@@ -100,7 +53,7 @@ impl Attribution {
             .database
             .log_error(self.route_label, &self.router_name);
         self.log_failure(
-            state,
+            &state.usage_logger,
             &channel.name,
             None,
             fallback_triggered,
@@ -462,6 +415,7 @@ pub(super) async fn process_request(
         route_label,
         client_info: client_info.clone(),
         session_key: session_key.clone(),
+        req_hash: req_hash.clone(),
     };
 
     if channels.is_empty() {
@@ -470,7 +424,7 @@ pub(super) async fn process_request(
             router_name
         );
         attribution.log_failure(
-            &state,
+            &state.usage_logger,
             "unresolved",
             None,
             false,
@@ -691,19 +645,12 @@ pub(super) async fn process_request(
                         let wrapped = crate::usage::wrap_response(
                             response,
                             route,
-                            request_id.clone(),
-                            team_id.clone(),
-                            router_name.clone(),
-                            matched_rule.clone(),
+                            &attribution,
                             channel.name.clone(),
-                            model_name_str.to_string(),
                             state.usage_logger.clone(),
                             state.metrics.clone(),
                             Some(elapsed),
                             fallback_triggered,
-                            client_info.clone(),
-                            req_hash.clone(),
-                            session_key.clone(),
                         )
                         .await;
                         if crate::usage::is_upstream_body_error_response(&wrapped) {
@@ -819,7 +766,7 @@ pub(super) async fn process_request(
                             tracing::warn!("Upstream Error Body: {}", stored_error_body);
                         }
                         attribution.log_failure(
-                            &state,
+                            &state.usage_logger,
                             &channel.name,
                             Some(elapsed),
                             fallback_triggered,
@@ -913,7 +860,7 @@ pub(super) async fn process_request(
         .map(|channel| channel.name.as_str())
         .unwrap_or("unresolved");
     attribution.log_failure(
-        &state,
+        &state.usage_logger,
         last_channel,
         None,
         fallback_triggered,
@@ -1026,6 +973,7 @@ pub(super) async fn process_gemini_native_direct_pass(
         route_label,
         client_info: client_info.clone(),
         session_key: None,
+        req_hash: None,
     };
 
     let Some(channel) = config
@@ -1046,7 +994,7 @@ pub(super) async fn process_gemini_native_direct_pass(
             channel.name
         );
         attribution.log_failure(
-            &state,
+            &state.usage_logger,
             &channel.name,
             None,
             false,
@@ -1109,7 +1057,7 @@ pub(super) async fn process_gemini_native_direct_pass(
         Err(err) => {
             let message = format_error_chain(&err);
             attribution.log_failure(
-                &state,
+                &state.usage_logger,
                 &channel.name,
                 None,
                 false,
@@ -1141,7 +1089,7 @@ pub(super) async fn process_gemini_native_direct_pass(
         let stored_error_body =
             truncate_for_storage(&String::from_utf8_lossy(&error_body_bytes), 4000);
         attribution.log_failure(
-            &state,
+            &state.usage_logger,
             &channel.name,
             Some(elapsed),
             false,
@@ -1161,25 +1109,18 @@ pub(super) async fn process_gemini_native_direct_pass(
         resp,
         response_timeouts_for(&config.global.timeouts, channel),
     );
+    // Native-Gemini direct-pass streams the request body without buffering it,
+    // so there is nothing to fingerprint here; the attribution carries NULL for
+    // both the request fingerprint and the conversation/session key.
     let wrapped = crate::usage::wrap_response(
         response,
         route,
-        request_id,
-        team_id,
-        router_name,
-        matched_rule,
+        &attribution,
         channel.name.clone(),
-        routing_model,
         state.usage_logger.clone(),
         state.metrics.clone(),
         Some(elapsed),
         false,
-        client_info.clone(),
-        // Native-Gemini direct-pass streams the request body without buffering
-        // it, so there is nothing to fingerprint here; these rows get NULL for
-        // both the request fingerprint and the conversation/session key.
-        None,
-        None,
     )
     .await;
     state.access_audit.audit(
