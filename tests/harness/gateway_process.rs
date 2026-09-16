@@ -70,14 +70,11 @@ impl GatewayProcess {
                 bail!("apex exited before becoming ready (status: {status}). logs:\n{logs}");
             }
 
-            if TcpStream::connect_timeout(
+            if serves_http(
                 &addr
                     .parse()
                     .context("failed to parse gateway listen addr")?,
-                Duration::from_millis(200),
-            )
-            .is_ok()
-            {
+            ) {
                 return Ok(());
             }
 
@@ -110,4 +107,40 @@ pub fn pick_listen_addr() -> anyhow::Result<String> {
     let listener = TcpListener::bind("127.0.0.1:0").context("failed to bind ephemeral port")?;
     let addr: SocketAddr = listener.local_addr().context("failed to read local addr")?;
     Ok(addr.to_string())
+}
+
+/// Readiness = the server answers HTTP, not merely that the port is bound.
+///
+/// A bare `TcpStream::connect` can succeed against the kernel's listen backlog
+/// before axum is accepting, and the probe then drops that connection — so the
+/// first real request could land on a socket the server had not finished
+/// wiring up and come back as `ConnectionReset`. Sending an actual request and
+/// waiting for a status line closes that window.
+///
+/// Any HTTP response counts, including 401: `/api/cp/info` enforces the global
+/// auth key itself, and a rejection still proves the router is live.
+pub fn serves_http(addr: &SocketAddr) -> bool {
+    use std::io::{Read, Write};
+
+    let Ok(mut stream) = TcpStream::connect_timeout(addr, Duration::from_millis(200)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+
+    let request = format!("GET /api/cp/info HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+
+    let mut buf = [0u8; 16];
+    let mut seen = 0;
+    while seen < buf.len() {
+        match stream.read(&mut buf[seen..]) {
+            Ok(0) => break,
+            Ok(n) => seen += n,
+            Err(_) => return false,
+        }
+    }
+    buf[..seen].starts_with(b"HTTP/")
 }
