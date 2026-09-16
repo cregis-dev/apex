@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Planned
+- MCP Prompts API implementation
+- MCP Tools execution framework
+- Rule-based routing with content filtering
+- PII masking engine for data compliance
+
+## [0.12.1] - 2026-09-16
+
+A service-status fix, and a large internal restructuring of `src/server.rs`
+that changes no behaviour.
+
 ### Fixed
 - `apex service status` reported an installed-but-stopped service as a hard
   error, on both platforms. `launchctl print` fails on an unloaded label with a
@@ -18,11 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `service start` command. A service manager that cannot be run at all is
   still an error, so a broken environment is not reported as "stopped".
 
-### Planned
-- MCP Prompts API implementation
-- MCP Tools execution framework
-- Rule-based routing with content filtering
-- PII masking engine for data compliance
+### Changed
+- `src/server.rs` (7282 lines) is split into `src/server/` — twenty focused
+  modules covering the route table, the request pipeline, admin CRUD, the
+  control-plane endpoints and the dashboard aggregation. Usage attribution
+  gains a type, collapsing the fourteen- and fifteen-argument logging calls
+  that the success and failure paths each carried.
+
+  No behaviour changes: each slice was verified as a pure move by extracting
+  every function body and diffing them, and no file outside `src/server/`
+  changed in any of them. Noted here only because anyone diffing v0.12.0 against
+  this tag will see several thousand lines move and deserves to know it was a
+  no-op.
 
 ## [0.12.0] - 2026-09-15
 
