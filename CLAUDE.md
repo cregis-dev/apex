@@ -56,7 +56,7 @@ Apex Gateway 是一个 Rust 编写的 AI API 网关，支持多提供商路由�
 | `pipeline.rs` | 共享请求管线：选通道、重试与 fallback、协议转换、流式转发、用量记账 |
 | `gemini_route.rs` | Gemini 原生路径校验与路由键解析（仅有 e2e 覆盖，无单测） |
 | `admin/` | `/admin/*` CRUD，按实体分文件：`teams` / `channels` / `routers` / `api_keys` |
-| `config_store.rs` | 配置写入的唯一入口：`commit_config` 先落盘、成功后再换内存 |
+| `config_store.rs` | **admin/API** 配置改动的唯一入口：`commit_config` 校验 → 落盘 → 成功后才换内存。注意这不覆盖全部写入：热重载是反向的（磁盘 → 内存，见 `mod.rs` 的 `watch_config`，不落盘也不走 `commit_config`），CLI 子命令则直接调 `config::save_config` |
 | `cp.rs` | 控制面专用接口：provider 模板、计价、info、日志流（平铺模块，内嵌 `providers.json` 的相对路径依赖此深度） |
 | `api.rs` | `/api/usage`、`/api/metrics*` 读接口 |
 | `dashboard/` | 看板聚合：`sections` / `cost` / `behavior`，基本是对用量记录的纯变换 |
