@@ -114,3 +114,58 @@ APEX_UPSTREAM_1_MODEL=qwen2.5:latest
         "ollama_local"
     );
 }
+
+/// The readiness probe must distinguish "port is bound" from "server is
+/// serving". The old probe was a bare TCP connect, which a listener satisfies
+/// without ever speaking HTTP — that is the window a request could slip into
+/// and come back as ConnectionReset.
+#[test]
+fn readiness_probe_rejects_a_socket_that_never_speaks_http() {
+    use harness::gateway_process::serves_http;
+    use std::net::TcpListener;
+
+    // A listener that accepts connections and does nothing else.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            // Hold the connection open without writing a response.
+            std::mem::forget(stream);
+        }
+    });
+
+    // The old probe was exactly this, and it passes here — which is the bug.
+    assert!(
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)).is_ok(),
+        "precondition: a bare TCP connect does succeed against this socket"
+    );
+    assert!(
+        !serves_http(&addr),
+        "a bound-but-silent socket must not count as ready"
+    );
+}
+
+/// And it must accept a socket that does answer HTTP, including an error
+/// status — any status line proves the router is live.
+#[test]
+fn readiness_probe_accepts_any_http_status() {
+    use harness::gateway_process::serves_http;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+        }
+    });
+
+    assert!(
+        serves_http(&addr),
+        "a 401 still proves the gateway is routing"
+    );
+}
