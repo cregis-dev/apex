@@ -21,7 +21,7 @@ Apex Gateway 是一个 Rust 编写的 AI API 网关，支持多提供商路由�
 | 模块 | 说明 |
 |------|------|
 | `src/config.rs` | 配置解析、校验与保存 |
-| `src/server.rs` | HTTP 服务器主逻辑、代理与 admin/控制面 API |
+| `src/server/` | HTTP 服务器：路由表、请求管线、admin/控制面 API（结构见下） |
 | `src/router_selector.rs` | 路由选择、负载均衡、会话亲和与 failover |
 | `src/providers.rs` | LLM 提供商客户端封装与协议适配 |
 | `src/converters.rs` | OpenAI ↔ Anthropic 协议互转 |
@@ -41,6 +41,29 @@ Apex Gateway 是一个 Rust 编写的 AI API 网关，支持多提供商路由�
 | `src/upgrade.rs` | `apex upgrade` 自升级 |
 | `src/web_assets.rs` | 控制面静态资源加载（嵌入或文件系统） |
 | `cp/` | 控制面前端（React SPA） |
+
+
+### `src/server/` 结构
+
+`src/server.rs` 原本是单个 7000+ 行文件，现已按职责拆开。对模块外只暴露
+`AppState`、`build_app`、`build_state`、`run_server`、`MAX_REQUEST_BODY_BYTES`
+和 `error_response` 六项，其余都是模块内部实现。
+
+| 模块 | 说明 |
+|------|------|
+| `mod.rs` | `AppState`、`build_app` 路由表、启动与热重载、静态资源 |
+| `proxy.rs` | 协议入口（OpenAI / Anthropic / Gemini 原生）与 `/v1/models` |
+| `pipeline.rs` | 共享请求管线：选通道、重试与 fallback、协议转换、流式转发、用量记账 |
+| `gemini_route.rs` | Gemini 原生路径校验与路由键解析（仅有 e2e 覆盖，无单测） |
+| `admin/` | `/admin/*` CRUD，按实体分文件：`teams` / `channels` / `routers` / `api_keys` |
+| `config_store.rs` | **admin/API** 配置改动的唯一入口：`commit_config` 校验 → 落盘 → 成功后才换内存。注意这不覆盖全部写入：热重载是反向的（磁盘 → 内存，见 `mod.rs` 的 `watch_config`，不落盘也不走 `commit_config`），CLI 子命令则直接调 `config::save_config` |
+| `cp.rs` | 控制面专用接口：provider 模板、计价、info、日志流（平铺模块，内嵌 `providers.json` 的相对路径依赖此深度） |
+| `api.rs` | `/api/usage`、`/api/metrics*` 读接口 |
+| `dashboard/` | 看板聚合：`sections` / `cost` / `behavior`，基本是对用量记录的纯变换 |
+| `auth.rs` | `global.auth_keys` 校验（团队级 key 在 `middleware/auth.rs`） |
+| `errors.rs` | 按上游协议成形的错误体 |
+| `request_utils.rs` | 请求体检查、trace id 提取、超时解析等小工具 |
+| `test_fixtures.rs` | `#[cfg(test)]` 共享夹具：配置/数据库/测试替身与 `AppState` 构造 |
 
 ## 核心概念
 
