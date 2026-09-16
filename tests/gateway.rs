@@ -514,3 +514,80 @@ async fn admin_channel_model_map_round_trips() {
         "MiniMax-M2"
     );
 }
+
+/// The retry ladder had no test where a retry actually *succeeds*: every mock
+/// returned a fixed status, so only "retries exhausted, fall back" was covered.
+/// This pins the other branch — a transient 503 that clears on attempt 3 must
+/// be served from the same channel, without falling back and without surfacing
+/// the failure to the client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_retry_succeeds_after_transient_upstream_failures() {
+    // base_config allows 3 attempts and retries on 503.
+    let (upstream, hits) = spawn_upstream_flaky(2, StatusCode::SERVICE_UNAVAILABLE).await;
+
+    let mut config = base_config();
+    std::sync::Arc::make_mut(&mut config.teams).push(Team {
+        id: "test-team".to_string(),
+        api_key: "sk-test".to_string(),
+        policy: TeamPolicy {
+            allowed_routers: vec!["r1".to_string()],
+            allowed_models: None,
+            rate_limit: None,
+        },
+        group: None,
+        enabled: None,
+    });
+    std::sync::Arc::make_mut(&mut config.channels).push(Channel {
+        name: "flaky".to_string(),
+        provider_type: ProviderType::Openai,
+        base_url: base_url(upstream),
+        api_key: "".to_string(),
+        anthropic_base_url: None,
+        headers: None,
+        model_map: None,
+        timeouts: None,
+        pricing: None,
+    });
+    // No fallback_channels: a pass here can only come from the retry path.
+    std::sync::Arc::make_mut(&mut config.routers).push(GatewayRouter {
+        name: "r1".to_string(),
+        channels: vec![],
+        strategy: "priority".to_string(),
+        metadata: None,
+        fallback_channels: vec![],
+        rules: vec![RouterRule {
+            session_affinity: false,
+            match_spec: MatchSpec {
+                models: vec!["*".to_string()],
+            },
+            channels: vec![TargetChannel {
+                name: "flaky".to_string(),
+                weight: 1,
+            }],
+            strategy: "priority".to_string(),
+        }],
+    });
+
+    let state = build_state(config).unwrap();
+    let app = build_app(state);
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .header("Authorization", "Bearer sk-test")
+        .body(Body::from(json!({"model":"gpt-4"}).to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+
+    let (status, body) = response_text(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("recovered"),
+        "client must see the successful attempt's body, got: {body}"
+    );
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "expected two failed attempts then a success on the same channel"
+    );
+}

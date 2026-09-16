@@ -10,19 +10,272 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
-use axum::http::{Request, Response, StatusCode};
+use axum::http::{HeaderMap, Request, Response, StatusCode};
 
 use crate::converters::convert_openai_response_to_anthropic;
 use crate::gemini_compat::gemini_replay_missing_signature;
 use crate::middleware::auth::TeamContext;
 use crate::middleware::compliance::OriginalModelName;
 use crate::providers::{RouteKind, prepare_request};
+use crate::usage::Attribution;
 
 use super::auth::enforce_global_auth;
 use super::errors::{format_error_chain, protocol_error_response};
 use super::gemini_route::gemini_native_resource_router_is_deterministic;
 use super::request_utils::*;
 use super::{AppState, MAX_REQUEST_BODY_BYTES};
+
+/// Which router handles this request: an explicit override, else the first of
+/// the team's allowed routers that can serve the model, else — under global
+/// auth — any router that matches it.
+#[allow(clippy::too_many_arguments)]
+impl Attribution {
+    /// Refuse a request before it reaches an upstream: audit the attempt, count
+    /// it, write the usage row, and produce the response to return.
+    fn reject(
+        &self,
+        state: &AppState,
+        route: RouteKind,
+        channel: &crate::config::Channel,
+        fallback_triggered: bool,
+        status: StatusCode,
+        message: &str,
+    ) -> Response<Body> {
+        state
+            .access_audit
+            .audit(&channel.provider_type, route, false);
+        state
+            .metrics
+            .error_total
+            .with_label_values(&[self.route_label, &self.router_name])
+            .inc();
+        state
+            .database
+            .log_error(self.route_label, &self.router_name);
+        self.log_failure(
+            &state.usage_logger,
+            &channel.name,
+            None,
+            fallback_triggered,
+            status,
+            message,
+            None,
+            None,
+        );
+        protocol_error_response(route, status, message)
+    }
+}
+
+fn resolve_router_name(
+    state: &AppState,
+    config: &crate::config::Config,
+    extensions: &axum::http::Extensions,
+    headers: &HeaderMap,
+    route: RouteKind,
+    model_name_str: &str,
+    router_name_override: Option<String>,
+) -> Result<String, Response<Body>> {
+    let router_name = if let Some(name) = router_name_override {
+        name
+    } else if let Some(ctx) = extensions.get::<TeamContext>() {
+        // Team Flow
+        let team = config.teams.iter().find(|t| t.id == ctx.team_id);
+        if team.is_none() {
+            return Err(protocol_error_response(
+                route,
+                StatusCode::UNAUTHORIZED,
+                "Team not found",
+            ));
+        }
+        let team = team.unwrap();
+
+        // Check Allowed Models
+        let policy = &team.policy;
+        if !policy.is_model_allowed(model_name_str) {
+            tracing::warn!(
+                "Policy Failed: Model '{}' not allowed by team policy",
+                model_name_str
+            );
+            return Err(protocol_error_response(
+                route,
+                StatusCode::FORBIDDEN,
+                "Model not allowed by team policy",
+            ));
+        }
+
+        // Check Allowed Routers (Mandatory)
+        let allowed_routers = &policy.allowed_routers;
+        if allowed_routers.is_empty() {
+            tracing::warn!(
+                "Policy Failed: No allowed routers configured for team '{}'",
+                ctx.team_id
+            );
+            return Err(protocol_error_response(
+                route,
+                StatusCode::FORBIDDEN,
+                "No allowed routers configured for team",
+            ));
+        }
+
+        let mut selected_router = None;
+        for r_name in allowed_routers {
+            if config
+                .routers
+                .iter()
+                .find(|r| r.name == *r_name)
+                .filter(|router| {
+                    state
+                        .selector
+                        .select_channel(router, model_name_str)
+                        .is_some()
+                })
+                .is_some()
+            {
+                selected_router = Some(r_name.clone());
+                break;
+            }
+        }
+
+        match selected_router {
+            Some(name) => name,
+            None => {
+                tracing::warn!(
+                    "Router Resolution Failed: No matching router found for model '{}' in allowed routers",
+                    model_name_str
+                );
+                return Err(protocol_error_response(
+                    route,
+                    StatusCode::NOT_FOUND,
+                    "No matching router found for model in allowed routers",
+                ));
+            }
+        }
+    } else {
+        // Global Auth Flow (Legacy/Admin)
+        if let Err(resp) = enforce_global_auth(config, headers) {
+            return Err(if matches!(route, RouteKind::GeminiNative) {
+                protocol_error_response(route, StatusCode::UNAUTHORIZED, "unauthorized")
+            } else {
+                resp
+            });
+        }
+
+        // Try to find ANY router that handles the model
+        let mut selected_router = None;
+        for router in config.routers.iter() {
+            if state
+                .selector
+                .select_channel(router, model_name_str)
+                .is_some()
+            {
+                selected_router = Some(router.name.clone());
+                break;
+            }
+        }
+
+        match selected_router {
+            Some(name) => name,
+            None => {
+                tracing::warn!(
+                    "Router Resolution Failed: No matching router found for model '{}'",
+                    model_name_str
+                );
+                return Err(protocol_error_response(
+                    route,
+                    StatusCode::BAD_REQUEST,
+                    "No matching router found for model",
+                ));
+            }
+        }
+    };
+
+    Ok(router_name)
+}
+
+/// The ordered candidate channels for a request: the matched rule's list
+/// (primary first, then in-rule failovers), or the router's `fallback_channels`
+/// when no rule matched. Returns the matched rule name alongside, for usage
+/// attribution. An empty vec means nothing could be resolved — the caller
+/// decides how to report that.
+fn resolve_candidate_channels<'c>(
+    state: &AppState,
+    config: &'c crate::config::Config,
+    router: &crate::config::Router,
+    model_name_str: &str,
+    session_key: Option<&str>,
+) -> (Vec<&'c crate::config::Channel>, Option<String>) {
+    // 3. Resolve Channels
+    //
+    // The matched rule yields an *ordered* candidate list (primary first, then
+    // in-rule failovers). The retry loop below walks it, only reaching for the
+    // router's `fallback_channels` once every candidate has failed. When any rule
+    // opts into session affinity we derive a conversation-stable key so a
+    // multi-turn conversation keeps hitting the same channel (prompt-cache
+    // alignment); the key is computed only when needed.
+    let mut channels: Vec<&crate::config::Channel> = Vec::new();
+    let sticky_key = if router.rules.iter().any(|rule| rule.session_affinity) {
+        session_key
+    } else {
+        None
+    };
+    let candidates = state
+        .selector
+        .select_candidates(router, model_name_str, sticky_key);
+    let mut matched_rule = candidates
+        .as_ref()
+        .and_then(|selection| selection.matched_rule.clone());
+
+    if let Some(selection) = candidates.as_ref() {
+        for name in &selection.channels {
+            if let Some(ch) = config.channels.iter().find(|c| c.name == *name) {
+                if !channels.iter().any(|c| c.name == ch.name) {
+                    channels.push(ch);
+                }
+            } else {
+                tracing::warn!("Rule channel not found: {}", name);
+            }
+        }
+        tracing::info!(
+            "Channels Resolved: [{}] (model={}, matched_rule={}, sticky={})",
+            selection.channels.join(", "),
+            model_name_str,
+            selection.matched_rule.as_deref().unwrap_or("n/a"),
+            sticky_key.is_some()
+        );
+    }
+
+    if channels.is_empty() {
+        // No rule matched (or none of its channels exist) — resolve directly to
+        // the router's fallback channels.
+        if matched_rule.is_none() {
+            matched_rule = Some("fallback".to_string());
+        }
+        tracing::info!(
+            "Fallback Triggered: No rule matched for model '{}' or its channels are missing. Trying fallback channels.",
+            model_name_str
+        );
+
+        for fb_name in &router.fallback_channels {
+            if let Some(channel) = config.channels.iter().find(|c| c.name == *fb_name) {
+                tracing::info!("Channel Resolved (Fallback): {}", channel.name);
+                if !channels.iter().any(|c| c.name == channel.name) {
+                    channels.push(channel);
+                }
+            } else {
+                tracing::warn!("Fallback channel not found: {}", fb_name);
+            }
+        }
+
+        if channels.is_empty() {
+            tracing::error!(
+                "Channel Resolution Failed: All Channels Failed for model '{}'",
+                model_name_str
+            );
+        }
+    }
+
+    (channels, matched_rule)
+}
 
 pub(super) async fn process_request(
     state: Arc<AppState>,
@@ -110,115 +363,17 @@ pub(super) async fn process_request(
     // affinity reuses this same value when a matched rule opts in (see below).
     let session_key = crate::request_hash::session_key(&bytes);
 
-    // 2. Resolve Router
-    let router_name = if let Some(name) = router_name_override {
-        name
-    } else if let Some(ctx) = parts.extensions.get::<TeamContext>() {
-        // Team Flow
-        let team = config.teams.iter().find(|t| t.id == ctx.team_id);
-        if team.is_none() {
-            return protocol_error_response(route, StatusCode::UNAUTHORIZED, "Team not found");
-        }
-        let team = team.unwrap();
-
-        // Check Allowed Models
-        let policy = &team.policy;
-        if !policy.is_model_allowed(model_name_str) {
-            tracing::warn!(
-                "Policy Failed: Model '{}' not allowed by team policy",
-                model_name_str
-            );
-            return protocol_error_response(
-                route,
-                StatusCode::FORBIDDEN,
-                "Model not allowed by team policy",
-            );
-        }
-
-        // Check Allowed Routers (Mandatory)
-        let allowed_routers = &policy.allowed_routers;
-        if allowed_routers.is_empty() {
-            tracing::warn!(
-                "Policy Failed: No allowed routers configured for team '{}'",
-                ctx.team_id
-            );
-            return protocol_error_response(
-                route,
-                StatusCode::FORBIDDEN,
-                "No allowed routers configured for team",
-            );
-        }
-
-        let mut selected_router = None;
-        for r_name in allowed_routers {
-            if config
-                .routers
-                .iter()
-                .find(|r| r.name == *r_name)
-                .filter(|router| {
-                    state
-                        .selector
-                        .select_channel(router, model_name_str)
-                        .is_some()
-                })
-                .is_some()
-            {
-                selected_router = Some(r_name.clone());
-                break;
-            }
-        }
-
-        match selected_router {
-            Some(name) => name,
-            None => {
-                tracing::warn!(
-                    "Router Resolution Failed: No matching router found for model '{}' in allowed routers",
-                    model_name_str
-                );
-                return protocol_error_response(
-                    route,
-                    StatusCode::NOT_FOUND,
-                    "No matching router found for model in allowed routers",
-                );
-            }
-        }
-    } else {
-        // Global Auth Flow (Legacy/Admin)
-        if let Err(resp) = enforce_global_auth(&config, &headers) {
-            return if matches!(route, RouteKind::GeminiNative) {
-                protocol_error_response(route, StatusCode::UNAUTHORIZED, "unauthorized")
-            } else {
-                resp
-            };
-        }
-
-        // Try to find ANY router that handles the model
-        let mut selected_router = None;
-        for router in config.routers.iter() {
-            if state
-                .selector
-                .select_channel(router, model_name_str)
-                .is_some()
-            {
-                selected_router = Some(router.name.clone());
-                break;
-            }
-        }
-
-        match selected_router {
-            Some(name) => name,
-            None => {
-                tracing::warn!(
-                    "Router Resolution Failed: No matching router found for model '{}'",
-                    model_name_str
-                );
-                return protocol_error_response(
-                    route,
-                    StatusCode::BAD_REQUEST,
-                    "No matching router found for model",
-                );
-            }
-        }
+    let router_name = match resolve_router_name(
+        &state,
+        &config,
+        &parts.extensions,
+        &headers,
+        route,
+        model_name_str,
+        router_name_override,
+    ) {
+        Ok(name) => name,
+        Err(resp) => return resp,
     };
 
     let Some(router) = config.routers.iter().find(|r| r.name == router_name) else {
@@ -238,97 +393,45 @@ pub(super) async fn process_request(
     tracing::info!("Router Resolved: {}", router.name);
     tracing::Span::current().record("router_name", &router.name);
 
-    // 3. Resolve Channels
-    //
-    // The matched rule yields an *ordered* candidate list (primary first, then
-    // in-rule failovers). The retry loop below walks it, only reaching for the
-    // router's `fallback_channels` once every candidate has failed. When any rule
-    // opts into session affinity we derive a conversation-stable key so a
-    // multi-turn conversation keeps hitting the same channel (prompt-cache
-    // alignment); the key is computed only when needed.
-    let mut channels: Vec<&crate::config::Channel> = Vec::new();
-    let sticky_key = if router.rules.iter().any(|rule| rule.session_affinity) {
-        session_key.clone()
-    } else {
-        None
+    let (mut channels, matched_rule) = resolve_candidate_channels(
+        &state,
+        &config,
+        router,
+        model_name_str,
+        session_key.as_deref(),
+    );
+
+    let route_label = match route {
+        RouteKind::Openai => "openai",
+        RouteKind::Anthropic => "anthropic",
+        RouteKind::GeminiNative => "gemini_native",
     };
-    let candidates =
-        state
-            .selector
-            .select_candidates(router, model_name_str, sticky_key.as_deref());
-    let mut matched_rule = candidates
-        .as_ref()
-        .and_then(|selection| selection.matched_rule.clone());
-
-    if let Some(selection) = candidates.as_ref() {
-        for name in &selection.channels {
-            if let Some(ch) = config.channels.iter().find(|c| c.name == *name) {
-                if !channels.iter().any(|c| c.name == ch.name) {
-                    channels.push(ch);
-                }
-            } else {
-                tracing::warn!("Rule channel not found: {}", name);
-            }
-        }
-        tracing::info!(
-            "Channels Resolved: [{}] (model={}, matched_rule={}, sticky={})",
-            selection.channels.join(", "),
-            model_name_str,
-            selection.matched_rule.as_deref().unwrap_or("n/a"),
-            sticky_key.is_some()
-        );
-    }
-
-    if channels.is_empty() {
-        // No rule matched (or none of its channels exist) — resolve directly to
-        // the router's fallback channels.
-        if matched_rule.is_none() {
-            matched_rule = Some("fallback".to_string());
-        }
-        tracing::info!(
-            "Fallback Triggered: No rule matched for model '{}' or its channels are missing. Trying fallback channels.",
-            model_name_str
-        );
-
-        for fb_name in &router.fallback_channels {
-            if let Some(channel) = config.channels.iter().find(|c| c.name == *fb_name) {
-                tracing::info!("Channel Resolved (Fallback): {}", channel.name);
-                if !channels.iter().any(|c| c.name == channel.name) {
-                    channels.push(channel);
-                }
-            } else {
-                tracing::warn!("Fallback channel not found: {}", fb_name);
-            }
-        }
-
-        if channels.is_empty() {
-            tracing::error!(
-                "Channel Resolution Failed: All Channels Failed for model '{}'",
-                model_name_str
-            );
-        }
-    }
+    let attribution = Attribution {
+        request_id: request_id.clone(),
+        team_id: team_id.clone(),
+        router_name: router_name.clone(),
+        matched_rule: matched_rule.clone(),
+        model: model_name_str.to_string(),
+        route_label,
+        client_info: client_info.clone(),
+        session_key: session_key.clone(),
+        req_hash: req_hash.clone(),
+    };
 
     if channels.is_empty() {
         tracing::warn!(
             "Channel Resolution Failed: No channels configured or matched for router: {}",
             router_name
         );
-        state.usage_logger.log_failure(
-            request_id.as_deref(),
-            &team_id,
-            &router_name,
-            matched_rule.as_deref(),
+        attribution.log_failure(
+            &state.usage_logger,
             "unresolved",
-            model_name_str,
             None,
             false,
-            StatusCode::BAD_GATEWAY.as_u16() as i64,
+            StatusCode::BAD_GATEWAY,
             "no channels configured or matched",
             None,
             None,
-            &client_info,
-            session_key.as_deref(),
         );
         return protocol_error_response(
             route,
@@ -337,11 +440,6 @@ pub(super) async fn process_request(
         );
     }
 
-    let route_label = match route {
-        RouteKind::Openai => "openai",
-        RouteKind::Anthropic => "anthropic",
-        RouteKind::GeminiNative => "gemini_native",
-    };
     state
         .metrics
         .request_total
@@ -380,32 +478,14 @@ pub(super) async fn process_request(
                 channel.name
             );
             tracing::warn!("Request Rejected: {}", message);
-            state
-                .access_audit
-                .audit(&channel.provider_type, route, false);
-            state
-                .metrics
-                .error_total
-                .with_label_values(&[route_label, &router_name])
-                .inc();
-            state.database.log_error(route_label, &router_name);
-            state.usage_logger.log_failure(
-                request_id.as_deref(),
-                &team_id,
-                &router_name,
-                matched_rule.as_deref(),
-                &channel.name,
-                model_name_str,
-                None,
+            return attribution.reject(
+                &state,
+                route,
+                channel,
                 fallback_triggered,
-                StatusCode::BAD_GATEWAY.as_u16() as i64,
+                StatusCode::BAD_GATEWAY,
                 &message,
-                None,
-                None,
-                &client_info,
-                session_key.as_deref(),
             );
-            return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
         }
 
         if index > 0 {
@@ -469,32 +549,14 @@ pub(super) async fn process_request(
             let request_summary = summarize_anthropic_request(&effective_bytes);
             tracing::warn!("Gemini replay rejection summary: {}", request_summary);
             tracing::warn!("Request Rejected: {}", reason);
-            state
-                .access_audit
-                .audit(&channel.provider_type, route, false);
-            state
-                .metrics
-                .error_total
-                .with_label_values(&[route_label, &router_name])
-                .inc();
-            state.database.log_error(route_label, &router_name);
-            state.usage_logger.log_failure(
-                request_id.as_deref(),
-                &team_id,
-                &router_name,
-                matched_rule.as_deref(),
-                &channel.name,
-                model_name_str,
-                None,
+            return attribution.reject(
+                &state,
+                route,
+                channel,
                 fallback_triggered,
-                StatusCode::BAD_REQUEST.as_u16() as i64,
+                StatusCode::BAD_REQUEST,
                 &reason,
-                None,
-                None,
-                &client_info,
-                session_key.as_deref(),
             );
-            return protocol_error_response(route, StatusCode::BAD_REQUEST, &reason);
         }
 
         for attempt in 0..max_attempts {
@@ -583,19 +645,12 @@ pub(super) async fn process_request(
                         let wrapped = crate::usage::wrap_response(
                             response,
                             route,
-                            request_id.clone(),
-                            team_id.clone(),
-                            router_name.clone(),
-                            matched_rule.clone(),
+                            &attribution,
                             channel.name.clone(),
-                            model_name_str.to_string(),
                             state.usage_logger.clone(),
                             state.metrics.clone(),
                             Some(elapsed),
                             fallback_triggered,
-                            client_info.clone(),
-                            req_hash.clone(),
-                            session_key.clone(),
                         )
                         .await;
                         if crate::usage::is_upstream_body_error_response(&wrapped) {
@@ -710,23 +765,17 @@ pub(super) async fn process_request(
                         if !stored_error_body.is_empty() {
                             tracing::warn!("Upstream Error Body: {}", stored_error_body);
                         }
-                        state.usage_logger.log_failure(
-                            request_id.as_deref(),
-                            &team_id,
-                            &router_name,
-                            matched_rule.as_deref(),
+                        attribution.log_failure(
+                            &state.usage_logger,
                             &channel.name,
-                            model_name_str,
                             Some(elapsed),
                             fallback_triggered,
-                            status.as_u16() as i64,
+                            status,
                             status
                                 .canonical_reason()
                                 .unwrap_or("upstream request failed"),
                             provider_trace_id.as_deref(),
                             Some(stored_error_body.as_str()),
-                            &client_info,
-                            session_key.as_deref(),
                         );
 
                         // Convert error if needed (e.g. for Anthropic)
@@ -810,21 +859,15 @@ pub(super) async fn process_request(
         .last()
         .map(|channel| channel.name.as_str())
         .unwrap_or("unresolved");
-    state.usage_logger.log_failure(
-        request_id.as_deref(),
-        &team_id,
-        &router_name,
-        matched_rule.as_deref(),
+    attribution.log_failure(
+        &state.usage_logger,
         last_channel,
-        model_name_str,
         None,
         fallback_triggered,
-        StatusCode::BAD_GATEWAY.as_u16() as i64,
+        StatusCode::BAD_GATEWAY,
         "all channels failed",
         None,
         None,
-        &client_info,
-        session_key.as_deref(),
     );
 
     protocol_error_response(route, StatusCode::BAD_GATEWAY, "all channels failed")
@@ -921,6 +964,18 @@ pub(super) async fn process_gemini_native_direct_pass(
         );
     };
     let matched_rule = selection.matched_rule.clone();
+    let attribution = Attribution {
+        request_id: request_id.clone(),
+        team_id: team_id.clone(),
+        router_name: router_name.clone(),
+        matched_rule: matched_rule.clone(),
+        model: routing_model.clone(),
+        route_label,
+        client_info: client_info.clone(),
+        session_key: None,
+        req_hash: None,
+    };
+
     let Some(channel) = config
         .channels
         .iter()
@@ -938,20 +993,14 @@ pub(super) async fn process_gemini_native_direct_pass(
             "Gemini native route resolved to non-Gemini channel '{}'",
             channel.name
         );
-        state.usage_logger.log_failure(
-            request_id.as_deref(),
-            &team_id,
-            &router_name,
-            matched_rule.as_deref(),
+        attribution.log_failure(
+            &state.usage_logger,
             &channel.name,
-            &routing_model,
             None,
             false,
-            StatusCode::BAD_GATEWAY.as_u16() as i64,
+            StatusCode::BAD_GATEWAY,
             &message,
             None,
-            None,
-            &client_info,
             None,
         );
         return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
@@ -1007,20 +1056,14 @@ pub(super) async fn process_gemini_native_direct_pass(
         Ok(resp) => resp,
         Err(err) => {
             let message = format_error_chain(&err);
-            state.usage_logger.log_failure(
-                request_id.as_deref(),
-                &team_id,
-                &router_name,
-                matched_rule.as_deref(),
+            attribution.log_failure(
+                &state.usage_logger,
                 &channel.name,
-                &routing_model,
                 None,
                 false,
-                StatusCode::BAD_GATEWAY.as_u16() as i64,
+                StatusCode::BAD_GATEWAY,
                 &message,
                 None,
-                None,
-                &client_info,
                 None,
             );
             return protocol_error_response(route, StatusCode::BAD_GATEWAY, &message);
@@ -1045,23 +1088,17 @@ pub(super) async fn process_gemini_native_direct_pass(
         let error_body_bytes = resp.bytes().await.unwrap_or_default();
         let stored_error_body =
             truncate_for_storage(&String::from_utf8_lossy(&error_body_bytes), 4000);
-        state.usage_logger.log_failure(
-            request_id.as_deref(),
-            &team_id,
-            &router_name,
-            matched_rule.as_deref(),
+        attribution.log_failure(
+            &state.usage_logger,
             &channel.name,
-            &routing_model,
             Some(elapsed),
             false,
-            status.as_u16() as i64,
+            status,
             status
                 .canonical_reason()
                 .unwrap_or("upstream request failed"),
             provider_trace_id.as_deref(),
             Some(stored_error_body.as_str()),
-            &client_info,
-            None,
         );
         return response_from_upstream_bytes(status, &response_headers, error_body_bytes);
     }
@@ -1072,25 +1109,18 @@ pub(super) async fn process_gemini_native_direct_pass(
         resp,
         response_timeouts_for(&config.global.timeouts, channel),
     );
+    // Native-Gemini direct-pass streams the request body without buffering it,
+    // so there is nothing to fingerprint here; the attribution carries NULL for
+    // both the request fingerprint and the conversation/session key.
     let wrapped = crate::usage::wrap_response(
         response,
         route,
-        request_id,
-        team_id,
-        router_name,
-        matched_rule,
+        &attribution,
         channel.name.clone(),
-        routing_model,
         state.usage_logger.clone(),
         state.metrics.clone(),
         Some(elapsed),
         false,
-        client_info.clone(),
-        // Native-Gemini direct-pass streams the request body without buffering
-        // it, so there is nothing to fingerprint here; these rows get NULL for
-        // both the request fingerprint and the conversation/session key.
-        None,
-        None,
     )
     .await;
     state.access_audit.audit(
@@ -1104,7 +1134,96 @@ pub(super) async fn process_gemini_native_direct_pass(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{MatchSpec, RouterRule, TargetChannel};
+    use crate::server::test_fixtures::*;
     use serde_json::json;
+
+    // Channel resolution had no direct coverage while it lived inside
+    // process_request — reaching it meant driving a whole HTTP request.
+
+    fn router_with(rules: Vec<RouterRule>, fallback: Vec<&str>) -> crate::config::Router {
+        crate::config::Router {
+            name: "r1".to_string(),
+            rules,
+            channels: vec![],
+            strategy: "priority".to_string(),
+            metadata: None,
+            fallback_channels: fallback.into_iter().map(String::from).collect(),
+        }
+    }
+
+    fn rule_for(models: &[&str], channels: &[&str]) -> RouterRule {
+        RouterRule {
+            session_affinity: false,
+            match_spec: MatchSpec {
+                models: models.iter().map(|m| m.to_string()).collect(),
+            },
+            channels: channels
+                .iter()
+                .map(|c| TargetChannel {
+                    name: c.to_string(),
+                    weight: 1,
+                })
+                .collect(),
+            strategy: "priority".to_string(),
+        }
+    }
+
+    #[test]
+    fn candidate_channels_come_from_the_matched_rule() {
+        let config = create_test_config();
+        let names: Vec<String> = config.channels.iter().map(|c| c.name.clone()).collect();
+        let first = names.first().expect("fixture has a channel").clone();
+        let router = router_with(vec![rule_for(&["*"], &[&first])], vec![]);
+        let (state, _db) = state_with_config(config.clone());
+
+        let (channels, matched) =
+            resolve_candidate_channels(&state, &config, &router, "gpt-4", None);
+
+        assert_eq!(
+            channels.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec![first.as_str()]
+        );
+        assert!(matched.is_some(), "a matched rule must be attributed");
+    }
+
+    #[test]
+    fn unmatched_model_falls_back_to_the_routers_fallback_channels() {
+        let config = create_test_config();
+        let first = config.channels[0].name.clone();
+        // A rule that cannot match, plus a usable fallback.
+        let router = router_with(vec![rule_for(&["claude-*"], &[&first])], vec![&first]);
+        let (state, _db) = state_with_config(config.clone());
+
+        let (channels, matched) =
+            resolve_candidate_channels(&state, &config, &router, "gpt-4", None);
+
+        assert_eq!(
+            channels.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec![first.as_str()]
+        );
+        assert_eq!(
+            matched.as_deref(),
+            Some("fallback"),
+            "usage must be attributed to the fallback path, not a rule"
+        );
+    }
+
+    #[test]
+    fn nothing_resolvable_yields_no_candidates() {
+        let config = create_test_config();
+        // Rule points at a channel that does not exist, and no fallback.
+        let router = router_with(vec![rule_for(&["*"], &["ghost"])], vec!["also-ghost"]);
+        let (state, _db) = state_with_config(config.clone());
+
+        let (channels, _matched) =
+            resolve_candidate_channels(&state, &config, &router, "gpt-4", None);
+
+        assert!(
+            channels.is_empty(),
+            "missing channels must not be invented; the caller reports the failure"
+        );
+    }
 
     #[test]
     fn gemini_missing_signature_guard_triggers_only_for_tool_result_followups() {

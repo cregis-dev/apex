@@ -549,23 +549,76 @@ fn upstream_body_error_response(route: RouteKind, timed_out: bool) -> Response<B
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The per-request facts every usage row is attributed to, fixed once routing
+/// has been decided.
+///
+/// These seven values were passed identically to all eight `log_failure` call
+/// sites in this module — carrying them once keeps each failure exit to the
+/// handful of arguments that actually differ.
+pub struct Attribution {
+    pub request_id: Option<String>,
+    pub team_id: String,
+    pub router_name: String,
+    pub matched_rule: Option<String>,
+    pub model: String,
+    pub route_label: &'static str,
+    pub client_info: crate::utils::ClientInfo,
+    pub session_key: Option<String>,
+    pub req_hash: Option<String>,
+}
+
+impl Attribution {
+    /// Record a request that failed, without deciding how to answer the client.
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_failure(
+        &self,
+        logger: &UsageLogger,
+        channel: &str,
+        latency_ms: Option<f64>,
+        fallback_triggered: bool,
+        status: StatusCode,
+        message: &str,
+        provider_trace_id: Option<&str>,
+        provider_error_body: Option<&str>,
+    ) {
+        logger.log_failure(
+            self.request_id.as_deref(),
+            &self.team_id,
+            &self.router_name,
+            self.matched_rule.as_deref(),
+            channel,
+            &self.model,
+            latency_ms,
+            fallback_triggered,
+            status.as_u16() as i64,
+            message,
+            provider_trace_id,
+            provider_error_body,
+            &self.client_info,
+            self.session_key.as_deref(),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn wrap_response(
     response: Response<Body>,
     route: RouteKind,
-    request_id: Option<String>,
-    team_id: String,
-    router: String,
-    matched_rule: Option<String>,
+    attribution: &Attribution,
     channel: String,
-    model: String,
     logger: Arc<UsageLogger>,
     metrics: Arc<MetricsState>,
     latency_ms: Option<f64>,
     fallback_triggered: bool,
-    client_info: crate::utils::ClientInfo,
-    request_hash: Option<String>,
-    session_key: Option<String>,
 ) -> Response<Body> {
+    let request_id = attribution.request_id.clone();
+    let team_id = attribution.team_id.clone();
+    let router = attribution.router_name.clone();
+    let matched_rule = attribution.matched_rule.clone();
+    let model = attribution.model.clone();
+    let client_info = attribution.client_info.clone();
+    let request_hash = attribution.req_hash.clone();
+    let session_key = attribution.session_key.clone();
     let is_sse = response
         .headers()
         .get("content-type")
@@ -672,9 +725,24 @@ mod tests {
             .expect_err("stream error should surface as a body error")
     }
 
+    fn test_attribution() -> Attribution {
+        Attribution {
+            request_id: Some("req-1".to_string()),
+            team_id: "team1".to_string(),
+            router_name: "r1".to_string(),
+            matched_rule: Some("m1-*".to_string()),
+            model: "minimax-m3".to_string(),
+            route_label: "openai",
+            client_info: crate::utils::ClientInfo::default(),
+            session_key: None,
+            req_hash: None,
+        }
+    }
+
     /// The retry decision hinges on spotting the guard's timeout after axum has
     /// wrapped it, so assert against a real `to_bytes` failure rather than a
     /// hand-built error.
+
     #[tokio::test]
     async fn body_timeout_is_detected_through_the_axum_error_chain() {
         assert!(is_timeout_error(&body_error(io::ErrorKind::TimedOut).await));
@@ -942,19 +1010,12 @@ mod tests {
         let wrapped = wrap_response(
             response,
             crate::providers::RouteKind::Openai,
-            Some("req-1".to_string()),
-            "team1".to_string(),
-            "r1".to_string(),
-            Some("m1-*".to_string()),
+            &test_attribution(),
             "minimax".to_string(),
-            "minimax-m3".to_string(),
             logger,
             metrics,
             Some(42.0),
             false,
-            crate::utils::ClientInfo::default(),
-            None,
-            None,
         )
         .await;
 
@@ -995,19 +1056,12 @@ mod tests {
         let wrapped = wrap_response(
             response,
             crate::providers::RouteKind::Anthropic,
-            Some("req-1".to_string()),
-            "team1".to_string(),
-            "r1".to_string(),
-            Some("m1-*".to_string()),
+            &test_attribution(),
             "minimax".to_string(),
-            "minimax-m3".to_string(),
             logger,
             metrics,
             Some(42.0),
             false,
-            crate::utils::ClientInfo::default(),
-            None,
-            None,
         )
         .await;
 
@@ -1043,19 +1097,12 @@ mod tests {
         let wrapped = wrap_response(
             response,
             crate::providers::RouteKind::Anthropic,
-            Some("req-1".to_string()),
-            "team1".to_string(),
-            "r1".to_string(),
-            Some("m1-*".to_string()),
+            &test_attribution(),
             "minimax".to_string(),
-            "minimax-m3".to_string(),
             logger,
             metrics,
             Some(42.0),
             false,
-            crate::utils::ClientInfo::default(),
-            None,
-            None,
         )
         .await;
 

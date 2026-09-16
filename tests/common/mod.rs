@@ -10,6 +10,7 @@ use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -78,6 +79,54 @@ pub async fn spawn_upstream_status(status: StatusCode, body: &'static str) -> So
     });
 
     addr
+}
+
+/// An upstream that rejects its first `fail_times` requests with `fail_status`
+/// and serves the normal OK body afterwards. Returns the hit counter so a test
+/// can assert how many attempts actually reached it.
+pub async fn spawn_upstream_flaky(
+    fail_times: usize,
+    fail_status: StatusCode,
+) -> (SocketAddr, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_for_app = Arc::clone(&hits);
+
+    let app = axum::Router::new().fallback(move || {
+        let hits = Arc::clone(&hits_for_app);
+        async move {
+            let seen = hits.fetch_add(1, Ordering::SeqCst);
+            if seen < fail_times {
+                return (
+                    fail_status,
+                    axum::response::Json(serde_json::json!({
+                        "error": { "message": "transient", "type": "upstream_error" }
+                    })),
+                );
+            }
+            (
+                StatusCode::OK,
+                axum::response::Json(serde_json::json!({
+                    "id": "test",
+                    "object": "chat.completion",
+                    "created": 1677652288,
+                    "choices": [{
+                        "index": 0,
+                        "message": { "role": "assistant", "content": "recovered" },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": { "prompt_tokens": 9, "completion_tokens": 12, "total_tokens": 21 }
+                })),
+            )
+        }
+    });
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    (addr, hits)
 }
 
 pub async fn spawn_upstream_models() -> SocketAddr {
