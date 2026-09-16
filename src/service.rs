@@ -271,11 +271,27 @@ pub fn restart_service(definition: &ServiceDefinition) -> anyhow::Result<()> {
 
 pub fn status_service(definition: &ServiceDefinition) -> anyhow::Result<()> {
     match definition.manager {
-        ServiceManager::Systemd => run_command(
-            Command::new("systemctl")
-                .arg("status")
-                .arg(systemd_unit(definition)),
-        )?,
+        ServiceManager::Systemd => {
+            // `systemctl status` exits 3 for an inactive unit, which
+            // `run_command` turns into a hard error — so an installed service
+            // that simply is not running read as a broken install, the same
+            // way an unloaded launchd label did. Ask about the state first.
+            let path = service_path(definition);
+            if !path.exists() {
+                bail!(
+                    "service definition not found at {}; run service install first",
+                    path.display()
+                );
+            }
+            let unit = systemd_unit(definition);
+            // Only a definitive "inactive" becomes the idle status; if
+            // systemctl could not be run at all, that is still an error.
+            if systemd_probe_service_active(&unit)? {
+                run_command(Command::new("systemctl").arg("status").arg(&unit))?;
+            } else {
+                println!("{}", service_not_running_message(definition, &path, &unit));
+            }
+        }
         ServiceManager::Launchd => {
             // `launchctl print` on an unloaded label fails with a bare
             // "Could not find service ... in domain for user gui: <uid>",
@@ -297,17 +313,25 @@ pub fn status_service(definition: &ServiceDefinition) -> anyhow::Result<()> {
             if launchd_probe_service_loaded(&target)? {
                 run_command(Command::new("launchctl").arg("print").arg(&target))?;
             } else {
-                println!("{}", launchd_not_loaded_message(definition, &path, &target));
+                println!(
+                    "{}",
+                    service_not_running_message(definition, &path, &target)
+                );
             }
         }
     }
     Ok(())
 }
 
-/// Status text for a launchd service whose plist is installed but not loaded.
-fn launchd_not_loaded_message(definition: &ServiceDefinition, path: &Path, target: &str) -> String {
+/// Status text for a service whose definition is installed but not running.
+/// `target` is the launchd label or the systemd unit, whichever applies.
+fn service_not_running_message(
+    definition: &ServiceDefinition,
+    path: &Path,
+    target: &str,
+) -> String {
     format!(
-        "Service installed but not loaded: {target}\n\
+        "Service installed but not running: {target}\n\
          Service definition: {path}\n\
          Start it with: {binary} service start --install-dir {install_dir}",
         path = path.display(),
@@ -423,6 +447,21 @@ fn launchd_target(domain: &str, service_name: &str) -> String {
 /// `Ok(true/false)` for loaded / not loaded; `Err` only when launchctl could
 /// not be run at all (missing binary, bad PATH). Callers that cannot act on
 /// the distinction use [`launchd_service_is_loaded`].
+/// `Ok(true/false)` for active / inactive; `Err` only when systemctl could not
+/// be run at all. Mirrors [`launchd_probe_service_loaded`].
+fn systemd_probe_service_active(unit: &str) -> anyhow::Result<bool> {
+    let status = Command::new("systemctl")
+        .arg("is-active")
+        .arg("--quiet")
+        .arg(unit)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to run systemctl is-active {unit}"))?;
+    Ok(status.success())
+}
+
 fn launchd_probe_service_loaded(target: &str) -> anyhow::Result<bool> {
     let status = Command::new("launchctl")
         .arg("print")
@@ -467,7 +506,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launchd_not_loaded_message_names_plist_and_start_command() {
+    fn not_running_message_names_definition_and_start_command() {
         let definition = ServiceDefinition::new(
             PathBuf::from("/Users/alice/.apex"),
             PathBuf::from("/Users/alice/.apex/config.json"),
@@ -475,11 +514,11 @@ mod tests {
             ServiceManager::Launchd,
         );
         let path = PathBuf::from("/Users/alice/Library/LaunchAgents/dev.cregis.apex.plist");
-        let message = launchd_not_loaded_message(&definition, &path, "gui/501/dev.cregis.apex");
+        let message = service_not_running_message(&definition, &path, "gui/501/dev.cregis.apex");
 
         // The three things a user needs to act on: that it is installed but
         // idle, where the plist lives, and how to start it.
-        assert!(message.contains("Service installed but not loaded: gui/501/dev.cregis.apex"));
+        assert!(message.contains("Service installed but not running: gui/501/dev.cregis.apex"));
         assert!(message.contains("/Users/alice/Library/LaunchAgents/dev.cregis.apex.plist"));
         assert!(
             message
@@ -507,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn launchd_not_loaded_message_quotes_paths_with_spaces() {
+    fn not_running_message_quotes_paths_with_spaces() {
         let definition = ServiceDefinition::new(
             PathBuf::from("/Users/Alice Smith/.apex"),
             PathBuf::from("/Users/Alice Smith/.apex/config.json"),
@@ -515,11 +554,29 @@ mod tests {
             ServiceManager::Launchd,
         );
         let path = PathBuf::from("/Users/Alice Smith/Library/LaunchAgents/dev.cregis.apex.plist");
-        let message = launchd_not_loaded_message(&definition, &path, "gui/501/dev.cregis.apex");
+        let message = service_not_running_message(&definition, &path, "gui/501/dev.cregis.apex");
 
         assert!(message.contains(
             "'/Users/Alice Smith/.apex/apex' service start --install-dir '/Users/Alice Smith/.apex'"
         ));
+    }
+
+    /// systemd reports the same shape, with the unit name as the target — the
+    /// case that used to surface as "service command failed: exit status: 3".
+    #[test]
+    fn not_running_message_covers_systemd_units_too() {
+        let definition = ServiceDefinition::new(
+            PathBuf::from("/opt/apex"),
+            PathBuf::from("/opt/apex/config.json"),
+            "apex".to_string(),
+            ServiceManager::Systemd,
+        );
+        let path = PathBuf::from("/etc/systemd/system/apex.service");
+        let message = service_not_running_message(&definition, &path, "apex.service");
+
+        assert!(message.contains("Service installed but not running: apex.service"));
+        assert!(message.contains("/etc/systemd/system/apex.service"));
+        assert!(message.contains("/opt/apex/apex service start --install-dir /opt/apex"));
     }
 
     #[test]
