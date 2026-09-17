@@ -378,8 +378,6 @@ data: {"seq":42,"timestamp":"2026-08-03 14:44:49.318","level":"WARN","target":"a
 
 ---
 
-## 认证方式---
-
 ## Monitoring API
 
 ### GET /metrics
