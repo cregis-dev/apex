@@ -126,11 +126,11 @@ CREATE INDEX IF NOT EXISTS idx_usage_session_key ON usage_records(team_id, sessi
 | `output_tokens` | INTEGER | 否 | 输出 Token 数，默认 0 |
 | `latency_ms` | REAL | 是 | 上游延迟 (毫秒) |
 | `fallback_triggered` | INTEGER | 否 | 是否触发了 fallback (0/1)，默认 0 |
-| `status` | TEXT | 否 | 请求状态，默认 `'success'`；错误态为 `error` / `fallback_error` |
+| `status` | TEXT | 否 | 请求状态，默认 `'success'`。取值由**是否触发 fallback** × **成败**交叉决定，共四种：`success` / `fallback`（成功，后者表示切换通道后才成功）、`error` / `fallback_error`（失败）。消费方按 `success` 单值判断成功会漏掉 `fallback` |
 | `status_code` | INTEGER | 是 | HTTP 状态码 |
 | `error_message` | TEXT | 是 | 错误信息摘要 |
 | `provider_trace_id` | TEXT | 是 | 上游返回的追踪 ID |
-| `provider_error_body` | TEXT | 是 | 上游错误响应体原文 |
+| `provider_error_body` | TEXT | 是 | 上游错误响应体，**截断到前 4000 字符**（`truncate_for_storage`，按字符不是字节）；更长的响应体不会完整留存 |
 | `client` | TEXT | 是 | 客户端/工具归因 (Claude Code、Codex、SDK…)，来自请求头 |
 | `user_agent` | TEXT | 是 | 原始 User-Agent |
 | `cache_read_tokens` | INTEGER | 否 | 缓存命中 Token，默认 0；与 `input_tokens` 分开计价 |
@@ -241,8 +241,12 @@ CREATE INDEX IF NOT EXISTS idx_metrics_fallbacks_timestamp ON metrics_fallbacks(
 | `channel` | TEXT | Fallback 到的通道 |
 | `count` | INTEGER | Fallback 次数，默认 1 |
 
-> 该表**不含** `from_channel` / `reason` 列；原通道与失败原因需通过
-> `usage_records` 中同一 `request_id` 的记录还原。
+> 该表**不含** `from_channel` / `reason` 列，而且原通道与失败原因**也无法从
+> `usage_records` 还原**：上游返回错误后若 fallback 成功，管线直接 `break` 去下一个
+> 通道，不会为中间那个失败通道写失败行（见 `pipeline.rs` 的 `index == channels.len() - 1`
+> 分支）。最终只有一行 usage 记录，`channel` 是**最后成功的**那个，`status` 为
+> `fallback`、`fallback_triggered` 为 1 —— 能知道发生过 fallback，但不知道从哪个通道
+> 切走、因为什么。要定位原因得查日志。
 
 ---
 
@@ -515,7 +519,9 @@ pub struct RankingItem {
 | `rollup_usage(lookback_hours)` | 增量重算尾部窗口的小时桶 |
 | `backfill_rollup_if_empty()` | 表为空时做一次全量回填 |
 
-写入路径全部使用 `let _ = conn.execute(...)` 吞掉错误 —— 指标落库失败不应影响请求链路。
+**请求路径**上的记账（`log_usage` / `log_request` / `log_error` / `log_fallback` / `log_latency`）使用 `let _ = conn.execute(...)` 吞掉错误 —— 指标落库失败不应影响请求链路。
+
+**维护类方法不是这样**：`rollup_usage` / `backfill_rollup_if_empty` / `prune_rollup` / `cleanup_old_records` 都返回 `Result<u64>`，用 `?` 向上传播锁、查询、执行的失败，调用方必须处理。
 
 ### 查询
 
@@ -553,7 +559,7 @@ Schema 演进采用「建表语句写全量 + 追加幂等 `ALTER TABLE`」的�
 **新增一列的步骤:**
 
 ```rust
-// 1. 加到 CREATE TABLE (供新库使用) —— req_hash 是例外，仅走 ALTER
+// 1. 加到 CREATE TABLE (供新库使用) —— req_hash 与 session_key 是例外，两者仅走 ALTER
 // 2. 追加一条幂等迁移 (供老库升级)
 let _ = conn.execute("ALTER TABLE usage_records ADD COLUMN new_col TEXT", []);
 // 3. 若参与查询，同步更新 USAGE_RECORD_COLUMNS 与 map_usage_record 的位置索引
