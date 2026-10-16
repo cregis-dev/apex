@@ -7,16 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- Simplify the Channels page: group provider and protocol details beneath readable
-  channel names, align endpoints in a five-column table, and move counts into the
-  page header. Narrow windows can scroll the table with keyboard focus support.
-
 ### Planned
 - MCP Prompts API implementation
 - MCP Tools execution framework
 - Rule-based routing with content filtering
 - PII masking engine for data compliance
+
+## [0.12.2] - 2026-10-16
+
+### Changed
+- Simplify the Channels page: group provider and protocol details beneath readable
+  channel names, align endpoints in a five-column table, and move counts into the
+  page header. Narrow windows can scroll the table with keyboard focus support.
 
 ## [0.12.1] - 2026-09-16
 
