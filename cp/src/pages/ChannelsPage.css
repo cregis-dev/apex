@@ -1,0 +1,36 @@
+/* Keep long names readable and secondary metadata out of the name's line. */
+.channels-page { max-width: 1600px; width: 100%; }
+.channels-head { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.channels-summary { display: flex; flex-wrap: wrap; gap: 8px 20px; flex-shrink: 0; color: var(--muted); font-size: 12px; letter-spacing: 0.01em; }
+.channels-summary strong { color: var(--ink); font-size: 14px; font-weight: 600; margin-right: 4px; }
+.channels-table-scroll { overflow-x: auto; }
+.channels-table { table-layout: fixed; min-width: 960px; }
+.channels-table th { padding: 12px 18px; font-size: 10px; letter-spacing: 0.07em; }
+.channels-table td { padding: 18px; }
+.channel-col-identity { width: 28%; }
+.channel-col-billing { width: 156px; }
+.channel-col-key { width: 148px; }
+.channel-col-actions { width: 100px; }
+.channel-identity { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+.channel-identity > span { margin-top: 3px; }
+.channel-details { min-width: 0; }
+.channel-name { font-size: 13px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
+.channel-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 18px; letter-spacing: 0.01em; overflow-wrap: anywhere; }
+.channel-dual { color: var(--info); background: var(--info-soft); padding: 0 6px; border-radius: var(--r-xs); font-size: 10px; font-weight: 500; }
+.channel-endpoints { display: grid; gap: 6px; min-width: 0; }
+.channel-endpoint { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.channel-endpoint-label { flex: 0 0 62px; color: var(--muted); font-size: 10px; letter-spacing: 0.02em; }
+.channel-endpoint-url { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11px; color: var(--ink-2); }
+.channels-table .btn-ghost { width: 28px; height: 30px; justify-content: center; }
+.channels-table-scroll:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.channels-page button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+@media (max-width: 1200px) {
+  .channels-head { align-items: flex-start; flex-direction: column; gap: 14px; }
+}
+@media (max-width: 768px) {
+  .channels-page { padding: 24px 16px; }
+  .channels-table td { padding: 16px; }
+  .channels-table .btn-ghost { min-width: 36px; min-height: 44px; }
+  .channel-col-actions { width: 112px; }
+  .channel-col-key { width: 160px; }
+}

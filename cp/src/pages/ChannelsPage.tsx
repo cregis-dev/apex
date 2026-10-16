@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import Topbar from '../components/Topbar.tsx'
+import './ChannelsPage.css'
 import ProviderMark from '../components/ProviderMark.tsx'
 import Icon from '../components/Icon.tsx'
 import Empty from '../components/Empty.tsx'
@@ -24,34 +25,9 @@ const PROVIDER_TYPES: ProviderType[] = [
 
 function EndpointLine({ label, url }: { label: string; url: string }) {
   return (
-    <div
-      title={`${label}: ${url}`}
-      style={{
-        display: 'flex', alignItems: 'center', gap: 6, minWidth: 0,
-        fontFamily: 'var(--font-mono)', fontSize: 12,
-      }}
-    >
-      <span
-        style={{
-          flex: '0 0 auto',
-          fontFamily: 'var(--font-sans)',
-          fontSize: 10, fontWeight: 600,
-          textTransform: 'uppercase', letterSpacing: '0.04em',
-          color: 'var(--muted)',
-          width: 68,
-        }}
-      >
-        {label}
-      </span>
-      <span
-        style={{
-          flex: '1 1 0', minWidth: 0,
-          color: 'var(--ink-2)',
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}
-      >
-        {url}
-      </span>
+    <div className="channel-endpoint" title={`${label}: ${url}`}>
+      <span className="channel-endpoint-label">{label}</span>
+      <span className="channel-endpoint-url">{url}</span>
     </div>
   )
 }
@@ -622,10 +598,18 @@ export default function ChannelsPage() {
           </>
         }
       />
-      <div className="page-pad">
-        <div className="page-head">
-          <h1 className="page-title">Channels</h1>
-          <p className="page-sub">Upstream provider connections. Each channel maps to one provider account or endpoint.</p>
+      <div className="page-pad channels-page">
+        <div className="page-head channels-head">
+          <div>
+            <h1 className="page-title">Channels</h1>
+            <p className="page-sub">Manage upstream provider accounts and endpoints.</p>
+          </div>
+          {!isLoading && !error && channels.length > 0 && (
+            <div className="channels-summary" aria-label="Channel summary">
+              <span><strong>{channels.length}</strong> channels</span>
+              <span><strong>{channels.filter((c) => c.anthropic_base_url).length}</strong> dual protocol</span>
+            </div>
+          )}
         </div>
 
         {isLoading && (
@@ -642,22 +626,6 @@ export default function ChannelsPage() {
 
         {!isLoading && !error && (
           <>
-            {/* Summary strip */}
-            {channels.length > 0 && (
-              <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-                <div className="card" style={{ padding: '12px 20px', display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                  <span style={{ fontSize: 22, fontWeight: 600 }}>{channels.length}</span>
-                  <span style={{ fontSize: 13, color: 'var(--muted)' }}>Total</span>
-                </div>
-                <div className="card" style={{ padding: '12px 20px', display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                  <span style={{ fontSize: 22, fontWeight: 600 }}>
-                    {channels.filter((c) => c.anthropic_base_url).length}
-                  </span>
-                  <span style={{ fontSize: 13, color: 'var(--muted)' }}>Dual</span>
-                </div>
-              </div>
-            )}
-
             <div className="card" style={{ overflow: 'hidden' }}>
               {channels.length === 0 ? (
                 <Empty
@@ -666,24 +634,22 @@ export default function ChannelsPage() {
                   sub="Click ‘New channel’ to connect an upstream LLM provider."
                 />
               ) : (
-                <div style={{ overflowX: 'auto' }}>
-                <table className="table" style={{ tableLayout: 'fixed', width: '100%', minWidth: 940 }}>
+                <div className="channels-table-scroll" role="region" aria-label="Channels" tabIndex={0}>
+                <table className="table channels-table">
                   <colgroup>
-                    <col style={{ width: '21%' }} />
-                    <col style={{ width: '11%' }} />
-                    <col style={{ width: '13%' }} />
-                    <col style={{ width: '28%' }} />
-                    <col style={{ width: '17%' }} />
-                    <col style={{ width: '10%' }} />
+                    <col className="channel-col-identity" />
+                    <col />
+                    <col className="channel-col-billing" />
+                    <col className="channel-col-key" />
+                    <col className="channel-col-actions" />
                   </colgroup>
                   <thead>
                     <tr>
-                      <th>Channel</th>
-                      <th>Provider</th>
-                      <th>Billing</th>
-                      <th>Endpoints</th>
-                      <th>API Key</th>
-                      <th style={{ textAlign: 'right' }}>Actions</th>
+                      <th scope="col">Channel / Provider</th>
+                      <th scope="col">Endpoints</th>
+                      <th scope="col">Billing</th>
+                      <th scope="col">API Key</th>
+                      <th scope="col" style={{ textAlign: 'right' }}>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -692,45 +658,35 @@ export default function ChannelsPage() {
                       return (
                         <tr key={ch.name} className="row-hover">
                           <td>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-                              <ProviderMark kind={ch.provider_type} size={28} />
-                              <span className="ellipsis" title={ch.name} style={{ fontWeight: 500 }}>
-                                {ch.name}
-                              </span>
-                              {ch.anthropic_base_url && (
-                                <span
-                                  className="badge"
-                                  style={{
-                                    background: 'var(--info-soft)', color: 'var(--info)',
-                                    borderColor: 'transparent', flexShrink: 0,
-                                  }}
-                                  title="Channel exposes both an OpenAI-compatible endpoint and an Anthropic endpoint"
-                                >
-                                  Dual
-                                </span>
-                              )}
-                              {(() => {
-                                const entries = Object.entries(ch.model_map ?? {})
-                                if (entries.length === 0) return null
-                                return (
-                                  <span
-                                    className="badge"
-                                    style={{
-                                      background: 'var(--surface-2)', color: 'var(--ink-2)',
-                                      borderColor: 'transparent', flexShrink: 0,
-                                    }}
-                                    title={`Model mapping\n${entries.map(([k, v]) => `${k} → ${v}`).join('\n')}`}
-                                  >
-                                    {entries.length} mapped
-                                  </span>
-                                )
-                              })()}
+                            <div className="channel-identity">
+                              <ProviderMark kind={ch.provider_type} size={32} />
+                              <div className="channel-details">
+                                <div className="channel-name" title={ch.name}>{ch.name}</div>
+                                <div className="channel-meta">
+                                  <span>{ch.provider_type}</span>
+                                  {ch.anthropic_base_url && (
+                                    <span className="channel-dual" title="OpenAI-compatible and Anthropic endpoints">Dual</span>
+                                  )}
+                                  {Object.keys(ch.model_map ?? {}).length > 0 && (
+                                    <span
+                                      title={`Model mapping\n${Object.entries(ch.model_map ?? {}).map(([k, v]) => `${k} → ${v}`).join('\n')}`}
+                                    >
+                                      {Object.keys(ch.model_map ?? {}).length} mapped
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
                             </div>
                           </td>
                           <td>
-                            <span className="badge" title={ch.provider_type}>
-                              <span className="ellipsis">{ch.provider_type}</span>
-                            </span>
+                            {ch.base_url || ch.anthropic_base_url ? (
+                              <div className="channel-endpoints">
+                                {ch.base_url && <EndpointLine label="OpenAI" url={ch.base_url} />}
+                                {ch.anthropic_base_url && (
+                                  <EndpointLine label="Anthropic" url={ch.anthropic_base_url} />
+                                )}
+                              </div>
+                            ) : <span className="muted">—</span>}
                           </td>
                           <td>
                             {(() => {
@@ -757,16 +713,6 @@ export default function ChannelsPage() {
                             })()}
                           </td>
                           <td>
-                            {ch.base_url || ch.anthropic_base_url ? (
-                              <div style={{ display: 'grid', gap: 4, minWidth: 0 }}>
-                                {ch.base_url && <EndpointLine label="OpenAI" url={ch.base_url} />}
-                                {ch.anthropic_base_url && (
-                                  <EndpointLine label="Anthropic" url={ch.anthropic_base_url} />
-                                )}
-                              </div>
-                            ) : <span className="muted">—</span>}
-                          </td>
-                          <td>
                             {masked === undefined ? (
                               <span className="muted" style={{ fontSize: 12 }}>loading…</span>
                             ) : !masked ? (
@@ -790,6 +736,7 @@ export default function ChannelsPage() {
                                   style={{ padding: '0 6px', flexShrink: 0 }}
                                   onClick={() => copy(masked, 'Masked key copied')}
                                   title="Copy masked key"
+                                  aria-label={`Copy masked key for ${ch.name}`}
                                 >
                                   <Icon name="copy" size={12} />
                                 </button>
@@ -801,6 +748,7 @@ export default function ChannelsPage() {
                               <button
                                 className="btn btn-ghost btn-sm"
                                 title="Edit"
+                                aria-label={`Edit ${ch.name}`}
                                 onClick={() => openEdit(ch)}
                                 style={{ padding: '0 8px' }}
                               >
@@ -809,6 +757,7 @@ export default function ChannelsPage() {
                               <button
                                 className="btn btn-ghost btn-sm"
                                 title="Delete"
+                                aria-label={`Delete ${ch.name}`}
                                 onClick={() => { setPendingDelete(ch); setDeleteError(undefined) }}
                                 style={{ padding: '0 8px', color: 'var(--err)' }}
                               >
